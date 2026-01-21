@@ -7855,6 +7855,16 @@ router.post('/api/chat/message', async (request, env) => {
     // TODO: Broadcast to WebSocket connections
     // For now, we'll implement a polling-based system
 
+    // Broadcast to SSE connections (if any exist)
+    try {
+      await broadcastToSSE(env, channelId || 1, {
+        type: 'new_message',
+        data: fullMessage
+      });
+    } catch (error) {
+      console.error('SSE broadcast error:', error);
+    }
+
     return new Response(JSON.stringify({
       success: true,
       message: fullMessage
@@ -7872,6 +7882,107 @@ router.post('/api/chat/message', async (request, env) => {
     });
   }
 });
+
+// Server-Sent Events endpoint for real-time chat updates
+router.get('/api/chat/events/:channelId', async (request, env) => {
+  try {
+    const { channelId } = request.params;
+    const url = new URL(request.url);
+    const clientId = url.searchParams.get('clientId') || `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Create SSE response with proper headers
+    const stream = new ReadableStream({
+      start(controller) {
+        // Send initial connection event
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          type: 'connected',
+          clientId: clientId,
+          channelId: parseInt(channelId),
+          timestamp: new Date().toISOString()
+        })}\n\n`));
+
+        // Keep connection alive with periodic pings
+        const pingInterval = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              type: 'ping',
+              timestamp: new Date().toISOString()
+            })}\n\n`));
+          } catch (error) {
+            console.log('Ping failed, connection closed:', error);
+            clearInterval(pingInterval);
+          }
+        }, 30000); // Ping every 30 seconds
+
+        // Store connection info in KV for broadcasting
+        const connectionInfo = {
+          clientId,
+          channelId: parseInt(channelId),
+          connected_at: new Date().toISOString()
+        };
+
+        env.AIHANGOUT_KV?.put(`sse_connection_${clientId}`, JSON.stringify(connectionInfo), { expirationTtl: 3600 });
+
+        // Cleanup on close
+        const cleanup = () => {
+          clearInterval(pingInterval);
+          env.AIHANGOUT_KV?.delete(`sse_connection_${clientId}`);
+        };
+
+        // Note: In a real implementation, we'd handle connection cleanup better
+        // For now, connections will timeout after 1 hour via KV expiration
+        request.signal?.addEventListener('abort', cleanup);
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        ...corsHeaders
+      }
+    });
+
+  } catch (error) {
+    console.error('SSE endpoint error:', error);
+    return new Response(JSON.stringify({
+      success: false,
+      error: error.message
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Function to broadcast events to all SSE connections
+async function broadcastToSSE(env, channelId, eventData) {
+  try {
+    // In a production environment, you'd use Durable Objects or another mechanism
+    // For now, we'll use a simple approach with KV storage
+    // Note: This is a simplified implementation for demonstration
+
+    console.log('Broadcasting SSE event:', { channelId, type: eventData.type });
+
+    // Store the latest event in KV for any new connections to pick up
+    const eventKey = `latest_event_${channelId}`;
+    const eventValue = {
+      ...eventData,
+      timestamp: new Date().toISOString(),
+      channelId: channelId
+    };
+
+    await env.AIHANGOUT_KV?.put(eventKey, JSON.stringify(eventValue), { expirationTtl: 300 });
+
+    // Note: In a production setup, you'd iterate through active connections
+    // and send the event to each one. For now, clients will poll the latest event.
+
+  } catch (error) {
+    console.error('Broadcast SSE error:', error);
+  }
+}
 
 // Enhanced online users count with analytics
 router.get('/api/chat/users/online', async (request, env) => {

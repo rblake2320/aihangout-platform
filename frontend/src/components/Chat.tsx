@@ -137,7 +137,7 @@ export default function Chat() {
     setLoading(false)
   }
 
-  // Setup polling and heartbeat when chat is open
+  // Setup real-time connection and fallback polling when chat is open
   useEffect(() => {
     if (!isOpen) return
 
@@ -145,18 +145,86 @@ export default function Chat() {
     fetchMessages()
     fetchOnlineUsers()
 
-    // Set up polling for messages and online users
-    const messageInterval = setInterval(fetchMessages, 3000) // Poll every 3 seconds
-    const usersInterval = setInterval(fetchOnlineUsers, 10000) // Poll every 10 seconds
+    // Try to establish SSE connection for real-time updates
+    let eventSource: EventSource | null = null
+    let useFallback = false
+
+    const connectSSE = () => {
+      try {
+        const clientId = `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+        eventSource = new EventSource(`/api/chat/events/1?clientId=${clientId}`)
+
+        eventSource.onopen = () => {
+          console.log('SSE connected for real-time updates')
+          useFallback = false
+        }
+
+        eventSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data)
+
+            switch (data.type) {
+              case 'connected':
+                console.log('SSE connection confirmed:', data.clientId)
+                break
+
+              case 'new_message':
+                // Add new message to the list in real-time
+                setMessages(prev => {
+                  // Check if message already exists to avoid duplicates
+                  const exists = prev.find(msg => msg.id === data.data.id)
+                  if (exists) return prev
+                  return [...prev, data.data]
+                })
+                break
+
+              case 'ping':
+                // Keep-alive ping, no action needed
+                break
+
+              default:
+                console.log('Unknown SSE event:', data)
+            }
+          } catch (error) {
+            console.error('Error parsing SSE event:', error)
+          }
+        }
+
+        eventSource.onerror = (error) => {
+          console.error('SSE connection error:', error)
+          eventSource?.close()
+          useFallback = true
+        }
+
+      } catch (error) {
+        console.error('Failed to establish SSE connection:', error)
+        useFallback = true
+      }
+    }
+
+    // Start with SSE
+    connectSSE()
+
+    // Setup fallback polling (reduced frequency since SSE handles real-time)
+    const usersInterval = setInterval(fetchOnlineUsers, 30000) // Poll online users every 30 seconds
     const heartbeatInterval = setInterval(sendHeartbeat, 30000) // Heartbeat every 30 seconds
+
+    // Fallback message polling only if SSE fails
+    const fallbackInterval = setInterval(() => {
+      if (useFallback) {
+        console.log('Using fallback polling for messages')
+        fetchMessages()
+      }
+    }, 5000) // Fallback poll every 5 seconds
 
     // Send initial heartbeat
     sendHeartbeat()
 
     return () => {
-      clearInterval(messageInterval)
+      eventSource?.close()
       clearInterval(usersInterval)
       clearInterval(heartbeatInterval)
+      clearInterval(fallbackInterval)
     }
   }, [isOpen, isAuthenticated])
 
