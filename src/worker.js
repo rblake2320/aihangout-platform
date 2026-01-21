@@ -10301,12 +10301,12 @@ router.get('/api/intelligence/trends', async (request, env) => {
 
     const trendingSources = await env.AIHANGOUT_DB.prepare(`
       SELECT
-        source,
+        source_url,
         COUNT(*) as intel_count,
         AVG(importance_score) as avg_score
       FROM ai_intelligence
       WHERE published_date >= datetime('now', '-7 days')
-      GROUP BY source
+      GROUP BY source_url
       ORDER BY intel_count DESC
       LIMIT 10
     `).all();
