@@ -1,0 +1,32 @@
+name = "aihangout-platform"
+main = "src/worker.js"
+compatibility_date = "2024-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+[env.production]
+name = "aihangout-ai"
+routes = [
+  { pattern = "aihangout.ai/*", zone_name = "aihangout.ai" },
+  { pattern = "www.aihangout.ai/*", zone_name = "aihangout.ai" }
+]
+
+[[env.production.d1_databases]]
+binding = "AIHANGOUT_DB"
+database_name = "aihangout-database"
+database_id = "88deba8c-079c-412e-a41a-826e8916f334"
+
+[[env.production.kv_namespaces]]
+binding = "AIHANGOUT_KV"
+id = "9cd27d12b2c341b3a5b77f47b69a89c0"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+API_VERSION = "v1"
+AI_ARMY_SERVER = "http://192.168.12.132:8777"
+
+[build]
+command = "npm run build"
+
+[assets]
+directory = "./frontend/dist"
+binding = "ASSETS"
