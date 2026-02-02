@@ -10499,6 +10499,269 @@ router.post('/api/intelligence/harvest', async (request, env) => {
   }
 });
 
+// ========================
+// DATA OWNERSHIP API ENDPOINT - COMPETITIVE ADVANTAGE SYSTEM
+// ========================
+
+// Data Ownership Collection Endpoint
+router.post('/api/data-ownership', async (request, env) => {
+  try {
+    const authResult = await authenticateRequest(request, env);
+
+    // Allow both authenticated and anonymous data collection for maximum capture
+    const body = await request.json();
+    const { events, session_id, timestamp } = body;
+
+    console.log('🎯 DATA OWNERSHIP: Received events for competitive advantage', {
+      eventCount: events?.length || 0,
+      sessionId: session_id,
+      authenticated: authResult.success
+    });
+
+    // Ensure data ownership table exists
+    await env.AIHANGOUT_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS data_ownership_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id VARCHAR(255) NOT NULL,
+        user_id INTEGER,
+        event_type VARCHAR(100) NOT NULL,
+        category VARCHAR(50) NOT NULL,
+        event_data TEXT NOT NULL,
+        metadata TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        competitive_value_score FLOAT DEFAULT 1.0,
+        patent_evidence BOOLEAN DEFAULT TRUE
+      )
+    `).run();
+
+    // Process and store each event for competitive advantage
+    const insertPromises = events?.map(async (event) => {
+      const competitiveValueScore = calculateCompetitiveValue(event);
+
+      return env.AIHANGOUT_DB
+        .prepare(`
+          INSERT INTO data_ownership_events (
+            session_id, user_id, event_type, category, event_data,
+            metadata, competitive_value_score, patent_evidence
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .bind(
+          session_id || event.sessionId,
+          authResult.success ? authResult.user.id : null,
+          event.eventType,
+          event.category,
+          JSON.stringify(event.data),
+          JSON.stringify(event.metadata),
+          competitiveValueScore,
+          true
+        )
+        .run();
+    }) || [];
+
+    await Promise.all(insertPromises);
+
+    // Log analytics for patent evidence
+    await env.AIHANGOUT_DB
+      .prepare(`
+        INSERT INTO analytics_events (
+          event_type, user_id, session_id, timestamp, page_url,
+          user_type, event_data
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      .bind(
+        'data_ownership_capture',
+        authResult.success ? authResult.user.id : null,
+        session_id,
+        new Date().toISOString(),
+        '/api/data-ownership',
+        authResult.success ? 'authenticated' : 'anonymous',
+        JSON.stringify({
+          events_captured: events?.length || 0,
+          competitive_intelligence: true,
+          patent_evidence: true
+        })
+      )
+      .run();
+
+    return new Response(JSON.stringify({
+      success: true,
+      message: 'Data ownership events captured for competitive advantage',
+      events_processed: events?.length || 0,
+      competitive_value: 'HIGH',
+      patent_evidence_logged: true,
+      timestamp: new Date().toISOString()
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('Data ownership capture failed:', error);
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'Data capture failed',
+      details: error.message
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Helper function to calculate competitive value of captured data
+function calculateCompetitiveValue(event) {
+  let score = 1.0;
+
+  // High value events for competitive advantage
+  if (event.eventType === 'conversation_complete') score += 2.0;
+  if (event.eventType === 'problem_solving_session') score += 1.5;
+  if (event.eventType === 'ai_learning_event') score += 1.5;
+  if (event.eventType === 'search_event') score += 1.0;
+
+  // Enterprise data is extra valuable
+  if (event.data?.collaboration_type === 'human_ai_hybrid') score += 1.0;
+  if (event.data?.enterprise_usage) score += 0.5;
+
+  return Math.min(score, 5.0); // Cap at 5.0
+}
+
+// ========================
+// SEARCH ANALYTICS API ENDPOINT - AI OPTIMIZATION SYSTEM
+// ========================
+
+// Search Analytics Collection Endpoint
+router.post('/api/search-analytics', async (request, env) => {
+  try {
+    const authResult = await authenticateRequest(request, env);
+    const body = await request.json();
+
+    console.log('🔍 SEARCH ANALYTICS: Capturing search pattern for AI optimization', {
+      query: body.query,
+      authenticated: authResult.success
+    });
+
+    // Ensure search analytics table exists
+    await env.AIHANGOUT_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS search_analytics_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id VARCHAR(255) NOT NULL,
+        user_id INTEGER,
+        user_type VARCHAR(20) DEFAULT 'anonymous',
+        query TEXT NOT NULL,
+        filters TEXT,
+        results_count INTEGER DEFAULT 0,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        user_actions TEXT,
+        success_indicators TEXT,
+        ai_optimization_data TEXT
+      )
+    `).run();
+
+    // Store search event
+    await env.AIHANGOUT_DB
+      .prepare(`
+        INSERT INTO search_analytics_events (
+          session_id, user_id, user_type, query, filters,
+          results_count, user_actions, success_indicators, ai_optimization_data
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .bind(
+        body.sessionId || `search_session_${Date.now()}`,
+        authResult.success ? authResult.user.id : null,
+        body.userType || 'anonymous',
+        body.query || '',
+        JSON.stringify(body.filters || {}),
+        body.results?.totalCount || 0,
+        JSON.stringify(body.userActions || {}),
+        JSON.stringify(body.successIndicators || {}),
+        JSON.stringify({
+          trending_potential: body.query.length > 5 ? 'high' : 'medium',
+          ai_value_score: calculateSearchValue(body),
+          pattern_type: detectSearchPattern(body.query)
+        })
+      )
+      .run();
+
+    return new Response(JSON.stringify({
+      success: true,
+      message: 'Search analytics captured for AI optimization',
+      query_processed: body.query,
+      ai_optimization: 'enabled',
+      timestamp: new Date().toISOString()
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('Search analytics capture failed:', error);
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'Search analytics capture failed',
+      details: error.message
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// AI optimization endpoints
+router.get('/api/search-analytics/ai-optimizations', async (request, env) => {
+  try {
+    // Get trending queries from the last 24 hours
+    const trendingQueries = await env.AIHANGOUT_DB
+      .prepare(`
+        SELECT query, COUNT(*) as frequency, AVG(results_count) as avg_results
+        FROM search_analytics_events
+        WHERE timestamp > datetime('now', '-24 hours')
+        GROUP BY query
+        ORDER BY frequency DESC
+        LIMIT 10
+      `)
+      .all();
+
+    return new Response(JSON.stringify({
+      success: true,
+      optimizations: {
+        trending_queries: trendingQueries.results?.map(r => r.query) || [],
+        high_value_filters: {},
+        unsolved_problem_patterns: [],
+        ai_preferred_searches: [],
+        human_preferred_searches: [],
+        conversion_rates: {}
+      }
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'Failed to get AI optimizations',
+      details: error.message
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Helper functions for search analytics
+function calculateSearchValue(searchData) {
+  let score = 1.0;
+  if (searchData.query && searchData.query.length > 10) score += 0.5;
+  if (searchData.filters && Object.keys(searchData.filters).length > 2) score += 0.3;
+  if (searchData.results && searchData.results.totalCount > 0) score += 0.2;
+  return Math.min(score, 3.0);
+}
+
+function detectSearchPattern(query) {
+  if (!query) return 'basic';
+  if (query.includes('unsolved') || query.includes('no solution')) return 'problem_hunting';
+  if (query.includes('AI') || query.includes('agent')) return 'ai_focused';
+  if (query.includes('code') || query.includes('example')) return 'code_seeking';
+  return 'general';
+}
+
 
 // Serve frontend assets
 router.get('*', async (request, env) => {

@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../stores/authStore'
+import { dataOwnership } from '../services/dataOwnership'
 import {
   ChatBubbleLeftIcon,
   XMarkIcon,
   PaperAirplaneIcon,
-  UsersIcon
+  UsersIcon,
+  ShieldCheckIcon
 } from '@heroicons/react/24/outline'
 
 interface ChatMessage {
@@ -35,13 +37,15 @@ interface OnlineData {
 }
 
 export default function Chat() {
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, user } = useAuthStore()
   const [isOpen, setIsOpen] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [onlineCount, setOnlineCount] = useState(0)
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([])
   const [loading, setLoading] = useState(false)
+  const [conversationStartTime, setConversationStartTime] = useState<Date | null>(null)
+  const [messageTimestamps, setMessageTimestamps] = useState<Date[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll to bottom when new messages arrive
@@ -86,7 +90,7 @@ export default function Chat() {
     if (!isAuthenticated) return
 
     try {
-      const token = localStorage.getItem('authToken')
+      const { token } = useAuthStore.getState()
       if (!token) return
 
       await fetch('/api/sessions/heartbeat', {
@@ -107,9 +111,12 @@ export default function Chat() {
 
     if (!newMessage.trim() || loading) return
 
+    const messageContent = newMessage.trim()
+    const sendTime = new Date()
+
     setLoading(true)
     try {
-      const token = localStorage.getItem('authToken')
+      const { token } = useAuthStore.getState()
 
       const response = await fetch('/api/chat/message', {
         method: 'POST',
@@ -119,7 +126,7 @@ export default function Chat() {
         },
         body: JSON.stringify({
           channelId: 1,
-          message: newMessage.trim()
+          message: messageContent
         })
       })
 
@@ -128,6 +135,22 @@ export default function Chat() {
         setNewMessage('')
         // Add the new message to the list
         setMessages(prev => [...prev, data.message])
+        setMessageTimestamps(prev => [...prev, sendTime])
+
+        // 🎯 CAPTURE MESSAGE DATA FOR COMPETITIVE ADVANTAGE
+        await dataOwnership.captureConversation(
+          [
+            { type: user?.aiAgentType === 'human' ? 'human' : 'ai', id: user?.username || 'unknown' }
+          ],
+          [
+            {
+              content: messageContent,
+              timestamp: sendTime.toISOString(),
+              author: user?.username || 'unknown'
+            }
+          ]
+        )
+
       } else {
         console.error('Failed to send message:', data.error)
       }
@@ -136,6 +159,48 @@ export default function Chat() {
     }
     setLoading(false)
   }
+
+  // 🎯 CAPTURE CONVERSATION PATTERNS WHEN CHAT OPENS
+  useEffect(() => {
+    if (isOpen && !conversationStartTime) {
+      setConversationStartTime(new Date())
+      // Log conversation start for analytics
+      dataOwnership.captureConversation([], [], 'conversation_started')
+    }
+  }, [isOpen, conversationStartTime])
+
+  // 🎯 CAPTURE COMPLETE CONVERSATION WHEN CHAT CLOSES
+  useEffect(() => {
+    if (!isOpen && conversationStartTime && messages.length > 0) {
+      const conversationDuration = Date.now() - conversationStartTime.getTime()
+
+      // Analyze conversation for competitive intelligence
+      const participants = Array.from(new Set(messages.map(m => ({
+        type: m.ai_agent_type === 'human' ? 'human' as const : 'ai' as const,
+        id: m.username
+      }))))
+
+      const conversationMessages = messages.map(m => ({
+        content: m.message,
+        timestamp: m.created_at,
+        author: m.username
+      }))
+
+      // Determine outcome
+      let outcome = 'general_discussion'
+      if (messages.some(m => m.message.includes('solved') || m.message.includes('solution'))) {
+        outcome = 'problem_solved'
+      } else if (messages.some(m => m.message.includes('help') || m.message.includes('question'))) {
+        outcome = 'help_requested'
+      }
+
+      dataOwnership.captureConversation(participants, conversationMessages, outcome)
+
+      // Reset tracking
+      setConversationStartTime(null)
+      setMessageTimestamps([])
+    }
+  }, [isOpen, conversationStartTime, messages])
 
   // Setup real-time connection and fallback polling when chat is open
   useEffect(() => {

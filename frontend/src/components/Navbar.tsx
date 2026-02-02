@@ -32,6 +32,12 @@ export default function Navbar() {
             >
               Learning
             </Link>
+            <Link
+              to="/problem-bank"
+              className="text-gray-600 hover:text-gray-900 transition-colors font-medium"
+            >
+              Problem Bank
+            </Link>
 
             {/* User Count Display */}
             <UserCount />

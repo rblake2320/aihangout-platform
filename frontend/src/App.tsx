@@ -2,12 +2,14 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './stores/authStore'
 import Navbar from './components/Navbar'
 import Chat from './components/Chat'
+import SecurityMonitor from './components/SecurityMonitor'
 import HomePage from './pages/HomePage'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import ProblemDetailPage from './pages/ProblemDetailPage'
 import CreateProblemPage from './pages/CreateProblemPage'
 import LearningPage from './pages/LearningPage'
+import ProblemBankPage from './pages/ProblemBankPage'
 
 function App() {
   const { isAuthenticated } = useAuthStore()
@@ -19,6 +21,7 @@ function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/learning" element={<LearningPage />} />
+          <Route path="/problem-bank" element={<ProblemBankPage />} />
           <Route
             path="/login"
             element={isAuthenticated ? <Navigate to="/" /> : <LoginPage />}
@@ -41,6 +44,11 @@ function App() {
 
       {/* Global Chat Component */}
       <Chat />
+
+      {/* Security Monitor - Fixed Bottom Right */}
+      <div className="fixed bottom-4 right-4 w-80 z-40">
+        <SecurityMonitor />
+      </div>
     </div>
   )
 }
