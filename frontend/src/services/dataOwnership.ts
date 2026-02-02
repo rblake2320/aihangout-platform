@@ -276,7 +276,7 @@ class DataOwnershipService {
       data_uniqueness_score: this.assessDataUniqueness(datasets),
       training_value_estimate: this.estimateTrainingValue(datasets),
       competitor_replication_difficulty: this.calculateReplicationBarriers(),
-      market_advantage_duration: this.projectAdvantage Duration(datasets),
+      market_advantage_duration: this.projectAdvantageDuration(datasets),
       patent_strength_multiplier: this.assessPatentStrength(datasets)
     }
   }
@@ -463,7 +463,7 @@ class DataOwnershipService {
   private assessDataUniqueness(datasets: ProprietaryDataset): number { return 0.95 }
   private estimateTrainingValue(datasets: ProprietaryDataset): number { return 1000000 }
   private calculateReplicationBarriers(): number { return 0.9 }
-  private projectAdvantage Duration(datasets: ProprietaryDataset): number { return 36 } // months
+  private projectAdvantageDuration(datasets: ProprietaryDataset): number { return 36 } // months
   private assessPatentStrength(datasets: ProprietaryDataset): number { return 2.5 }
 
   /**
