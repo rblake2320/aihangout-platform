@@ -7807,7 +7807,7 @@ router.get('/api/chat/messages/:channelId', async (request, env) => {
 // Send new chat message
 router.post('/api/chat/message', async (request, env) => {
   try {
-    const authResult = await authenticateRequest(request, env);
+    const authResult = await authenticate(request, env);
     if (!authResult.success) {
       return new Response(JSON.stringify({
         success: false,
@@ -8140,7 +8140,7 @@ router.get('/api/chat/users/online', async (request, env) => {
 // Enhanced session heartbeat with analytics
 router.post('/api/sessions/heartbeat', async (request, env) => {
   try {
-    const authResult = await authenticateRequest(request, env);
+    const authResult = await authenticate(request, env);
     if (!authResult.success) {
       return new Response(JSON.stringify({
         success: false,
@@ -10506,7 +10506,7 @@ router.post('/api/intelligence/harvest', async (request, env) => {
 // Data Ownership Collection Endpoint
 router.post('/api/data-ownership', async (request, env) => {
   try {
-    const authResult = await authenticateRequest(request, env);
+    const user = await authenticate(request, env);
 
     // Allow both authenticated and anonymous data collection for maximum capture
     const body = await request.json();
@@ -10515,7 +10515,7 @@ router.post('/api/data-ownership', async (request, env) => {
     console.log('🎯 DATA OWNERSHIP: Received events for competitive advantage', {
       eventCount: events?.length || 0,
       sessionId: session_id,
-      authenticated: authResult.success
+      authenticated: !!user
     });
 
     // Ensure data ownership table exists
@@ -10547,7 +10547,7 @@ router.post('/api/data-ownership', async (request, env) => {
         `)
         .bind(
           session_id || event.sessionId,
-          authResult.success ? authResult.user.id : null,
+          user ? user.id : null,
           event.eventType,
           event.category,
           JSON.stringify(event.data),
@@ -10570,11 +10570,11 @@ router.post('/api/data-ownership', async (request, env) => {
       `)
       .bind(
         'data_ownership_capture',
-        authResult.success ? authResult.user.id : null,
+        user ? user.id : null,
         session_id,
         new Date().toISOString(),
         '/api/data-ownership',
-        authResult.success ? 'authenticated' : 'anonymous',
+        user ? 'authenticated' : 'anonymous',
         JSON.stringify({
           events_captured: events?.length || 0,
           competitive_intelligence: true,
@@ -10631,12 +10631,12 @@ function calculateCompetitiveValue(event) {
 // Search Analytics Collection Endpoint
 router.post('/api/search-analytics', async (request, env) => {
   try {
-    const authResult = await authenticateRequest(request, env);
+    const user = await authenticate(request, env);
     const body = await request.json();
 
     console.log('🔍 SEARCH ANALYTICS: Capturing search pattern for AI optimization', {
       query: body.query,
-      authenticated: authResult.success
+      authenticated: !!user
     });
 
     // Ensure search analytics table exists
@@ -10666,7 +10666,7 @@ router.post('/api/search-analytics', async (request, env) => {
       `)
       .bind(
         body.sessionId || `search_session_${Date.now()}`,
-        authResult.success ? authResult.user.id : null,
+        user ? user.id : null,
         body.userType || 'anonymous',
         body.query || '',
         JSON.stringify(body.filters || {}),
