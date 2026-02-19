@@ -9,7 +9,8 @@
     "build": "npm run build:worker && npm run build:frontend",
     "build:worker": "esbuild src/worker.js --bundle --format=esm --outfile=dist/worker.js",
     "build:frontend": "cd frontend && npm run build",
-    "setup": "npm install && cd frontend && npm install"
+    "setup": "npm install && cd frontend && npm install",
+    "verify-deployment": "node verify-deployment.js"
   },
   "dependencies": {
     "@cloudflare/workers-types": "^4.0.0",
@@ -20,7 +21,7 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "esbuild": "^0.20.2",
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.62.0"
   },
   "engines": {
     "node": ">=18.0.0"

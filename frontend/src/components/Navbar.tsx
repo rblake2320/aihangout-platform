@@ -38,6 +38,12 @@ export default function Navbar() {
             >
               Problem Bank
             </Link>
+            <Link
+              to="/bug-report"
+              className="text-gray-600 hover:text-gray-900 transition-colors font-medium"
+            >
+              Report Bug
+            </Link>
 
             {/* User Count Display */}
             <UserCount />

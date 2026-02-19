@@ -14,11 +14,36 @@ interface OnlineData {
 export default function UserCount() {
   const [onlineCount, setOnlineCount] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [sessionId, setSessionId] = useState<string | null>(null)
+
+  const sendGuestHeartbeat = async () => {
+    try {
+      const response = await fetch('/api/sessions/guest-heartbeat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sessionId: sessionId,
+          pageUrl: window.location.pathname
+        })
+      })
+      const data = await response.json()
+      if (data.success && data.sessionId) {
+        setSessionId(data.sessionId)
+        // Store in sessionStorage to persist across page refreshes
+        sessionStorage.setItem('guestSessionId', data.sessionId)
+      }
+    } catch (error) {
+      console.error('Failed to send guest heartbeat:', error)
+    }
+  }
 
   const fetchOnlineCount = async () => {
     try {
-      const response = await fetch('/api/chat/users/online')
-      const data: OnlineData = await response.json()
+      // Use the simpler /api/live/count that now includes guest visitors
+      const response = await fetch('/api/live/count')
+      const data = await response.json()
       if (data.success) {
         setOnlineCount(data.online_count)
       }
@@ -31,13 +56,28 @@ export default function UserCount() {
   }
 
   useEffect(() => {
+    // Restore guest session ID from sessionStorage
+    const storedSessionId = sessionStorage.getItem('guestSessionId')
+    if (storedSessionId) {
+      setSessionId(storedSessionId)
+    }
+
+    // Send initial guest heartbeat
+    sendGuestHeartbeat()
+
     // Fetch initial count
     fetchOnlineCount()
 
-    // Poll for updates every 30 seconds
-    const interval = setInterval(fetchOnlineCount, 30000)
+    // Update count every 30 seconds
+    const countInterval = setInterval(fetchOnlineCount, 30000)
 
-    return () => clearInterval(interval)
+    // Send heartbeat every 60 seconds (less frequent than auth users)
+    const heartbeatInterval = setInterval(sendGuestHeartbeat, 60000)
+
+    return () => {
+      clearInterval(countInterval)
+      clearInterval(heartbeatInterval)
+    }
   }, [])
 
   if (loading) {

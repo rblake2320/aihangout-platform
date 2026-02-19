@@ -1,7 +1,10 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { formatDistanceToNow } from 'date-fns'
 import VoteButtons from './VoteButtons'
-import { ChatBubbleLeftIcon, UserIcon } from '@heroicons/react/24/outline'
+import { useAuthStore } from '../stores/authStore'
+import { ChatBubbleLeftIcon, UserIcon, StarIcon } from '@heroicons/react/24/outline'
+import { StarIcon as StarIconSolid } from '@heroicons/react/24/solid'
 
 interface Problem {
   id: string
@@ -21,6 +24,10 @@ interface ProblemCardProps {
 }
 
 export default function ProblemCard({ problem }: ProblemCardProps) {
+  const { isAuthenticated, token } = useAuthStore()
+  const [isBookmarked, setIsBookmarked] = useState(false)
+  const [bookmarkLoading, setBookmarkLoading] = useState(false)
+
   const difficultyColors = {
     easy: 'bg-green-100 text-green-800',
     medium: 'bg-yellow-100 text-yellow-800',
@@ -32,17 +39,82 @@ export default function ProblemCard({ problem }: ProblemCardProps) {
     ai_agent: 'bg-purple-100 text-purple-800',
   }
 
+  const handleBookmark = async () => {
+    if (!isAuthenticated) {
+      alert('Please log in to bookmark problems')
+      return
+    }
+
+    setBookmarkLoading(true)
+    try {
+      if (isBookmarked) {
+        // Remove bookmark
+        const response = await fetch(`/api/bookmarks/problem/${problem.id}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        })
+
+        if (response.ok) {
+          setIsBookmarked(false)
+        }
+      } else {
+        // Add bookmark
+        const response = await fetch('/api/bookmarks', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            content_type: 'problem',
+            content_id: problem.id
+          })
+        })
+
+        if (response.ok) {
+          setIsBookmarked(true)
+        }
+      }
+    } catch (error) {
+      console.error('Failed to toggle bookmark:', error)
+    }
+    setBookmarkLoading(false)
+  }
+
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
       <div className="flex space-x-4">
         {/* Vote Section */}
-        <div className="flex-shrink-0">
+        <div className="flex-shrink-0 flex flex-col items-center space-y-2">
           <VoteButtons
             targetType="problem"
             targetId={problem.id}
             upvotes={problem.upvotes}
             size="large"
           />
+
+          {/* Bookmark Button */}
+          <button
+            onClick={handleBookmark}
+            disabled={bookmarkLoading}
+            className={`p-2 rounded-lg transition-colors ${
+              isBookmarked
+                ? 'text-yellow-500 hover:text-yellow-600 bg-yellow-50'
+                : 'text-gray-400 hover:text-yellow-500 hover:bg-yellow-50'
+            } ${
+              bookmarkLoading ? 'opacity-50 cursor-not-allowed' : ''
+            }`}
+            title={isBookmarked ? 'Remove bookmark' : 'Bookmark this problem'}
+          >
+            {isBookmarked ? (
+              <StarIconSolid className="w-5 h-5" />
+            ) : (
+              <StarIcon className="w-5 h-5" />
+            )}
+          </button>
         </div>
 
         {/* Content Section */}
@@ -95,7 +167,18 @@ export default function ProblemCard({ problem }: ProblemCardProps) {
               </div>
             </div>
             <div>
-              {formatDistanceToNow(new Date(problem.created_at), { addSuffix: true })}
+              {(() => {
+                // Properly handle UTC timestamp from database
+                const dbTime = new Date(problem.created_at.replace(' ', 'T') + 'Z');
+                const now = new Date();
+                console.log('Debug time calc:', {
+                  dbTimeString: problem.created_at,
+                  dbTimeParsed: dbTime.toISOString(),
+                  now: now.toISOString(),
+                  diffMinutes: Math.floor((now - dbTime) / (1000 * 60))
+                });
+                return formatDistanceToNow(dbTime, { addSuffix: true });
+              })()}
             </div>
           </div>
         </div>

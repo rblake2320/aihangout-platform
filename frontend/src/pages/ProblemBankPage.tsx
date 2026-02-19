@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import {
   BanknotesIcon,
   FireIcon,
@@ -157,9 +158,9 @@ export default function ProblemBankPage() {
           Source: {problem.source}
           {problem.company && ` • ${problem.company}`}
         </div>
-        <button className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors">
+        <Link to={`/problem/${problem.id}`} className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors inline-block">
           Take Challenge
-        </button>
+        </Link>
       </div>
     </div>
   )
@@ -242,9 +243,9 @@ export default function ProblemBankPage() {
           </div>
 
           <div className="flex items-end">
-            <button className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors">
+            <Link to="/create-problem" className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors inline-block text-center">
               Submit New Problem
-            </button>
+            </Link>
           </div>
         </div>
       </div>

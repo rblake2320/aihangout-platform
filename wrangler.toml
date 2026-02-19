@@ -3,6 +3,17 @@ main = "src/worker.js"
 compatibility_date = "2024-01-15"
 compatibility_flags = ["nodejs_compat"]
 
+[env.development]
+[[env.development.d1_databases]]
+binding = "AIHANGOUT_DB"
+database_name = "aihangout-dev"
+database_id = "local"
+
+[env.development.vars]
+ENVIRONMENT = "development"
+API_VERSION = "v1"
+JWT_SECRET = "dev-secret-32-char-key-for-test!"
+
 [env.production]
 name = "aihangout-ai"
 routes = [

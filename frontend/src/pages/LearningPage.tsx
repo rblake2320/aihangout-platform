@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, Link } from 'react-router-dom'
+import { useAuthStore } from '../stores/authStore'
 import {
   DocumentTextIcon,
   ClipboardDocumentListIcon,
@@ -9,7 +10,8 @@ import {
   RocketLaunchIcon,
   EyeIcon,
   ChevronDownIcon,
-  StarIcon
+  StarIcon,
+  LockClosedIcon
 } from '@heroicons/react/24/outline'
 
 interface LearningContent {
@@ -53,6 +55,7 @@ const CONTENT_TYPE_COLORS = {
 }
 
 export default function LearningPage() {
+  const { isAuthenticated } = useAuthStore()
   const [searchParams, setSearchParams] = useSearchParams()
   const [content, setContent] = useState<LearningContent[]>([])
   const [featured, setFeatured] = useState<LearningContent[]>([])
@@ -62,6 +65,10 @@ export default function LearningPage() {
   const [selectedType, setSelectedType] = useState(searchParams.get('type') || 'all')
   const [selectedCategory, setSelectedCategory] = useState(searchParams.get('category') || 'all')
   const [showFilters, setShowFilters] = useState(false)
+
+  // Content limiting for non-authenticated users
+  const maxContentForGuests = 10
+  const maxCategoryContentForGuests = 2
 
   useEffect(() => {
     fetchContent()
@@ -225,9 +232,9 @@ export default function LearningPage() {
         </div>
 
         <div className="mt-4 pt-4 border-t border-gray-100">
-          <button className="text-blue-600 hover:text-blue-700 text-sm font-medium">
+          <Link to={`/learning/${item.id}`} className="text-blue-600 hover:text-blue-700 text-sm font-medium">
             View Content →
-          </button>
+          </Link>
         </div>
       </div>
     )
@@ -247,9 +254,9 @@ export default function LearningPage() {
             </p>
           </div>
           <div className="text-right">
-            <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+            <Link to="/create-problem" className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors inline-block">
               Contribute Content
-            </button>
+            </Link>
           </div>
         </div>
       </div>
@@ -269,19 +276,20 @@ export default function LearningPage() {
         </div>
       )}
 
-      {/* Filters */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-medium text-gray-900">Filter Content</h3>
-          <button
-            onClick={() => setShowFilters(!showFilters)}
-            className="flex items-center text-sm text-gray-500"
-          >
-            <ChevronDownIcon className={`w-4 h-4 ml-1 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
-          </button>
-        </div>
+      {/* Filters - Only for authenticated users */}
+      {isAuthenticated && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-gray-900">Filter Content</h3>
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className="flex items-center text-sm text-gray-500"
+            >
+              <ChevronDownIcon className={`w-4 h-4 ml-1 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
 
-        {showFilters && (
+          {showFilters && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -320,7 +328,8 @@ export default function LearningPage() {
             </div>
           </div>
         )}
-      </div>
+        </div>
+      )}
 
       {/* Content Grid */}
       {loading ? (
@@ -329,11 +338,61 @@ export default function LearningPage() {
           <p className="text-gray-500 mt-4">Loading learning content...</p>
         </div>
       ) : content.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {content.map((item) => (
-            <ContentCard key={item.id} item={item} />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {(() => {
+              let displayContent = content;
+              let showJoinBlock = false;
+
+              if (!isAuthenticated) {
+                if (selectedCategory !== 'all') {
+                  // For specific categories, show only 2 items
+                  displayContent = content.slice(0, maxCategoryContentForGuests);
+                  showJoinBlock = content.length > maxCategoryContentForGuests;
+                } else {
+                  // For all content, show only 10 items
+                  displayContent = content.slice(0, maxContentForGuests);
+                  showJoinBlock = content.length > maxContentForGuests;
+                }
+              }
+
+              return displayContent.map((item) => (
+                <ContentCard key={item.id} item={item} />
+              ));
+            })()}
+          </div>
+
+          {/* Join Community Block for Non-Authenticated Users */}
+          {!isAuthenticated && (content.length > (selectedCategory !== 'all' ? maxCategoryContentForGuests : maxContentForGuests)) && (
+            <div className="mt-8 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-8 text-center">
+              <LockClosedIcon className="w-12 h-12 text-blue-500 mx-auto mb-4" />
+              <h3 className="text-xl font-semibold text-gray-900 mb-3">
+                Want to see more? Join our community!
+              </h3>
+              <p className="text-gray-600 mb-6">
+                Access our complete library of {content.length} research papers, blueprints, model cards, and technical documentation.
+                {selectedCategory !== 'all' && ` See all ${content.length} items in ${selectedCategory}.`}
+              </p>
+              <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                <Link
+                  to="/register"
+                  className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                >
+                  Join Community - Free
+                </Link>
+                <Link
+                  to="/login"
+                  className="px-6 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium"
+                >
+                  Sign In
+                </Link>
+              </div>
+              <p className="text-sm text-gray-500 mt-4">
+                Platform developed throughout 2025 • Launched for beta testing January 2026
+              </p>
+            </div>
+          )}
+        </>
       ) : (
         <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
           <BookOpenIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />

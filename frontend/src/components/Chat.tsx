@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { dataOwnership } from '../services/dataOwnership'
 import {
@@ -39,6 +40,20 @@ interface OnlineData {
 export default function Chat() {
   const { isAuthenticated, user } = useAuthStore()
   const [isOpen, setIsOpen] = useState(false)
+
+  // ✅ CHAT RE-ENABLED v3 - FORCE REACT COMPONENT CACHE BUST 2026-02-02 12:00
+  const chatDisabled = false
+  const componentKey = "chat-enabled-v3-20260202" // Force React re-render
+
+  if (chatDisabled) {
+    return (
+      <div className="fixed bottom-4 right-4 z-50">
+        <div className="bg-gray-100 text-gray-500 px-4 py-2 rounded-lg shadow-lg text-sm">
+          💬 Chat temporarily disabled
+        </div>
+      </div>
+    )
+  }
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [newMessage, setNewMessage] = useState('')
   const [onlineCount, setOnlineCount] = useState(0)
@@ -46,24 +61,49 @@ export default function Chat() {
   const [loading, setLoading] = useState(false)
   const [conversationStartTime, setConversationStartTime] = useState<Date | null>(null)
   const [messageTimestamps, setMessageTimestamps] = useState<Date[]>([])
+
+  // 🆕 USER-CONFIGURABLE MESSAGE ORDERING - newest on top by default
+  const [showNewestFirst, setShowNewestFirst] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll behavior based on message ordering
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
-  useEffect(() => {
-    scrollToBottom()
-  }, [messages])
+  const scrollToTop = () => {
+    const messagesContainer = messagesEndRef.current?.parentElement
+    if (messagesContainer) {
+      messagesContainer.scrollTop = 0
+    }
+  }
 
-  // Fetch messages
+  useEffect(() => {
+    if (showNewestFirst) {
+      scrollToBottom()
+    } else {
+      scrollToTop()
+    }
+  }, [messages, showNewestFirst])
+
+  // Re-fetch messages when ordering preference changes
+  useEffect(() => {
+    if (isOpen) {
+      fetchMessages()
+    }
+  }, [showNewestFirst])
+
+  // Fetch messages with user-configurable ordering
   const fetchMessages = async () => {
     try {
       const response = await fetch('/api/chat/messages/1?limit=50')
       const data: ChatData = await response.json()
       if (data.success) {
-        setMessages(data.messages.reverse()) // Reverse to show oldest first
+        // Apply user's preferred ordering
+        const sortedMessages = showNewestFirst
+          ? data.messages.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          : data.messages.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+        setMessages(sortedMessages)
       }
     } catch (error) {
       console.error('Failed to fetch messages:', error)
@@ -87,21 +127,36 @@ export default function Chat() {
 
   // Send heartbeat to maintain session
   const sendHeartbeat = async () => {
-    if (!isAuthenticated) return
+    if (!isAuthenticated) {
+      console.log('💓 Heartbeat skipped: not authenticated')
+      return
+    }
 
     try {
       const { token } = useAuthStore.getState()
-      if (!token) return
+      if (!token) {
+        console.log('💓 Heartbeat skipped: no token')
+        return
+      }
 
-      await fetch('/api/sessions/heartbeat', {
+      console.log('💓 Sending heartbeat...', { user: user?.username, timestamp: new Date().toISOString() })
+
+      const response = await fetch('/api/sessions/heartbeat', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         }
       })
+
+      const data = await response.json()
+      if (data.success) {
+        console.log('💓 Heartbeat sent successfully')
+      } else {
+        console.warn('💓 Heartbeat failed:', data.error)
+      }
     } catch (error) {
-      console.error('Failed to send heartbeat:', error)
+      console.error('💓 Failed to send heartbeat:', error)
     }
   }
 
@@ -109,7 +164,29 @@ export default function Chat() {
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!newMessage.trim() || loading) return
+    console.log('🚀 Send message triggered', {
+      messageLength: newMessage.trim().length,
+      isAuthenticated,
+      loading,
+      user: user?.username
+    })
+
+    if (!newMessage.trim()) {
+      console.log('❌ Message is empty')
+      return
+    }
+
+    if (loading) {
+      console.log('❌ Already loading')
+      return
+    }
+
+    // Check authentication before sending
+    if (!isAuthenticated) {
+      console.error('❌ User must be logged in to send messages')
+      alert('Please log in to send messages')
+      return
+    }
 
     const messageContent = newMessage.trim()
     const sendTime = new Date()
@@ -117,6 +194,15 @@ export default function Chat() {
     setLoading(true)
     try {
       const { token } = useAuthStore.getState()
+
+      if (!token) {
+        console.error('❌ No authentication token found')
+        alert('Authentication token not found. Please log in again.')
+        setLoading(false)
+        return
+      }
+
+      console.log('📡 Sending message to API...')
 
       const response = await fetch('/api/chat/message', {
         method: 'POST',
@@ -131,31 +217,46 @@ export default function Chat() {
       })
 
       const data = await response.json()
+      console.log('📨 API Response:', { status: response.status, data })
+
       if (data.success) {
+        console.log('✅ Message sent successfully')
         setNewMessage('')
-        // Add the new message to the list
-        setMessages(prev => [...prev, data.message])
+        // Add the new message to the list in correct position based on ordering
+        setMessages(prev => {
+          if (showNewestFirst) {
+            return [data.message, ...prev] // Add to beginning for newest first
+          } else {
+            return [...prev, data.message] // Add to end for oldest first
+          }
+        })
         setMessageTimestamps(prev => [...prev, sendTime])
 
-        // 🎯 CAPTURE MESSAGE DATA FOR COMPETITIVE ADVANTAGE
-        await dataOwnership.captureConversation(
-          [
-            { type: user?.aiAgentType === 'human' ? 'human' : 'ai', id: user?.username || 'unknown' }
-          ],
-          [
-            {
-              content: messageContent,
-              timestamp: sendTime.toISOString(),
-              author: user?.username || 'unknown'
-            }
-          ]
-        )
+        // 🎯 CAPTURE MESSAGE DATA FOR COMPETITIVE ADVANTAGE (non-blocking)
+        try {
+          await dataOwnership.captureConversation(
+            [
+              { type: user?.aiAgentType === 'human' ? 'human' : 'ai', id: user?.username || 'unknown' }
+            ],
+            [
+              {
+                content: messageContent,
+                timestamp: sendTime.toISOString(),
+                author: user?.username || 'unknown'
+              }
+            ]
+          )
+        } catch (error) {
+          console.warn('Data ownership capture failed (non-critical):', error)
+        }
 
       } else {
-        console.error('Failed to send message:', data.error)
+        console.error('❌ Message send failed:', data.error)
+        alert(`Failed to send message: ${data.error}`)
       }
     } catch (error) {
-      console.error('Error sending message:', error)
+      console.error('❌ Network error sending message:', error)
+      alert('Network error. Please check your connection and try again.')
     }
     setLoading(false)
   }
@@ -234,12 +335,17 @@ export default function Chat() {
                 break
 
               case 'new_message':
-                // Add new message to the list in real-time
+                // Add new message to the list in real-time with correct ordering
                 setMessages(prev => {
                   // Check if message already exists to avoid duplicates
                   const exists = prev.find(msg => msg.id === data.data.id)
                   if (exists) return prev
-                  return [...prev, data.data]
+
+                  if (showNewestFirst) {
+                    return [data.data, ...prev] // Add to beginning for newest first
+                  } else {
+                    return [...prev, data.data] // Add to end for oldest first
+                  }
                 })
                 break
 
@@ -291,7 +397,7 @@ export default function Chat() {
       clearInterval(heartbeatInterval)
       clearInterval(fallbackInterval)
     }
-  }, [isOpen, isAuthenticated])
+  }, [isOpen, isAuthenticated, showNewestFirst])
 
   const formatMessageTime = (timestamp: string) => {
     return new Date(timestamp).toLocaleTimeString([], {
@@ -322,7 +428,7 @@ export default function Chat() {
   }
 
   return (
-    <>
+    <div key={componentKey}>
       {/* Chat toggle button with online count */}
       <div className="fixed bottom-4 right-4 z-50">
         <button
@@ -350,11 +456,39 @@ export default function Chat() {
       {isOpen && (
         <div className="fixed bottom-20 right-4 w-80 h-96 bg-white rounded-lg shadow-xl border z-40 flex flex-col">
           {/* Header */}
-          <div className="bg-blue-600 text-white p-3 rounded-t-lg flex justify-between items-center">
-            <h3 className="font-medium">Live Chat</h3>
-            <div className="flex items-center space-x-2">
-              <UsersIcon className="w-4 h-4" />
-              <span className="text-sm">{onlineCount} online</span>
+          <div className="bg-blue-600 text-white p-3 rounded-t-lg">
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="font-medium">Live Chat</h3>
+              <div className="flex items-center space-x-2">
+                <UsersIcon className="w-4 h-4" />
+                <span className="text-sm">{onlineCount} online</span>
+              </div>
+            </div>
+            {/* Message ordering controls */}
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-blue-100">Message Order:</span>
+              <div className="flex items-center space-x-1">
+                <button
+                  onClick={() => setShowNewestFirst(true)}
+                  className={`px-2 py-1 rounded text-xs transition-colors ${
+                    showNewestFirst
+                      ? 'bg-white text-blue-600 font-medium'
+                      : 'bg-blue-500 text-blue-100 hover:bg-blue-400'
+                  }`}
+                >
+                  Newest First
+                </button>
+                <button
+                  onClick={() => setShowNewestFirst(false)}
+                  className={`px-2 py-1 rounded text-xs transition-colors ${
+                    !showNewestFirst
+                      ? 'bg-white text-blue-600 font-medium'
+                      : 'bg-blue-500 text-blue-100 hover:bg-blue-400'
+                  }`}
+                >
+                  Oldest First
+                </button>
+              </div>
             </div>
           </div>
 
@@ -391,26 +525,49 @@ export default function Chat() {
           </div>
 
           {/* Message input */}
-          <form onSubmit={sendMessage} className="p-3 border-t bg-white rounded-b-lg">
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                value={newMessage}
-                onChange={(e) => setNewMessage(e.target.value)}
-                placeholder="Type a message..."
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                maxLength={500}
-                disabled={loading}
-              />
-              <button
-                type="submit"
-                disabled={loading || !newMessage.trim()}
-                className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white p-2 rounded-lg transition-colors"
-              >
-                <PaperAirplaneIcon className="w-4 h-4" />
-              </button>
+          {isAuthenticated ? (
+            <div className="p-3 border-t bg-white rounded-b-lg">
+              <div className="flex space-x-2">
+                <input
+                  type="text"
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  onKeyPress={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      console.log('⌨️ Enter key pressed')
+                      sendMessage(e)
+                    }
+                  }}
+                  placeholder="Type a message..."
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  maxLength={500}
+                  disabled={loading}
+                />
+                <button
+                  type="button"
+                  disabled={loading || !newMessage.trim()}
+                  onClick={(e) => {
+                    console.log('🖱️ Send button clicked')
+                    sendMessage(e)
+                  }}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white p-2 rounded-lg transition-colors"
+                >
+                  <PaperAirplaneIcon className="w-4 h-4" />
+                </button>
+              </div>
             </div>
-          </form>
+          ) : (
+            <div className="p-3 border-t bg-gray-50 rounded-b-lg text-center">
+              <p className="text-sm text-gray-600 mb-2">Please log in to join the conversation</p>
+              <Link
+                to="/login"
+                className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+              >
+                Sign In →
+              </Link>
+            </div>
+          )}
         </div>
       )}
 
@@ -433,6 +590,6 @@ export default function Chat() {
           </div>
         </div>
       )}
-    </>
+    </div>
   )
 }

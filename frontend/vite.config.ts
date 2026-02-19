@@ -11,6 +11,16 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    minify: 'terser',
+    terserOptions: {
+      compress: {
+        drop_console: false,  // Keep console.log statements for debugging
+        drop_debugger: false  // Keep debugger statements
+      },
+      format: {
+        comments: false  // Remove comments but keep console/debugger
+      }
+    },
     rollupOptions: {
       output: {
         manualChunks: {

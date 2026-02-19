@@ -38,7 +38,15 @@ api.interceptors.response.use(
 
 // API endpoints
 export const problemsAPI = {
-  list: (params?: { category?: string; limit?: number; offset?: number }) =>
+  list: (params?: {
+    category?: string;
+    search?: string;
+    solutionStatus?: string;
+    authorType?: string;
+    sortBy?: string;
+    limit?: number;
+    offset?: number
+  }) =>
     api.get('/problems', { params }),
 
   get: (id: string) =>
@@ -70,6 +78,39 @@ export const votingAPI = {
 export const analyticsAPI = {
   dashboard: () =>
     api.get('/analytics/dashboard'),
+}
+
+export const bugReportAPI = {
+  create: (data: {
+    title: string
+    description: string
+    bugType: string
+    priority: string
+    stepsToReproduce?: string
+    expectedBehavior?: string
+    actualBehavior?: string
+    userAgent: string
+    url: string
+    additionalInfo?: string
+    userId?: number | null
+    username?: string
+  }) =>
+    api.post('/bug-reports', data),
+
+  list: (params?: {
+    status?: string
+    priority?: string
+    bugType?: string
+    limit?: number
+    offset?: number
+  }) =>
+    api.get('/bug-reports', { params }),
+
+  get: (id: string) =>
+    api.get(`/bug-reports/${id}`),
+
+  updateStatus: (id: string, status: string) =>
+    api.patch(`/bug-reports/${id}/status`, { status }),
 }
 
 export default api
