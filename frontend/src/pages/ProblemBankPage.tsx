@@ -49,23 +49,50 @@ export default function ProblemBankPage() {
   const [loading, setLoading] = useState(true)
   const [selectedCategory, setSelectedCategory] = useState('all')
   const [selectedImpact, setSelectedImpact] = useState('all')
+  const [page, setPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [total, setTotal] = useState(0)
+  const [hasNext, setHasNext] = useState(false)
+  const [hasPrev, setHasPrev] = useState(false)
+
+  // Track previous filters to detect filter changes vs page changes
+  const [prevFilters, setPrevFilters] = useState({ category: 'all', impact: 'all' })
 
   useEffect(() => {
+    const filtersChanged = selectedCategory !== prevFilters.category || selectedImpact !== prevFilters.impact
+    if (filtersChanged) {
+      setPrevFilters({ category: selectedCategory, impact: selectedImpact })
+      if (page !== 1) {
+        setPage(1) // This will re-trigger useEffect with page=1
+        return       // Skip this fetch — the page change will trigger the correct one
+      }
+    }
     fetchProblems()
+  }, [selectedCategory, selectedImpact, page])
+
+  // Featured problems never change with filters — fetch once on mount
+  useEffect(() => {
     fetchFeatured()
-  }, [selectedCategory, selectedImpact])
+  }, [])
 
   const fetchProblems = async () => {
+    setLoading(true)
     try {
       const params = new URLSearchParams()
       if (selectedCategory !== 'all') params.set('category', selectedCategory)
       if (selectedImpact !== 'all') params.set('impact', selectedImpact)
+      params.set('limit', '20')
+      params.set('offset', String((page - 1) * 20))
 
       const response = await fetch(`/api/problem-bank?${params.toString()}`)
       const data = await response.json()
 
       if (data.success) {
         setProblems(data.problems)
+        setTotal(data.total || data.problems.length)
+        setTotalPages(data.totalPages || 1)
+        setHasNext(data.hasNext || false)
+        setHasPrev(data.hasPrev || false)
       }
     } catch (error) {
       console.error('Failed to fetch problem bank:', error)
@@ -182,7 +209,7 @@ export default function ProblemBankPage() {
           </div>
           <div className="text-center">
             <div className="text-2xl font-bold text-blue-600">${problems.reduce((sum, p) => sum + p.estimated_value, 0).toLocaleString()}</div>
-            <div className="text-sm text-gray-500">Total Problem Value</div>
+            <div className="text-sm text-gray-500">Page Problem Value</div>
           </div>
         </div>
       </div>
@@ -213,6 +240,7 @@ export default function ProblemBankPage() {
             <select
               value={selectedCategory}
               onChange={(e) => setSelectedCategory(e.target.value)}
+              aria-label="Filter by category"
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="all">All Categories</option>
@@ -233,6 +261,7 @@ export default function ProblemBankPage() {
             <select
               value={selectedImpact}
               onChange={(e) => setSelectedImpact(e.target.value)}
+              aria-label="Filter by impact level"
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="all">All Impact Levels</option>
@@ -251,16 +280,23 @@ export default function ProblemBankPage() {
       </div>
 
       {/* Problem Grid */}
-      {loading ? (
+      {loading && problems.length === 0 ? (
         <div className="text-center py-12">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
           <p className="text-gray-500 mt-4">Loading problem bank...</p>
         </div>
       ) : problems.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {problems.map((problem) => (
-            <ProblemCard key={problem.id} problem={problem} />
-          ))}
+        <div className="relative">
+          {loading && (
+            <div className="absolute inset-0 bg-white/60 z-10 flex items-start justify-center pt-12">
+              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+            </div>
+          )}
+          <div className={`grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 ${loading ? 'opacity-50 pointer-events-none' : ''}`}>
+            {problems.map((problem) => (
+              <ProblemCard key={problem.id} problem={problem} />
+            ))}
+          </div>
         </div>
       ) : (
         <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
@@ -281,29 +317,55 @@ export default function ProblemBankPage() {
         </div>
       )}
 
+      {/* Pagination */}
+      {!loading && problems.length > 0 && (
+        <div className="flex items-center justify-center space-x-4 mt-8">
+          <button
+            onClick={() => setPage(p => Math.max(1, p - 1))}
+            disabled={!hasPrev}
+            aria-label="Go to previous page"
+            className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            Previous
+          </button>
+          <span className="text-sm text-gray-600">
+            Page {page} of {totalPages}
+            <span className="text-gray-400 ml-2">({total} total)</span>
+          </span>
+          <button
+            onClick={() => setPage(p => p + 1)}
+            disabled={!hasNext}
+            aria-label="Go to next page"
+            className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            Next
+          </button>
+        </div>
+      )}
+
       {/* Stats */}
       <div className="mt-12 grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
         <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="text-2xl font-bold text-gray-900">{problems.length}</div>
+          <div className="text-2xl font-bold text-gray-900">{total}</div>
           <div className="text-sm text-gray-500">Total Problems</div>
         </div>
         <div className="bg-white rounded-lg border border-gray-200 p-4">
           <div className="text-2xl font-bold text-gray-900">
             ${problems.reduce((sum, p) => sum + (p.bounty_amount || 0), 0).toLocaleString()}
           </div>
-          <div className="text-sm text-gray-500">Total Bounties</div>
+          <div className="text-sm text-gray-500">Page Bounties</div>
         </div>
         <div className="bg-white rounded-lg border border-gray-200 p-4">
           <div className="text-2xl font-bold text-gray-900">
             {problems.reduce((sum, p) => sum + p.affected_users, 0).toLocaleString()}
           </div>
-          <div className="text-sm text-gray-500">Affected Users</div>
+          <div className="text-sm text-gray-500">Page Affected Users</div>
         </div>
         <div className="bg-white rounded-lg border border-gray-200 p-4">
           <div className="text-2xl font-bold text-gray-900">
             {problems.filter(p => p.impact_level === 'critical').length}
           </div>
-          <div className="text-sm text-gray-500">Critical Issues</div>
+          <div className="text-sm text-gray-500">Page Critical Issues</div>
         </div>
       </div>
     </div>

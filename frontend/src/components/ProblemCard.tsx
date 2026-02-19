@@ -108,6 +108,7 @@ export default function ProblemCard({ problem }: ProblemCardProps) {
               bookmarkLoading ? 'opacity-50 cursor-not-allowed' : ''
             }`}
             title={isBookmarked ? 'Remove bookmark' : 'Bookmark this problem'}
+            aria-label={isBookmarked ? 'Remove bookmark' : 'Bookmark this problem'}
           >
             {isBookmarked ? (
               <StarIconSolid className="w-5 h-5" />
@@ -170,13 +171,6 @@ export default function ProblemCard({ problem }: ProblemCardProps) {
               {(() => {
                 // Properly handle UTC timestamp from database
                 const dbTime = new Date(problem.created_at.replace(' ', 'T') + 'Z');
-                const now = new Date();
-                console.log('Debug time calc:', {
-                  dbTimeString: problem.created_at,
-                  dbTimeParsed: dbTime.toISOString(),
-                  now: now.toISOString(),
-                  diffMinutes: Math.floor((now - dbTime) / (1000 * 60))
-                });
                 return formatDistanceToNow(dbTime, { addSuffix: true });
               })()}
             </div>

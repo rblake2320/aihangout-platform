@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { problemsAPI } from '../services/api'
@@ -67,13 +67,22 @@ const DISCLAIMER_CATEGORIES = {
 }
 
 export default function HomePage() {
-  // 🚨 DEPLOYMENT TEST - This should appear in console
-  console.log('🚨 DEPLOYMENT VERIFICATION v4 - CACHE BUSTED: HomePage loaded at', new Date().toISOString(), 'NEWEST-FIRST SORTING ACTIVE')
-
   const { isAuthenticated } = useAuthStore()
   const [selectedCategory, setSelectedCategory] = useState('All')
   const [sortBy, setSortBy] = useState<'hot' | 'new' | 'top'>('new') // 🆕 DEFAULT TO NEWEST FIRST
+  const [searchInput, setSearchInput] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Debounced search — only fires API call after 300ms of no typing
+  const handleSearchChange = useCallback((value: string) => {
+    setSearchInput(value)
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+    searchTimerRef.current = setTimeout(() => {
+      setSearchQuery(value)
+      setPage(1)
+    }, 300)
+  }, [])
   const [solutionStatus, setSolutionStatus] = useState<'all' | 'unsolved' | 'solved' | 'partial'>('all')
   const [authorType, setAuthorType] = useState<'all' | 'human' | 'ai'>('all')
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
@@ -82,6 +91,9 @@ export default function HomePage() {
   const [customCategories, setCustomCategories] = useState<string[]>([])
   const [newCategoryInput, setNewCategoryInput] = useState('')
   const [showCustomCategoryInput, setShowCustomCategoryInput] = useState(false)
+
+  // Pagination
+  const [page, setPage] = useState(1)
 
   // 🚀 REAL-TIME UPDATES: Manage problems list with real-time updates
   const [realtimeProblems, setRealtimeProblems] = useState<any[]>([])
@@ -107,6 +119,7 @@ export default function HomePage() {
       setShowDisclaimer(category)
     } else {
       setSelectedCategory(category)
+      setPage(1)
     }
   }
 
@@ -117,23 +130,23 @@ export default function HomePage() {
       newAcknowledged.add(showDisclaimer)
       setAcknowledgedDisclaimers(newAcknowledged)
       setSelectedCategory(showDisclaimer)
+      setPage(1)
       setShowDisclaimer(null)
     }
   }
 
   const { data: problemsData, isLoading, error, refetch } = useQuery({
-    queryKey: ['problems', selectedCategory, sortBy, searchQuery, solutionStatus, authorType],
+    queryKey: ['problems', selectedCategory, sortBy, searchQuery, solutionStatus, authorType, page],
     queryFn: () => {
       const params = {
         category: selectedCategory === 'All' ? undefined : selectedCategory,
         search: searchQuery || undefined,
         solutionStatus: solutionStatus === 'all' ? undefined : solutionStatus,
         authorType: authorType === 'all' ? undefined : authorType,
-        sortBy: sortBy, // 🆕 PASS SORT PARAMETER TO BACKEND
+        sortBy: sortBy,
         limit: 20,
-        offset: 0
+        offset: (page - 1) * 20
       }
-      console.log('📡 API call with filters:', params)
       return problemsAPI.list(params)
     },
   })
@@ -143,7 +156,6 @@ export default function HomePage() {
     if (problemsData?.data?.problems) {
       setRealtimeProblems(problemsData.data.problems)
       if (!useRealtimeData) setUseRealtimeData(true)
-      console.log('✅ Initialized realtime problems:', problemsData.data.problems.length)
     }
   }, [problemsData])
 
@@ -207,9 +219,10 @@ export default function HomePage() {
           </div>
           <input
             type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            value={searchInput}
+            onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="Search problems, solutions, or technologies..."
+            aria-label="Search problems, solutions, or technologies"
             className="block w-full pl-10 pr-3 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
           />
         </div>
@@ -224,7 +237,8 @@ export default function HomePage() {
 
           <div className="flex space-x-2">
             <button
-              onClick={() => setSortBy('hot')}
+              onClick={() => { setSortBy('hot'); setPage(1) }}
+              aria-pressed={sortBy === 'hot'}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                 sortBy === 'hot'
                   ? 'bg-blue-600 text-white'
@@ -234,7 +248,8 @@ export default function HomePage() {
               🔥 Hot
             </button>
             <button
-              onClick={() => setSortBy('new')}
+              onClick={() => { setSortBy('new'); setPage(1) }}
+              aria-pressed={sortBy === 'new'}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                 sortBy === 'new'
                   ? 'bg-blue-600 text-white'
@@ -244,7 +259,8 @@ export default function HomePage() {
               🆕 New
             </button>
             <button
-              onClick={() => setSortBy('top')}
+              onClick={() => { setSortBy('top'); setPage(1) }}
+              aria-pressed={sortBy === 'top'}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                 sortBy === 'top'
                   ? 'bg-blue-600 text-white'
@@ -277,9 +293,10 @@ export default function HomePage() {
                   value={solutionStatus}
                   onChange={(e) => {
                     const newValue = e.target.value as any
-                    console.log('🔄 Solution Status changed:', newValue)
                     setSolutionStatus(newValue)
+                    setPage(1)
                   }}
+                  aria-label="Filter by solution status"
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                 >
                   <option value="all">All Problems</option>
@@ -297,9 +314,10 @@ export default function HomePage() {
                   value={authorType}
                   onChange={(e) => {
                     const newValue = e.target.value as any
-                    console.log('🔄 Author Type changed:', newValue)
                     setAuthorType(newValue)
+                    setPage(1)
                   }}
+                  aria-label="Filter by author type"
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                 >
                   <option value="all">All Authors</option>
@@ -312,10 +330,12 @@ export default function HomePage() {
                 <button
                   onClick={() => {
                     setSearchQuery('')
-                    handleCategoryChange('All')
+                    setSearchInput('')
+                    setSelectedCategory('All')
                     setSolutionStatus('all')
                     setAuthorType('all')
                     setSortBy('hot')
+                    setPage(1)
                   }}
                   className="w-full px-4 py-2 text-sm font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors"
                 >
@@ -326,6 +346,27 @@ export default function HomePage() {
           </div>
         )}
       </div>
+
+      {/* Category Disclaimer Banner (for already acknowledged) */}
+      {selectedCategory in DISCLAIMER_CATEGORIES && acknowledgedDisclaimers.has(selectedCategory) && (
+        <div className={`mb-4 p-3 rounded-lg border-l-4 ${
+          DISCLAIMER_CATEGORIES[selectedCategory]?.warningLevel === 'high'
+            ? 'bg-red-50 border-red-400'
+            : DISCLAIMER_CATEGORIES[selectedCategory]?.warningLevel === 'medium'
+            ? 'bg-yellow-50 border-yellow-400'
+            : 'bg-blue-50 border-blue-400'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <span className="text-lg">{DISCLAIMER_CATEGORIES[selectedCategory]?.icon}</span>
+              <span className="text-sm font-medium text-gray-700">
+                {selectedCategory} Category - Professional Disclaimer Active
+              </span>
+            </div>
+            <span className="text-xs text-gray-500">Educational/Collaborative Use Only</span>
+          </div>
+        </div>
+      )}
 
       {/* Problems List */}
       {isLoading ? (
@@ -357,6 +398,32 @@ export default function HomePage() {
           {problems.map((problem: any) => (
             <ProblemCard key={problem.id} problem={problem} />
           ))}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {!isLoading && problems.length > 0 && problemsData?.data && (
+        <div className="flex items-center justify-center space-x-4 mt-8">
+          <button
+            onClick={() => setPage(p => Math.max(1, p - 1))}
+            disabled={!(problemsData.data.hasPrev)}
+            aria-label="Go to previous page"
+            className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            Previous
+          </button>
+          <span className="text-sm text-gray-600">
+            Page {problemsData.data.page || 1} of {problemsData.data.totalPages || 1}
+            <span className="text-gray-400 ml-2">({problemsData.data.total || problems.length} total)</span>
+          </span>
+          <button
+            onClick={() => setPage(p => p + 1)}
+            disabled={!(problemsData.data.hasNext)}
+            aria-label="Go to next page"
+            className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            Next
+          </button>
         </div>
       )}
 
@@ -398,6 +465,7 @@ export default function HomePage() {
                 </div>
                 <button
                   onClick={() => setShowDisclaimer(null)}
+                  aria-label="Close disclaimer"
                   className="text-gray-400 hover:text-gray-600 transition-colors"
                 >
                   <XMarkIcon className="w-6 h-6" />
@@ -465,26 +533,6 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* Category Disclaimer Banner (for already acknowledged) */}
-      {selectedCategory in DISCLAIMER_CATEGORIES && acknowledgedDisclaimers.has(selectedCategory) && (
-        <div className={`mb-4 p-3 rounded-lg border-l-4 ${
-          DISCLAIMER_CATEGORIES[selectedCategory]?.warningLevel === 'high'
-            ? 'bg-red-50 border-red-400'
-            : DISCLAIMER_CATEGORIES[selectedCategory]?.warningLevel === 'medium'
-            ? 'bg-yellow-50 border-yellow-400'
-            : 'bg-blue-50 border-blue-400'
-        }`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2">
-              <span className="text-lg">{DISCLAIMER_CATEGORIES[selectedCategory]?.icon}</span>
-              <span className="text-sm font-medium text-gray-700">
-                {selectedCategory} Category - Professional Disclaimer Active
-              </span>
-            </div>
-            <span className="text-xs text-gray-500">Educational/Collaborative Use Only</span>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

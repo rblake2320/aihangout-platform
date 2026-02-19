@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { formatDistanceToNow } from 'date-fns'
@@ -6,20 +6,61 @@ import { problemsAPI } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 import VoteButtons from '../components/VoteButtons'
 import SolutionForm from '../components/SolutionForm'
-import { UserIcon, CalendarIcon, TagIcon, SignalIcon } from '@heroicons/react/24/outline'
+import { UserIcon, CalendarIcon, TagIcon, SignalIcon, UserPlusIcon, UserMinusIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 
 export default function ProblemDetailPage() {
   const { id } = useParams<{ id: string }>()
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, user, token } = useAuthStore()
   const queryClient = useQueryClient()
   const [showSolutionForm, setShowSolutionForm] = useState(false)
+  const [isFollowing, setIsFollowing] = useState(false)
+  const [followerCount, setFollowerCount] = useState(0)
 
   const { data: problemData, isLoading, error } = useQuery({
     queryKey: ['problem', id],
     queryFn: () => problemsAPI.get(id!),
     enabled: !!id,
   })
+
+  const problemUserId = problemData?.data?.problem?.user_id
+
+  // Fetch follow status when problem loads
+  useEffect(() => {
+    if (problemUserId) {
+      fetch(`/api/users/${problemUserId}/followers`)
+        .then(r => r.json())
+        .then(data => { if (data.success) setFollowerCount(data.count) })
+        .catch(() => {})
+
+      if (isAuthenticated && token) {
+        fetch(`/api/users/${problemUserId}/is-following`, {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+          .then(r => r.json())
+          .then(data => { if (data.success) setIsFollowing(data.following) })
+          .catch(() => {})
+      }
+    }
+  }, [problemUserId, isAuthenticated, token])
+
+  const handleFollowToggle = async () => {
+    if (!isAuthenticated || !token || !problem?.user_id) return
+    try {
+      const res = await fetch(`/api/users/${problem.user_id}/follow`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      })
+      const data = await res.json()
+      if (data.success) {
+        setIsFollowing(data.following)
+        setFollowerCount(prev => data.following ? prev + 1 : Math.max(0, prev - 1))
+        toast.success(data.following ? 'Following user' : 'Unfollowed user')
+      }
+    } catch {
+      toast.error('Failed to update follow status')
+    }
+  }
 
   const addSolutionMutation = useMutation({
     mutationFn: ({ solutionText, codeSnippet, whyExplanation }: {
@@ -142,9 +183,31 @@ export default function ProblemDetailPage() {
             {/* Meta Information */}
             <div className="flex items-center justify-between text-sm text-gray-500 pt-4 border-t border-gray-200">
               <div className="flex items-center space-x-4">
-                <div className="flex items-center space-x-1">
-                  <UserIcon className="w-4 h-4" />
-                  <span>Asked by {problem.username}</span>
+                <div className="flex items-center space-x-2">
+                  <div className="flex items-center space-x-1">
+                    <UserIcon className="w-4 h-4" />
+                    <span>Asked by {problem.username}</span>
+                    {followerCount > 0 && (
+                      <span className="text-xs text-gray-400">({followerCount} followers)</span>
+                    )}
+                  </div>
+                  {isAuthenticated && problem.user_id !== user?.id && (
+                    <button
+                      onClick={handleFollowToggle}
+                      aria-label={isFollowing ? 'Unfollow this user' : 'Follow this user'}
+                      className={`inline-flex items-center space-x-1 px-2 py-1 text-xs rounded-full transition-colors ${
+                        isFollowing
+                          ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      }`}
+                    >
+                      {isFollowing ? (
+                        <><UserMinusIcon className="w-3 h-3" /><span>Following</span></>
+                      ) : (
+                        <><UserPlusIcon className="w-3 h-3" /><span>Follow</span></>
+                      )}
+                    </button>
+                  )}
                 </div>
                 <div className="flex items-center space-x-1">
                   <CalendarIcon className="w-4 h-4" />

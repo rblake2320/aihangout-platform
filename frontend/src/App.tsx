@@ -11,6 +11,7 @@ import LearningPage from './pages/LearningPage'
 import LearningDetailPage from './pages/LearningDetailPage'
 import ProblemBankPage from './pages/ProblemBankPage'
 import BugReportPage from './pages/BugReportPage'
+import ChangelogPage from './pages/ChangelogPage'
 
 function App() {
   const { isAuthenticated } = useAuthStore()
@@ -25,6 +26,7 @@ function App() {
           <Route path="/learning/:id" element={<LearningDetailPage />} />
           <Route path="/problem-bank" element={<ProblemBankPage />} />
           <Route path="/bug-report" element={<BugReportPage />} />
+          <Route path="/changelog" element={<ChangelogPage />} />
           <Route
             path="/login"
             element={isAuthenticated ? <Navigate to="/" /> : <LoginPage />}

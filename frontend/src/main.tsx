@@ -6,8 +6,6 @@ import { Toaster } from 'react-hot-toast'
 import App from './App.tsx'
 import './index.css'
 
-// FORCE NEW BUNDLE HASH - 2026-02-03-22:42 - SECURITY MONITOR REMOVED & TIME FIXED
-console.log('🔥 FORCE CACHE BUST 2026-02-03-22:42 - NEW BUNDLE LOADED')
 
 const queryClient = new QueryClient({
   defaultOptions: {

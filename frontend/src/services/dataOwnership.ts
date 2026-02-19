@@ -432,9 +432,7 @@ class DataOwnershipService {
   }
 
   private startDataCollection(): void {
-    console.log('🎯 DATA OWNERSHIP ENGINE STARTED')
-    console.log('📊 Building proprietary AI training dataset...')
-    console.log('🏰 Creating competitive moat through data collection...')
+    // Data collection initialized
   }
 
   // Additional analysis methods would be implemented here...

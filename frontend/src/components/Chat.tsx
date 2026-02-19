@@ -40,6 +40,17 @@ interface OnlineData {
 export default function Chat() {
   const { isAuthenticated, user } = useAuthStore()
   const [isOpen, setIsOpen] = useState(false)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [newMessage, setNewMessage] = useState('')
+  const [onlineCount, setOnlineCount] = useState(0)
+  const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([])
+  const [loading, setLoading] = useState(false)
+  const [conversationStartTime, setConversationStartTime] = useState<Date | null>(null)
+  const [messageTimestamps, setMessageTimestamps] = useState<Date[]>([])
+
+  // 🆕 USER-CONFIGURABLE MESSAGE ORDERING - newest on top by default
+  const [showNewestFirst, setShowNewestFirst] = useState(true)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // ✅ CHAT RE-ENABLED v3 - FORCE REACT COMPONENT CACHE BUST 2026-02-02 12:00
   const chatDisabled = false
@@ -54,17 +65,6 @@ export default function Chat() {
       </div>
     )
   }
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [newMessage, setNewMessage] = useState('')
-  const [onlineCount, setOnlineCount] = useState(0)
-  const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([])
-  const [loading, setLoading] = useState(false)
-  const [conversationStartTime, setConversationStartTime] = useState<Date | null>(null)
-  const [messageTimestamps, setMessageTimestamps] = useState<Date[]>([])
-
-  // 🆕 USER-CONFIGURABLE MESSAGE ORDERING - newest on top by default
-  const [showNewestFirst, setShowNewestFirst] = useState(true)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll behavior based on message ordering
   const scrollToBottom = () => {
@@ -95,6 +95,7 @@ export default function Chat() {
 
   // Fetch messages with user-configurable ordering
   const fetchMessages = async () => {
+    setLoading(true)
     try {
       const response = await fetch('/api/chat/messages/1?limit=50')
       const data: ChatData = await response.json()
@@ -107,6 +108,8 @@ export default function Chat() {
       }
     } catch (error) {
       console.error('Failed to fetch messages:', error)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -128,18 +131,14 @@ export default function Chat() {
   // Send heartbeat to maintain session
   const sendHeartbeat = async () => {
     if (!isAuthenticated) {
-      console.log('💓 Heartbeat skipped: not authenticated')
       return
     }
 
     try {
       const { token } = useAuthStore.getState()
       if (!token) {
-        console.log('💓 Heartbeat skipped: no token')
         return
       }
-
-      console.log('💓 Sending heartbeat...', { user: user?.username, timestamp: new Date().toISOString() })
 
       const response = await fetch('/api/sessions/heartbeat', {
         method: 'POST',
@@ -150,9 +149,7 @@ export default function Chat() {
       })
 
       const data = await response.json()
-      if (data.success) {
-        console.log('💓 Heartbeat sent successfully')
-      } else {
+      if (!data.success) {
         console.warn('💓 Heartbeat failed:', data.error)
       }
     } catch (error) {
@@ -164,20 +161,11 @@ export default function Chat() {
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    console.log('🚀 Send message triggered', {
-      messageLength: newMessage.trim().length,
-      isAuthenticated,
-      loading,
-      user: user?.username
-    })
-
     if (!newMessage.trim()) {
-      console.log('❌ Message is empty')
       return
     }
 
     if (loading) {
-      console.log('❌ Already loading')
       return
     }
 
@@ -202,8 +190,6 @@ export default function Chat() {
         return
       }
 
-      console.log('📡 Sending message to API...')
-
       const response = await fetch('/api/chat/message', {
         method: 'POST',
         headers: {
@@ -217,10 +203,7 @@ export default function Chat() {
       })
 
       const data = await response.json()
-      console.log('📨 API Response:', { status: response.status, data })
-
       if (data.success) {
-        console.log('✅ Message sent successfully')
         setNewMessage('')
         // Add the new message to the list in correct position based on ordering
         setMessages(prev => {
@@ -321,7 +304,6 @@ export default function Chat() {
         eventSource = new EventSource(`/api/chat/events/1?clientId=${clientId}`)
 
         eventSource.onopen = () => {
-          console.log('SSE connected for real-time updates')
           useFallback = false
         }
 
@@ -331,7 +313,6 @@ export default function Chat() {
 
             switch (data.type) {
               case 'connected':
-                console.log('SSE connection confirmed:', data.clientId)
                 break
 
               case 'new_message':
@@ -354,7 +335,7 @@ export default function Chat() {
                 break
 
               default:
-                console.log('Unknown SSE event:', data)
+                break
             }
           } catch (error) {
             console.error('Error parsing SSE event:', error)
@@ -383,7 +364,6 @@ export default function Chat() {
     // Fallback message polling only if SSE fails
     const fallbackInterval = setInterval(() => {
       if (useFallback) {
-        console.log('Using fallback polling for messages')
         fetchMessages()
       }
     }, 5000) // Fallback poll every 5 seconds
@@ -433,6 +413,7 @@ export default function Chat() {
       <div className="fixed bottom-4 right-4 z-50">
         <button
           onClick={() => setIsOpen(!isOpen)}
+          aria-label={isOpen ? 'Close chat' : 'Open chat'}
           className={`${
             isOpen ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
           } text-white p-3 rounded-full shadow-lg transition-colors relative`}
@@ -470,6 +451,7 @@ export default function Chat() {
               <div className="flex items-center space-x-1">
                 <button
                   onClick={() => setShowNewestFirst(true)}
+                  aria-pressed={showNewestFirst}
                   className={`px-2 py-1 rounded text-xs transition-colors ${
                     showNewestFirst
                       ? 'bg-white text-blue-600 font-medium'
@@ -480,6 +462,7 @@ export default function Chat() {
                 </button>
                 <button
                   onClick={() => setShowNewestFirst(false)}
+                  aria-pressed={!showNewestFirst}
                   className={`px-2 py-1 rounded text-xs transition-colors ${
                     !showNewestFirst
                       ? 'bg-white text-blue-600 font-medium'
@@ -515,7 +498,16 @@ export default function Chat() {
               </div>
             ))}
 
-            {messages.length === 0 && (
+            {loading && messages.length === 0 && (
+              <div className="flex justify-center items-center py-8">
+                <svg className="animate-spin h-6 w-6 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+              </div>
+            )}
+
+            {!loading && messages.length === 0 && (
               <div className="text-center text-gray-500 text-sm py-8">
                 No messages yet. Be the first to say hello!
               </div>
@@ -532,14 +524,14 @@ export default function Chat() {
                   type="text"
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
-                  onKeyPress={(e) => {
+                  onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault()
-                      console.log('⌨️ Enter key pressed')
-                      sendMessage(e)
+                      sendMessage(e as unknown as React.FormEvent)
                     }
                   }}
                   placeholder="Type a message..."
+                  aria-label="Type a chat message"
                   className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                   maxLength={500}
                   disabled={loading}
@@ -548,9 +540,9 @@ export default function Chat() {
                   type="button"
                   disabled={loading || !newMessage.trim()}
                   onClick={(e) => {
-                    console.log('🖱️ Send button clicked')
                     sendMessage(e)
                   }}
+                  aria-label="Send message"
                   className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white p-2 rounded-lg transition-colors"
                 >
                   <PaperAirplaneIcon className="w-4 h-4" />

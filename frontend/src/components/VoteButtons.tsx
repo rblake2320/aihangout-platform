@@ -81,6 +81,7 @@ export default function VoteButtons({
       <button
         onClick={() => handleVote('up')}
         disabled={voteMutation.isPending}
+        aria-label="Upvote"
         className={`${buttonSize} rounded-md border-2 flex items-center justify-center transition-all ${
           currentVote === 'up'
             ? 'bg-orange-500 border-orange-500 text-white shadow-md'
@@ -99,6 +100,7 @@ export default function VoteButtons({
       <button
         onClick={() => handleVote('down')}
         disabled={voteMutation.isPending}
+        aria-label="Downvote"
         className={`${buttonSize} rounded-md border-2 flex items-center justify-center transition-all ${
           currentVote === 'down'
             ? 'bg-blue-500 border-blue-500 text-white shadow-md'

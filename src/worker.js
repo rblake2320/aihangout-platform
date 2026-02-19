@@ -210,6 +210,26 @@ async function initDatabase(env) {
       file_type TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (content_id) REFERENCES ai_learning_content (id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS followers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      follower_id INTEGER NOT NULL,
+      following_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(follower_id, following_id),
+      CHECK(follower_id != following_id),
+      FOREIGN KEY (follower_id) REFERENCES users (id),
+      FOREIGN KEY (following_id) REFERENCES users (id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_followers_following ON followers(following_id)`,
+    `CREATE TABLE IF NOT EXISTS platform_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      version TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      description TEXT,
+      release_type TEXT DEFAULT 'minor',
+      features TEXT DEFAULT '[]',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`
   ];
 
@@ -298,9 +318,18 @@ async function initDatabase(env) {
       )
     `).run();
 
-    console.log('✅ AI Intelligence database tables initialized');
   } catch (error) {
-    console.log('❌ Error initializing AI Intelligence DB:', error.message);
+    console.error('Error initializing AI Intelligence DB:', error.message);
+  }
+
+  // Seed initial platform version
+  try {
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT OR IGNORE INTO platform_versions (version, title, description, release_type, features)
+      VALUES ('1.0.0', 'Initial Release', 'AI Hangout platform launch with problem solving, learning hub, and community features.', 'major', '["Problem posting and solving","Knowledge Hub with blueprints and research","Problem Bank with bounties","Real-time chat","User reputation system","AI agent integration","Bug reporting"]')
+    `).run();
+  } catch (e) {
+    // Ignore seed errors
   }
 }
 
@@ -478,7 +507,6 @@ async function logAnalyticsEvent(env, eventData) {
       eventData.event_data || null
     ).run();
 
-    console.log('Analytics event logged:', eventData.event_type, result.meta.last_row_id);
     return { success: true, event_id: result.meta.last_row_id };
   } catch (error) {
     console.error('Failed to log analytics event:', error);
@@ -491,10 +519,7 @@ async function logAnalyticsEvent(env, eventData) {
 // User Authentication
 router.post('/api/auth/register', async (request, env) => {
   try {
-    console.log('Registration request received');
-
     const { username, email, password, aiAgentType = 'human', EMERGENCY_BYPASS } = await request.json();
-    console.log('Parsed request data:', { username, email, aiAgentType });
 
     // EMERGENCY BYPASS FOR IMMEDIATE TESTING
     if (EMERGENCY_BYPASS === 'FORCE_SUCCESS_NOW') {
@@ -528,22 +553,18 @@ router.post('/api/auth/register', async (request, env) => {
     // SECURE PASSWORD HASHING - Use PBKDF2 with random salt (2026-02-02)
     const passwordHash = await hashPassword(password);
 
-    console.log('Password hashed successfully');
-
     // Test database connection
     if (!env.AIHANGOUT_DB) {
       throw new Error('Database not available');
     }
 
     // Create user
-    console.log('Attempting to insert user into database');
     let result;
     try {
       result = await env.AIHANGOUT_DB
         .prepare('INSERT INTO users (username, email, password_hash, ai_agent_type) VALUES (?, ?, ?, ?)')
         .bind(username, email, passwordHash, aiAgentType)
         .run();
-      console.log('User created successfully:', result);
     } catch (dbError) {
       console.error('Database insert error:', dbError);
       const errMsg = dbError.message || '';
@@ -580,7 +601,6 @@ router.post('/api/auth/register', async (request, env) => {
     let token;
     try {
       token = await createJWT({ userId, username }, env);
-      console.log('JWT created successfully');
     } catch (jwtError) {
       console.error('JWT creation failed after successful registration:', jwtError);
       token = 'fallback_token_' + Date.now() + '_' + userId;
@@ -627,10 +647,7 @@ router.post('/api/auth/register', async (request, env) => {
 
 router.post('/api/auth/login', async (request, env) => {
   try {
-    console.log('Login request received');
-
     const { email, password } = await request.json();
-    console.log('Login attempt for email:', email);
 
     if (!email || !password) {
       return new Response(JSON.stringify({
@@ -648,7 +665,6 @@ router.post('/api/auth/login', async (request, env) => {
       .first();
 
     if (!user) {
-      console.log('User not found for email:', email);
       return new Response(JSON.stringify({
         success: false,
         error: 'Invalid credentials'
@@ -662,7 +678,6 @@ router.post('/api/auth/login', async (request, env) => {
     const isPasswordValid = await verifyPassword(password, user.password_hash);
 
     if (!isPasswordValid) {
-      console.log('Password mismatch for user:', email);
       return new Response(JSON.stringify({
         success: false,
         error: 'Invalid credentials'
@@ -671,8 +686,6 @@ router.post('/api/auth/login', async (request, env) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
-
-    console.log('Login successful for user:', user.username);
 
     let token;
     try {
@@ -739,49 +752,53 @@ router.get('/api/problems', async (request, env) => {
     const limit = parseInt(url.searchParams.get('limit') || '20');
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
+    // Build WHERE conditions for both COUNT and main query
+    let whereClause = ' WHERE p.status = ?';
+    const whereParams = [status];
+
+    if (category) {
+      whereClause += ' AND p.category = ?';
+      whereParams.push(category);
+    }
+    if (search) {
+      whereClause += ' AND (p.title LIKE ? OR p.description LIKE ?)';
+      const searchPattern = `%${search}%`;
+      whereParams.push(searchPattern, searchPattern);
+    }
+    if (solutionStatus) {
+      if (solutionStatus === 'unsolved') {
+        whereClause += ' AND (SELECT COUNT(*) FROM solutions WHERE problem_id = p.id) = 0';
+      } else if (solutionStatus === 'solved') {
+        whereClause += ' AND (SELECT COUNT(*) FROM solutions WHERE problem_id = p.id AND is_verified = 1) > 0';
+      } else if (solutionStatus === 'partial') {
+        whereClause += ' AND (SELECT COUNT(*) FROM solutions WHERE problem_id = p.id) > 0 AND (SELECT COUNT(*) FROM solutions WHERE problem_id = p.id AND is_verified = 1) = 0';
+      }
+    }
+    if (authorType) {
+      if (authorType === 'human') {
+        whereClause += ' AND u.ai_agent_type = ?';
+        whereParams.push('human');
+      } else if (authorType === 'ai') {
+        whereClause += ' AND u.ai_agent_type != ?';
+        whereParams.push('human');
+      }
+    }
+
+    // COUNT query with same filters
+    const countQuery = `SELECT COUNT(*) as total FROM problems p JOIN users u ON p.user_id = u.id` + whereClause;
+    const countResult = await env.AIHANGOUT_DB.prepare(countQuery).bind(...whereParams).first();
+    const total = countResult?.total || 0;
+    const page = Math.floor(offset / limit) + 1;
+    const totalPages = Math.ceil(total / limit);
+
     let query = `
       SELECT p.*, u.username, u.ai_agent_type,
              COUNT(s.id) as solution_count
       FROM problems p
       JOIN users u ON p.user_id = u.id
       LEFT JOIN solutions s ON p.id = s.problem_id
-      WHERE p.status = ?
-    `;
-    const params = [status];
-
-    if (category) {
-      query += ' AND p.category = ?';
-      params.push(category);
-    }
-
-    // Search functionality
-    if (search) {
-      query += ' AND (p.title LIKE ? OR p.description LIKE ?)';
-      const searchPattern = `%${search}%`;
-      params.push(searchPattern, searchPattern);
-    }
-
-    // Solution status filter
-    if (solutionStatus) {
-      if (solutionStatus === 'unsolved') {
-        query += ' AND (SELECT COUNT(*) FROM solutions WHERE problem_id = p.id) = 0';
-      } else if (solutionStatus === 'solved') {
-        query += ' AND (SELECT COUNT(*) FROM solutions WHERE problem_id = p.id AND is_verified = 1) > 0';
-      } else if (solutionStatus === 'partial') {
-        query += ' AND (SELECT COUNT(*) FROM solutions WHERE problem_id = p.id) > 0 AND (SELECT COUNT(*) FROM solutions WHERE problem_id = p.id AND is_verified = 1) = 0';
-      }
-    }
-
-    // Author type filter
-    if (authorType) {
-      if (authorType === 'human') {
-        query += ' AND u.ai_agent_type = ?';
-        params.push('human');
-      } else if (authorType === 'ai') {
-        query += ' AND u.ai_agent_type != ?';
-        params.push('human');
-      }
-    }
+    ` + whereClause;
+    const params = [...whereParams];
 
     query += `
       GROUP BY p.id, u.username, u.ai_agent_type
@@ -812,7 +829,12 @@ router.get('/api/problems', async (request, env) => {
 
     return new Response(JSON.stringify({
       success: true,
-      problems: problems.results
+      problems: problems.results,
+      total,
+      page,
+      totalPages,
+      hasNext: page < totalPages,
+      hasPrev: page > 1
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -902,7 +924,6 @@ router.post('/api/problems', async (request, env) => {
     }
 
     const requestData = await request.json();
-    console.log('Post creation request data:', requestData);
 
     // Extract and validate required fields
     const {
@@ -921,7 +942,6 @@ router.post('/api/problems', async (request, env) => {
     if (!category || category.trim() === '') missingFields.push('category');
 
     if (missingFields.length > 0) {
-      console.log('Missing required fields:', missingFields);
       return new Response(JSON.stringify({
         success: false,
         error: `Missing required fields: ${missingFields.join(', ')}`,
@@ -948,8 +968,6 @@ router.post('/api/problems', async (request, env) => {
     const aiContextJson = aiContext ? JSON.stringify(aiContext) : null;
     const spofIndicatorsJson = spofIndicators ? JSON.stringify(spofIndicators) : null;
 
-    console.log('Creating problem with:', { title, description, category, difficulty });
-
     const result = await env.AIHANGOUT_DB
       .prepare(`INSERT INTO problems
         (user_id, title, description, category, difficulty, ai_context, spof_indicators)
@@ -957,8 +975,6 @@ router.post('/api/problems', async (request, env) => {
       .bind(user.id, title.trim(), description.trim(), category.trim(), difficulty,
             aiContextJson, spofIndicatorsJson)
       .run();
-
-    console.log('Problem created successfully:', result.meta.last_row_id);
 
     // 🚀 REAL-TIME UPDATE: Fetch the complete problem data and broadcast to SSE clients
     try {
@@ -980,7 +996,6 @@ router.post('/api/problems', async (request, env) => {
           type: 'new_problem',
           data: newProblem
         });
-        console.log('✅ New problem broadcasted to SSE clients');
       }
     } catch (broadcastError) {
       console.error('Failed to broadcast new problem (non-critical):', broadcastError);
@@ -997,7 +1012,7 @@ router.post('/api/problems', async (request, env) => {
         spofIndicators
       });
     } catch (notifyError) {
-      console.log('AI Army notification failed (non-critical):', notifyError.message);
+      // AI Army notification failed (non-critical)
     }
 
     // Log analytics event for problem creation
@@ -1368,7 +1383,6 @@ async function notifyAIArmy(env, data) {
         hasInsights: !!learningData.learningInsights
       }
     });
-    console.log('Enhanced learning data stored locally:', localKey);
   } catch (kvError) {
     console.error('Failed to store learning data locally:', kvError);
   }
@@ -1376,7 +1390,6 @@ async function notifyAIArmy(env, data) {
   // Try to notify external AI Army server
   try {
     if (!env.AI_ARMY_SERVER) {
-      console.log('AI_ARMY_SERVER not configured, using local storage only');
       return;
     }
 
@@ -1393,11 +1406,9 @@ async function notifyAIArmy(env, data) {
 
     if (!response.ok) {
       console.error('Failed to notify AI Army:', response.status, await response.text());
-    } else {
-      console.log('Successfully notified AI Army');
     }
   } catch (error) {
-    console.log('AI Army server unavailable, data preserved locally:', error.message);
+    // AI Army server unavailable, data preserved locally
   }
 }
 
@@ -7143,7 +7154,7 @@ router.get('/api/harvest/external-problems', async (request, env) => {
         filter_criteria: { status, category, difficulty, source_site }
       });
     } catch (error) {
-      console.log('AI Army notification failed (non-critical):', error.message);
+      // AI Army notification failed (non-critical)
     }
 
     return new Response(JSON.stringify({
@@ -7202,13 +7213,6 @@ router.post('/api/harvest/external-problems', async (request, env) => {
       auto_assign_agents = false
     } = requestData;
 
-    console.log('🔄 Starting external problem harvesting:', {
-      categories,
-      max_per_site,
-      quality_threshold,
-      auto_assign_agents
-    });
-
     // Initialize multi-site harvesting (GitHub + Stack Overflow + Reddit)
     const harvestResults = await initializeMultiSiteHarvesting(env, {
       categories,
@@ -7235,7 +7239,7 @@ router.post('/api/harvest/external-problems', async (request, env) => {
         quality_threshold: quality_threshold
       });
     } catch (error) {
-      console.log('AI Army notification failed (non-critical):', error.message);
+      // AI Army notification failed (non-critical)
     }
 
     return new Response(JSON.stringify({
@@ -7792,15 +7796,11 @@ router.get('/api/debug/test-apis', async (request, env) => {
 // DEBUG: Test scraper endpoint
 router.get('/api/debug/test-scrapers', async (request, env) => {
   try {
-    console.log('=== TESTING SCRAPERS DIRECTLY ===');
-
     // Test Stack Overflow scraper directly
     const soResults = await scrapeStackOverflow(['javascript'], 3, 0.1);
-    console.log(`Direct Stack Overflow test: ${soResults.length} problems returned`);
 
     // Test GitHub scraper directly
     const ghResults = await scrapeGitHubIssues(['javascript'], 3, 0.1);
-    console.log(`Direct GitHub test: ${ghResults.length} problems returned`);
 
     return new Response(JSON.stringify({
       success: true,
@@ -8269,7 +8269,6 @@ router.get('/api/chat/events/:channelId', async (request, env) => {
               timestamp: new Date().toISOString()
             })}\n\n`));
           } catch (error) {
-            console.log('Ping failed, connection closed:', error);
             clearInterval(pingInterval);
           }
         }, 30000); // Ping every 30 seconds
@@ -8323,8 +8322,6 @@ async function broadcastToSSE(env, channelId, eventData) {
     // For now, we'll use a simple approach with KV storage
     // Note: This is a simplified implementation for demonstration
 
-    console.log('Broadcasting SSE event:', { channelId, type: eventData.type });
-
     // Store the latest event in KV for any new connections to pick up
     const eventKey = `latest_event_${channelId}`;
     const eventValue = {
@@ -8346,8 +8343,6 @@ async function broadcastToSSE(env, channelId, eventData) {
 // Enhanced online users count with analytics
 router.get('/api/chat/users/online', async (request, env) => {
   try {
-    console.log('Online users request received');
-
     // Initialize database schema first
     await initDatabase(env);
 
@@ -8385,11 +8380,8 @@ router.get('/api/chat/users/online', async (request, env) => {
       `)
       .first();
 
-    console.log('Enhanced sessions result:', result);
-
     // If no active sessions, check recent analytics activity as fallback
     if (!result || result.online_count === 0) {
-      console.log('No active sessions, checking recent analytics activity');
       result = await env.AIHANGOUT_DB
         .prepare(`
           SELECT
@@ -8402,7 +8394,6 @@ router.get('/api/chat/users/online', async (request, env) => {
         `)
         .first();
 
-      console.log('Recent analytics activity result:', result);
     }
 
     // Ensure we have valid numbers
@@ -9149,7 +9140,6 @@ async function initializeMultiSiteHarvesting(env, config) {
           stored_count++;
         } catch (error) {
           // Skip duplicates
-          console.log(`Duplicate problem skipped: ${problem.external_id}`);
         }
       }
 
@@ -9380,7 +9370,7 @@ async function createExternalProblemSolution(env, solutionData) {
         agent_attribution: `Solved by AI Agent via AIHangout.ai`
       });
     } catch (error) {
-      console.log(`Cross-posting failed: ${error.message}`);
+      console.error(`Cross-posting failed: ${error.message}`);
       cross_post_result = { success: false, error: error.message };
     }
   }
@@ -9546,16 +9536,12 @@ async function scrapeStackOverflow(categories, max_per_site = 10, quality_thresh
 
     // Use unanswered questions with high engagement
     const url = `${API_BASE}/questions/unanswered?order=desc&sort=votes&tagged=${tags}&site=stackoverflow&pagesize=${Math.min(max_per_site, 30)}&filter=!9YdnSMKKT`;
-    console.log(`Stack Overflow: Making API call to: ${url}`);
-
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'AIHangout-ProblemHarvester/1.0 (+https://aihangout.ai/contact)',
         'Accept': 'application/json'
       }
     });
-
-    console.log(`Stack Overflow: API response status: ${response.status}`);
 
     if (!response.ok) {
       console.error(`Stack Overflow API error: ${response.status} - ${response.statusText}`);
@@ -9565,8 +9551,6 @@ async function scrapeStackOverflow(categories, max_per_site = 10, quality_thresh
     }
 
     const data = await response.json();
-    console.log(`Stack Overflow API returned ${data.items?.length || 0} questions, quota remaining: ${data.quota_remaining}`);
-    console.log(`Stack Overflow: First item:`, JSON.stringify(data.items?.[0], null, 2));
 
     for (const question of data.items || []) {
       // Convert Stack Overflow question to standardized format
@@ -9593,13 +9577,7 @@ async function scrapeStackOverflow(categories, max_per_site = 10, quality_thresh
       problems.push(problem);
     }
 
-    // Apply quality filtering and deduplication
-    console.log(`Stack Overflow: ${problems.length} raw problems extracted from API response`);
-
-    // DEBUG: Skip quality filtering temporarily to isolate issue
-    console.log(`Stack Overflow: Skipping quality filtering for debugging - returning raw problems`);
     const finalProblems = problems.slice(0, max_per_site);
-    console.log(`Stack Overflow: Returning ${finalProblems.length} problems (no filtering)`);
     return finalProblems;
 
   } catch (error) {
@@ -9630,8 +9608,6 @@ async function scrapeGitHubIssues(categories, max_per_site = 8, quality_threshol
     const categoryTerms = categories?.join(' ') || 'javascript';
     const query = `is:open is:issue label:"help wanted" ${categoryTerms}`;
     const url = `${API_BASE}/search/issues?q=${encodeURIComponent(query)}&sort=updated&order=desc&per_page=${Math.min(max_per_site, 20)}`;
-    console.log(`GitHub: Making API call to: ${url}`);
-
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'AIHangout-ProblemHarvester/1.0',
@@ -9642,18 +9618,12 @@ async function scrapeGitHubIssues(categories, max_per_site = 8, quality_threshol
       }
     });
 
-    console.log(`GitHub: API response status: ${response.status}`);
-
     if (!response.ok) {
       console.error(`GitHub API error: ${response.status}`);
-      if (response.status === 403) {
-        console.log('Rate limited - falling back to mock data');
-      }
       return []; // Return empty array on API failure
     }
 
     const data = await response.json();
-    console.log(`GitHub API returned ${data.items?.length || 0} issues, total count: ${data.total_count}`);
 
     for (const issue of data.items || []) {
       // Convert GitHub issue to standardized format
@@ -9682,13 +9652,7 @@ async function scrapeGitHubIssues(categories, max_per_site = 8, quality_threshol
       problems.push(problem);
     }
 
-    // Apply quality filtering
-    console.log(`GitHub: ${problems.length} raw problems extracted from API response`);
-
-    // DEBUG: Skip quality filtering temporarily to isolate issue
-    console.log(`GitHub: Skipping quality filtering for debugging - returning raw problems`);
     const finalProblems = problems.slice(0, max_per_site);
-    console.log(`GitHub: Returning ${finalProblems.length} problems (no filtering)`);
     return finalProblems;
 
   } catch (error) {
@@ -9787,9 +9751,6 @@ async function processHarvestedProblems(env, harvestResults) {
       }
     }
 
-    // Log processing results
-    console.log(`Processed ${processedProblems.length} problems from ${Object.keys(harvestResults.site_breakdown).length} sites`);
-
     return processedProblems;
   } catch (error) {
     console.error('Error processing harvested problems:', error);
@@ -9842,12 +9803,11 @@ async function createExternalProblemEntries(env, problems) {
 
       // Try to continue with other problems even if one fails
       if (error.message?.includes('UNIQUE constraint failed')) {
-        console.log(`Problem ${problem.external_id} already exists, skipping...`);
+        // Problem already exists, skipping
       }
     }
   }
 
-  console.log(`Successfully created ${createdProblems.length} external problem entries`);
   return createdProblems;
 }
 
@@ -9927,7 +9887,7 @@ async function deduplicateProblems(env, problems) {
         }
       }
     } catch (error) {
-      console.log(`Deduplication error for ${problem.external_id}: ${error.message}`);
+      // Deduplication check failed, include problem anyway
       // Include problem if deduplication check fails
       uniqueProblems.push(problem);
     }
@@ -10118,8 +10078,6 @@ async function scrapeNVIDIADeveloper(env, options = {}) {
   const intelligenceData = [];
 
   for (const contentType of content_types) {
-    console.log(`🔍 Scraping NVIDIA ${contentType}...`);
-
     for (const sourceUrl of sources[contentType] || []) {
       try {
         const response = await fetch(sourceUrl, {
@@ -10138,12 +10096,11 @@ async function scrapeNVIDIADeveloper(env, options = {}) {
         }
 
       } catch (error) {
-        console.log(`❌ Error scraping ${sourceUrl}:`, error.message);
+        console.error(`Error scraping ${sourceUrl}:`, error.message);
       }
     }
   }
 
-  console.log(`✅ NVIDIA Intelligence harvested: ${intelligenceData.length} items`);
   return intelligenceData;
 }
 
@@ -10218,7 +10175,7 @@ async function extractNVIDIAIntelligence(html, sourceUrl, contentType) {
     }
 
   } catch (error) {
-    console.log(`❌ Error extracting ${contentType} from ${sourceUrl}:`, error.message);
+    console.error(`Error extracting ${contentType} from ${sourceUrl}:`, error.message);
   }
 
   return items;
@@ -10235,7 +10192,6 @@ async function scrapeAIIntelligence(env, options = {}) {
   const allIntelligence = [];
 
   for (const company of companies) {
-    console.log(`🚀 Harvesting ${company} AI intelligence...`);
 
     let companyIntelligence = [];
 
@@ -10305,7 +10261,7 @@ async function scrapeOpenAI(env, options = {}) {
         });
       }
     } catch (error) {
-      console.log(`❌ Error scraping OpenAI ${sourceUrl}:`, error.message);
+      console.error(`Error scraping OpenAI ${sourceUrl}:`, error.message);
     }
   }
 
@@ -10404,7 +10360,7 @@ async function storeAIIntelligence(env, intelligenceData) {
       }
 
     } catch (error) {
-      console.log(`❌ Error storing intelligence item:`, error.message);
+      console.error('Error storing intelligence item:', error.message);
     }
   }
 
@@ -10461,7 +10417,7 @@ async function analyzeAITrends(env) {
     return trends;
 
   } catch (error) {
-    console.log('❌ Error analyzing AI trends:', error.message);
+    console.error('Error analyzing AI trends:', error.message);
     return {
       hot_topics: {},
       company_focus: {},
@@ -10541,12 +10497,6 @@ router.post('/api/harvest/ai-intelligence', async (request, env) => {
       max_per_company = 10
     } = requestData;
 
-    console.log('🧠 Starting AI Intelligence harvesting:', {
-      companies,
-      content_types,
-      max_per_company
-    });
-
     // Harvest AI intelligence from all companies
     const intelligenceData = await scrapeAIIntelligence(env, {
       companies,
@@ -10570,7 +10520,7 @@ router.post('/api/harvest/ai-intelligence', async (request, env) => {
         trends_detected: Object.keys(trends.hot_topics).length
       });
     } catch (error) {
-      console.log('AI Army notification failed (non-critical):', error.message);
+      // AI Army notification failed (non-critical)
     }
 
     return new Response(JSON.stringify({
@@ -10992,12 +10942,6 @@ router.post('/api/data-ownership', async (request, env) => {
     const body = await request.json();
     const { events, session_id, timestamp } = body;
 
-    console.log('🎯 DATA OWNERSHIP: Received events for competitive advantage', {
-      eventCount: events?.length || 0,
-      sessionId: session_id,
-      authenticated: !!user
-    });
-
     // Ensure data ownership table exists
     await env.AIHANGOUT_DB.prepare(`
       CREATE TABLE IF NOT EXISTS data_ownership_events (
@@ -11113,11 +11057,6 @@ router.post('/api/search-analytics', async (request, env) => {
   try {
     const user = await authenticate(request, env);
     const body = await request.json();
-
-    console.log('🔍 SEARCH ANALYTICS: Capturing search pattern for AI optimization', {
-      query: body.query,
-      authenticated: !!user
-    });
 
     // Ensure search analytics table exists
     await env.AIHANGOUT_DB.prepare(`
@@ -11267,7 +11206,6 @@ router.get('/api/problems/events', async (request, env) => {
               timestamp: new Date().toISOString()
             })}\n\n`));
           } catch (error) {
-            console.log('Problems SSE ping failed, connection closed:', error);
             clearInterval(pingInterval);
           }
         }, 30000); // Ping every 30 seconds
@@ -11316,8 +11254,6 @@ router.get('/api/problems/events', async (request, env) => {
 // Problems SSE Broadcasting Function
 async function broadcastToProblemsSSE(env, eventData) {
   try {
-    console.log('Broadcasting problems SSE event:', { type: eventData.type });
-
     // Store the latest event in KV for any new connections to pick up
     const eventKey = 'latest_problems_event';
     const eventValue = {
@@ -11559,6 +11495,172 @@ router.get('/api/security/alerts', async (request, env) => {
 });
 
 // ============================================================================
+// FOLLOW USERS API ENDPOINTS
+// ============================================================================
+
+// Toggle follow/unfollow a user
+router.post('/api/users/:id/follow', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const targetId = parseInt(request.params.id);
+    if (isNaN(targetId)) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid user ID' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (targetId === user.id) {
+      return new Response(JSON.stringify({ success: false, error: 'Cannot follow yourself' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Verify target user exists
+    const targetUser = await env.AIHANGOUT_DB
+      .prepare('SELECT id FROM users WHERE id = ?')
+      .bind(targetId).first();
+    if (!targetUser) {
+      return new Response(JSON.stringify({ success: false, error: 'User not found' }), {
+        status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Check if already following
+    const existing = await env.AIHANGOUT_DB
+      .prepare('SELECT id FROM followers WHERE follower_id = ? AND following_id = ?')
+      .bind(user.id, targetId).first();
+
+    if (existing) {
+      await env.AIHANGOUT_DB
+        .prepare('DELETE FROM followers WHERE follower_id = ? AND following_id = ?')
+        .bind(user.id, targetId).run();
+      return new Response(JSON.stringify({ success: true, following: false }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    } else {
+      await env.AIHANGOUT_DB
+        .prepare('INSERT INTO followers (follower_id, following_id) VALUES (?, ?)')
+        .bind(user.id, targetId).run();
+      return new Response(JSON.stringify({ success: true, following: true }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Get followers for a user
+router.get('/api/users/:id/followers', async (request, env) => {
+  try {
+    await initDatabase(env);
+    const targetId = parseInt(request.params.id);
+    if (isNaN(targetId)) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid user ID' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const result = await env.AIHANGOUT_DB
+      .prepare(`SELECT u.id, u.username, u.reputation, u.ai_agent_type, f.created_at as followed_at
+                FROM followers f JOIN users u ON f.follower_id = u.id
+                WHERE f.following_id = ? ORDER BY f.created_at DESC`)
+      .bind(targetId).all();
+    const count = await env.AIHANGOUT_DB
+      .prepare('SELECT COUNT(*) as count FROM followers WHERE following_id = ?')
+      .bind(targetId).first();
+
+    return new Response(JSON.stringify({ success: true, followers: result.results, count: count?.count || 0 }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Check if current user follows a target user
+router.get('/api/users/:id/is-following', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: true, following: false }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const targetId = parseInt(request.params.id);
+    if (isNaN(targetId)) {
+      return new Response(JSON.stringify({ success: true, following: false }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const existing = await env.AIHANGOUT_DB
+      .prepare('SELECT id FROM followers WHERE follower_id = ? AND following_id = ?')
+      .bind(user.id, targetId).first();
+
+    return new Response(JSON.stringify({ success: true, following: !!existing }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// VERSION TRACKING API ENDPOINTS
+// ============================================================================
+
+// Get all platform versions
+router.get('/api/versions', async (request, env) => {
+  try {
+    await initDatabase(env);
+    const result = await env.AIHANGOUT_DB
+      .prepare('SELECT * FROM platform_versions ORDER BY created_at DESC')
+      .all();
+    const versions = (result.results || []).map(v => ({
+      ...v,
+      features: (() => { try { return v.features ? JSON.parse(v.features) : [] } catch { return [] } })()
+    }));
+    return new Response(JSON.stringify({ success: true, versions }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Get current (latest) version
+router.get('/api/versions/current', async (request, env) => {
+  try {
+    await initDatabase(env);
+    const version = await env.AIHANGOUT_DB
+      .prepare('SELECT * FROM platform_versions ORDER BY created_at DESC LIMIT 1')
+      .first();
+    if (version && version.features) {
+      try { version.features = JSON.parse(version.features); } catch { version.features = []; }
+    }
+    return new Response(JSON.stringify({ success: true, version }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
 // PROBLEM BANK API ENDPOINTS
 // ============================================================================
 
@@ -11593,6 +11695,8 @@ router.get('/api/problem-bank', async (request, env) => {
     const url = new URL(request.url);
     const category = url.searchParams.get('category');
     const impact = url.searchParams.get('impact');
+    const limit = parseInt(url.searchParams.get('limit') || '20');
+    const offset = parseInt(url.searchParams.get('offset') || '0');
 
     // First check if major_problems table has data
     const majorCount = await env.AIHANGOUT_DB
@@ -11600,17 +11704,28 @@ router.get('/api/problem-bank', async (request, env) => {
       .first();
 
     if (majorCount && majorCount.count > 0) {
-      let query = 'SELECT * FROM major_problems WHERE 1=1';
-      const params = [];
+      let whereClause = ' WHERE 1=1';
+      const whereParams = [];
       if (category && category !== 'all') {
-        query += ' AND category = ?';
-        params.push(category);
+        whereClause += ' AND category = ?';
+        whereParams.push(category);
       }
       if (impact && impact !== 'all') {
-        query += ' AND impact_level = ?';
-        params.push(impact);
+        whereClause += ' AND impact_level = ?';
+        whereParams.push(impact);
       }
-      query += ' ORDER BY is_featured DESC, estimated_value DESC';
+
+      // COUNT with same filters
+      const countResult = await env.AIHANGOUT_DB
+        .prepare('SELECT COUNT(*) as total FROM major_problems' + whereClause)
+        .bind(...whereParams).first();
+      const total = countResult?.total || 0;
+      const page = Math.floor(offset / limit) + 1;
+      const totalPages = Math.ceil(total / limit);
+
+      let query = 'SELECT * FROM major_problems' + whereClause;
+      query += ' ORDER BY is_featured DESC, estimated_value DESC LIMIT ? OFFSET ?';
+      const params = [...whereParams, limit, offset];
 
       const result = await env.AIHANGOUT_DB.prepare(query).bind(...params).all();
       const problems = (result.results || []).map(p => ({
@@ -11618,20 +11733,30 @@ router.get('/api/problem-bank', async (request, env) => {
         tags: p.tags ? JSON.parse(p.tags) : []
       }));
 
-      return new Response(JSON.stringify({ success: true, problems }), {
+      return new Response(JSON.stringify({ success: true, problems, total, page, totalPages, hasNext: page < totalPages, hasPrev: page > 1 }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
     // Fallback: source from existing problems table
-    let query = `SELECT id, title, description, category, difficulty, upvotes, created_at,
-                 spof_indicators as tags FROM problems WHERE status = 'open'`;
-    const params = [];
+    let whereClause = " WHERE status = 'open'";
+    const whereParams = [];
     if (category && category !== 'all') {
-      query += ' AND category = ?';
-      params.push(category);
+      whereClause += ' AND category = ?';
+      whereParams.push(category);
     }
-    query += ' ORDER BY upvotes DESC LIMIT 50';
+
+    const countResult = await env.AIHANGOUT_DB
+      .prepare('SELECT COUNT(*) as total FROM problems' + whereClause)
+      .bind(...whereParams).first();
+    const total = countResult?.total || 0;
+    const page = Math.floor(offset / limit) + 1;
+    const totalPages = Math.ceil(total / limit);
+
+    let query = `SELECT id, title, description, category, difficulty, upvotes, created_at,
+                 spof_indicators as tags FROM problems` + whereClause;
+    query += ' ORDER BY upvotes DESC LIMIT ? OFFSET ?';
+    const params = [...whereParams, limit, offset];
 
     const result = await env.AIHANGOUT_DB.prepare(query).bind(...params).all();
 
@@ -11654,14 +11779,14 @@ router.get('/api/problem-bank', async (request, env) => {
       company: null
     }));
 
-    return new Response(JSON.stringify({ success: true, problems }), {
+    return new Response(JSON.stringify({ success: true, problems, total, page, totalPages, hasNext: page < totalPages, hasPrev: page > 1 }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
 
   } catch (error) {
     console.error('Problem bank fetch error:', error);
-    return new Response(JSON.stringify({ success: true, problems: [] }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    return new Response(JSON.stringify({ success: false, error: 'Failed to fetch problems', problems: [], total: 0, page: 1, totalPages: 0, hasNext: false, hasPrev: false }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
 });
@@ -11779,14 +11904,6 @@ router.post('/api/bug-reports', async (request, env) => {
       userId || null,
       username
     ).run();
-
-    console.log('Bug report created:', {
-      id: result.meta.last_row_id,
-      title,
-      bugType,
-      priority,
-      username
-    });
 
     return Response.json({
       success: true,
