@@ -35,6 +35,9 @@ ENVIRONMENT = "production"
 API_VERSION = "v1"
 AI_ARMY_SERVER = "http://192.168.12.132:8777"
 
+[triggers]
+crons = ["0 6 * * *"]   # 6 AM UTC daily harvest
+
 [build]
 command = "npm run build"
 

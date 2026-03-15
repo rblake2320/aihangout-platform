@@ -82,8 +82,12 @@ router.get('/api/test/time-check', async (request, env) => {
   });
 });
 
+// Database initialization guard - skip redundant CREATE TABLE calls after cold start
+let dbInitialized = false;
+
 // Initialize database schema
 async function initDatabase(env) {
+  if (dbInitialized) return;
   const statements = [
     `CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -230,12 +234,39 @@ async function initDatabase(env) {
       release_type TEXT DEFAULT 'minor',
       features TEXT DEFAULT '[]',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`
+    )`,
+    `CREATE TABLE IF NOT EXISTS analytics_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type VARCHAR(50) NOT NULL,
+      user_id INTEGER,
+      user_type VARCHAR(20),
+      session_id VARCHAR(500),
+      page_url VARCHAR(500),
+      referrer VARCHAR(500),
+      user_agent TEXT,
+      ip_address VARCHAR(45),
+      event_data JSON,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS request_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      method VARCHAR(10),
+      path VARCHAR(500),
+      status INTEGER,
+      duration_ms INTEGER,
+      user_agent TEXT,
+      ip_address VARCHAR(45),
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_analytics_type_ts ON analytics_events(event_type, timestamp)`,
+    `CREATE INDEX IF NOT EXISTS idx_analytics_user_ts ON analytics_events(user_id, timestamp)`,
+    `CREATE INDEX IF NOT EXISTS idx_request_log_path_ts ON request_log(path, timestamp)`
   ];
 
   for (const stmt of statements) {
     await env.AIHANGOUT_DB.prepare(stmt).run();
   }
+  dbInitialized = true;
 
   // Initialize AI Intelligence database tables
   try {
@@ -469,26 +500,9 @@ async function authenticate(request, env) {
   return user;
 }
 
-// Analytics helper function
+// Analytics helper function (table created in initDatabase)
 async function logAnalyticsEvent(env, eventData) {
   try {
-    // Ensure the analytics_events table exists
-    await env.AIHANGOUT_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS analytics_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_type VARCHAR(50) NOT NULL,
-        user_id INTEGER,
-        user_type VARCHAR(20),
-        session_id VARCHAR(500),
-        page_url VARCHAR(500),
-        referrer VARCHAR(500),
-        user_agent TEXT,
-        ip_address VARCHAR(45),
-        event_data JSON,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `).run();
-
     // Insert the analytics event
     const result = await env.AIHANGOUT_DB.prepare(`
       INSERT INTO analytics_events (
@@ -1057,7 +1071,7 @@ router.post('/api/problems', async (request, env) => {
 });
 
 // Solutions API
-router.post('/api/problems/:problemId/solutions', async (request, env) => {
+router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
   try {
     const user = await authenticate(request, env);
     if (!user) {
@@ -1077,7 +1091,7 @@ router.post('/api/problems/:problemId/solutions', async (request, env) => {
       .prepare(`INSERT INTO solutions
         (problem_id, user_id, solution_text, code_snippet, why_explanation)
         VALUES (?, ?, ?, ?, ?)`)
-      .bind(problemId, user.id, solutionText, codeSnippet, whyExplanation)
+      .bind(problemId, user.id, solutionText, codeSnippet ?? null, whyExplanation ?? null)
       .run();
 
     // Create AI learning data for Sentinel Model
@@ -1096,6 +1110,17 @@ router.post('/api/problems/:problemId/solutions', async (request, env) => {
       userId: user.id,
       whyExplanation
     });
+
+    // Log solution creation analytics (non-blocking)
+    ctx.waitUntil(logAnalyticsEvent(env, {
+      event_type: 'solution_post',
+      user_id: user.id,
+      user_type: user.ai_agent_type || 'human',
+      page_url: `/api/problems/${problemId}/solutions`,
+      user_agent: request.headers.get('User-Agent'),
+      ip_address: request.headers.get('CF-Connecting-IP'),
+      event_data: JSON.stringify({ solution_id: result.meta.last_row_id, problem_id: problemId, has_code: !!codeSnippet, has_why: !!whyExplanation })
+    }));
 
     return new Response(JSON.stringify({
       success: true,
@@ -1116,7 +1141,7 @@ router.post('/api/problems/:problemId/solutions', async (request, env) => {
 });
 
 // Voting API
-router.post('/api/vote', async (request, env) => {
+router.post('/api/vote', async (request, env, ctx) => {
   try {
     const user = await authenticate(request, env);
     if (!user) {
@@ -1154,6 +1179,17 @@ router.post('/api/vote', async (request, env) => {
       .prepare(`UPDATE ${table} SET upvotes = ? WHERE id = ?`)
       .bind(voteCount.count, targetId)
       .run();
+
+    // Log vote analytics (non-blocking)
+    ctx.waitUntil(logAnalyticsEvent(env, {
+      event_type: 'vote_action',
+      user_id: user.id,
+      user_type: user.ai_agent_type || 'human',
+      page_url: '/api/vote',
+      user_agent: request.headers.get('User-Agent'),
+      ip_address: request.headers.get('CF-Connecting-IP'),
+      event_data: JSON.stringify({ target_type: targetType, target_id: targetId, vote_type: voteType, new_count: voteCount.count })
+    }));
 
     return new Response(JSON.stringify({
       success: true,
@@ -7014,12 +7050,12 @@ router.post('/api/harvest/scrape-problems', async (request, env) => {
 
     const validSites = [
       'stackoverflow', 'github_issues', 'reddit_programming',
-      'dev_to', 'hackernews', 'discourse_forums', 'custom_rss'
+      'dev_to', 'hackernews', 'discourse_forums', 'custom_rss', 'arxiv'
     ];
 
     // Validate target sites
     const sitesToScrape = target_sites?.filter(site => validSites.includes(site)) ||
-                         ['stackoverflow', 'github_issues', 'reddit_programming'];
+                         ['stackoverflow', 'github_issues', 'reddit_programming', 'hackernews', 'arxiv'];
 
     // Initialize problem harvesting across multiple sites
     const harvestResults = await initializeMultiSiteHarvesting(env, {
@@ -8565,20 +8601,33 @@ router.post('/api/sessions/heartbeat', async (request, env) => {
   }
 });
 
-// AI Agent Activity Registration - SIMPLIFIED VERSION
-router.post('/api/ai-agents/register-activity', async (request, env) => {
+// AI Agent Activity Registration - Stores activity in analytics_events
+router.post('/api/ai-agents/register-activity', async (request, env, ctx) => {
   try {
-    // Step 1: Test basic request handling
     const body = await request.json();
+    const { agent_name, agent_type, activity_type, activity_data, session_id } = body;
 
-    // Step 2: Return success immediately (no database operations)
+    // Store AI agent activity (non-blocking)
+    ctx.waitUntil(logAnalyticsEvent(env, {
+      event_type: 'ai_agent_activity',
+      user_id: null,
+      user_type: agent_type || 'ai_agent',
+      session_id: session_id || `agent_${agent_name || 'unknown'}_${Date.now()}`,
+      page_url: '/api/ai-agents/register-activity',
+      user_agent: request.headers.get('User-Agent'),
+      ip_address: request.headers.get('CF-Connecting-IP'),
+      event_data: JSON.stringify({
+        agent_name: agent_name || 'unknown',
+        agent_type: agent_type || 'unknown',
+        activity_type: activity_type || 'general',
+        activity_data: activity_data || {}
+      })
+    }));
+
     return new Response(JSON.stringify({
       success: true,
-      message: "AI agent registration endpoint reached successfully",
-      received_data: {
-        agent_name: body.agent_name || 'unknown',
-        agent_type: body.agent_type || 'unknown'
-      },
+      message: "AI agent activity registered and stored",
+      agent_name: agent_name || 'unknown',
       timestamp: new Date().toISOString()
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -8588,7 +8637,6 @@ router.post('/api/ai-agents/register-activity', async (request, env) => {
     return new Response(JSON.stringify({
       success: false,
       error: error.message,
-      stack: error.stack,
       endpoint: '/api/ai-agents/register-activity'
     }), {
       status: 500,
@@ -9105,6 +9153,9 @@ async function initializeMultiSiteHarvesting(env, config) {
           break;
         case 'hackernews':
           problems = await scrapeHackerNews(categories, max_per_site, quality_threshold);
+          break;
+        case 'arxiv':
+          problems = await scrapeArxiv(categories, max_per_site, quality_threshold);
           break;
         case 'discourse_forums':
           problems = await scrapeDiscourseForums(categories, max_per_site, quality_threshold);
@@ -9673,35 +9724,274 @@ async function scrapeGitHubIssues(categories, max_per_site = 8, quality_threshol
   }
 }
 
-async function scrapeRedditProgramming(categories, max_per_site, quality_threshold) {
-  // Mock Reddit scraping - replace with actual Reddit API calls
-  return Array.from({ length: Math.min(max_per_site, 5) }, (_, i) => ({
-    external_id: `reddit_${Date.now()}_${i}`,
-    title: `Need help optimizing database queries ${i + 1}`,
-    description: `Having performance issues with complex SQL queries...`,
-    url: `https://reddit.com/r/programming/mock${i}`,
-    author: `reddit_user_${i}`,
-    tags: ['database', 'sql', 'performance'],
-    category: 'database',
-    difficulty: 'hard',
-    quality_score: 0.7 + (Math.random() * 0.3)
-  }));
+async function scrapeRedditProgramming(categories, max_per_site = 10, quality_threshold = 0.7) {
+  try {
+    const subreddits = ['programming', 'learnprogramming', 'MachineLearning', 'artificial'];
+    const problems = [];
+
+    for (const subreddit of subreddits) {
+      if (problems.length >= max_per_site) break;
+      const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=10`;
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'AIHangout-ProblemHarvester/1.0 (+https://aihangout.ai/contact)',
+          'Accept': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        console.error(`Reddit API error for r/${subreddit}: ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const posts = data?.data?.children || [];
+
+      for (const post of posts) {
+        if (problems.length >= max_per_site) break;
+        const p = post.data;
+        // Filter for question-like posts (has text, not just links)
+        if (!p.selftext || p.selftext.length < 50) continue;
+
+        const quality_score = Math.min(1.0, 0.5 + (p.score / 1000) * 0.3 + (p.num_comments / 100) * 0.2);
+        if (quality_score < quality_threshold) continue;
+
+        problems.push({
+          external_id: `reddit_${p.id}`,
+          title: p.title,
+          description: p.selftext.slice(0, 2000),
+          url: `https://reddit.com${p.permalink}`,
+          author: p.author || 'Anonymous',
+          tags: [subreddit, ...(p.link_flair_text ? [p.link_flair_text] : [])],
+          category: subreddit === 'MachineLearning' || subreddit === 'artificial' ? 'AI/ML' : 'programming',
+          difficulty: p.score > 100 ? 'hard' : p.score > 20 ? 'medium' : 'easy',
+          upvotes: p.score || 0,
+          views: 0,
+          created_at: new Date(p.created_utc * 1000).toISOString(),
+          quality_score,
+          source_metadata: {
+            subreddit: p.subreddit,
+            num_comments: p.num_comments,
+            upvote_ratio: p.upvote_ratio
+          }
+        });
+      }
+    }
+
+    return problems.slice(0, max_per_site);
+
+  } catch (error) {
+    console.error(`Reddit scraping error: ${error.message}`);
+    return [];
+  }
 }
 
-async function scrapeDevTo(categories, max_per_site, quality_threshold) {
-  return []; // Mock implementation
+async function scrapeDevTo(categories, max_per_site = 5, quality_threshold = 0.7) {
+  try {
+    const url = `https://dev.to/api/articles?tag=discuss&per_page=${Math.min(max_per_site * 3, 30)}&state=fresh`;
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'AIHangout-ProblemHarvester/1.0 (+https://aihangout.ai/contact)',
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      console.error(`Dev.to API error: ${response.status}`);
+      return [];
+    }
+
+    const articles = await response.json();
+    const problems = [];
+
+    for (const article of articles) {
+      if (problems.length >= max_per_site) break;
+      // Filter for discussion/question posts
+      const isQuestion = article.title.includes('?') ||
+        article.description?.toLowerCase().includes('how') ||
+        article.description?.toLowerCase().includes('why') ||
+        article.description?.toLowerCase().includes('what');
+      if (!isQuestion) continue;
+
+      const quality_score = Math.min(1.0, 0.5 + (article.positive_reactions_count / 200) * 0.3 + (article.comments_count / 50) * 0.2);
+      if (quality_score < quality_threshold * 0.8) continue; // slightly relaxed threshold for dev.to
+
+      problems.push({
+        external_id: `devto_${article.id}`,
+        title: article.title,
+        description: article.description || article.title,
+        url: article.url,
+        author: article.user?.username || 'Anonymous',
+        tags: article.tag_list || [],
+        category: article.tag_list?.includes('machinelearning') || article.tag_list?.includes('ai') ? 'AI/ML' : 'programming',
+        difficulty: article.reading_time_minutes > 10 ? 'hard' : article.reading_time_minutes > 5 ? 'medium' : 'easy',
+        upvotes: article.positive_reactions_count || 0,
+        views: article.page_views_count || 0,
+        created_at: article.published_at || new Date().toISOString(),
+        quality_score,
+        source_metadata: {
+          comments_count: article.comments_count,
+          reading_time_minutes: article.reading_time_minutes,
+          type_of: article.type_of
+        }
+      });
+    }
+
+    return problems.slice(0, max_per_site);
+
+  } catch (error) {
+    console.error(`Dev.to scraping error: ${error.message}`);
+    return [];
+  }
 }
 
-async function scrapeHackerNews(categories, max_per_site, quality_threshold) {
-  return []; // Mock implementation
+async function scrapeHackerNews(categories, max_per_site = 5, quality_threshold = 0.7) {
+  try {
+    // Fetch top story IDs
+    const topStoriesUrl = 'https://hacker-news.firebaseio.com/v0/topstories.json';
+    const idsResponse = await fetch(topStoriesUrl, {
+      headers: { 'Accept': 'application/json' }
+    });
+
+    if (!idsResponse.ok) {
+      console.error(`HN API error fetching IDs: ${idsResponse.status}`);
+      return [];
+    }
+
+    const allIds = await idsResponse.json();
+    // Check first 50 stories to find Ask HN and high-score items
+    const candidateIds = allIds.slice(0, 50);
+    const problems = [];
+
+    for (const id of candidateIds) {
+      if (problems.length >= max_per_site) break;
+
+      const itemUrl = `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
+      const itemResponse = await fetch(itemUrl, {
+        headers: { 'Accept': 'application/json' }
+      });
+
+      if (!itemResponse.ok) continue;
+
+      const item = await itemResponse.json();
+      if (!item || item.deleted || item.dead) continue;
+
+      // Include Ask HN posts and high-score stories about tech
+      const isAskHN = item.title?.startsWith('Ask HN:');
+      const isHighScore = item.score > 50;
+      if (!isAskHN && !isHighScore) continue;
+      if (item.score < 10) continue;
+
+      const quality_score = Math.min(1.0, 0.4 + (item.score / 500) * 0.4 + ((item.descendants || 0) / 200) * 0.2);
+      if (quality_score < quality_threshold * 0.8) continue;
+
+      const isAIML = item.title?.toLowerCase().match(/\b(ai|ml|llm|gpt|machine learning|neural|model|claude|openai)\b/);
+
+      problems.push({
+        external_id: `hn_${item.id}`,
+        title: item.title,
+        description: item.text ? item.text.replace(/<[^>]*>/g, '').slice(0, 2000) : `${item.title}. Discuss on Hacker News.`,
+        url: item.url || `https://news.ycombinator.com/item?id=${item.id}`,
+        author: item.by || 'Anonymous',
+        tags: isAskHN ? ['ask-hn', 'discussion'] : ['hacker-news'],
+        category: isAIML ? 'AI/ML' : 'programming',
+        difficulty: item.score > 200 ? 'hard' : item.score > 50 ? 'medium' : 'easy',
+        upvotes: item.score || 0,
+        views: 0,
+        created_at: new Date(item.time * 1000).toISOString(),
+        quality_score,
+        source_metadata: {
+          hn_id: item.id,
+          descendants: item.descendants || 0,
+          type: item.type,
+          is_ask_hn: isAskHN
+        }
+      });
+    }
+
+    return problems.slice(0, max_per_site);
+
+  } catch (error) {
+    console.error(`HackerNews scraping error: ${error.message}`);
+    return [];
+  }
+}
+
+async function scrapeArxiv(categories, max_per_site = 5, quality_threshold = 0.7) {
+  try {
+    // arXiv Atom API — CS.AI and CS.LG (machine learning) papers
+    const url = `https://export.arxiv.org/api/query?search_query=cat:cs.AI+OR+cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=${Math.min(max_per_site * 2, 20)}`;
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'AIHangout-ProblemHarvester/1.0 (+https://aihangout.ai/contact)',
+        'Accept': 'application/atom+xml'
+      }
+    });
+
+    if (!response.ok) {
+      console.error(`arXiv API error: ${response.status}`);
+      return [];
+    }
+
+    const xmlText = await response.text();
+    const problems = [];
+
+    // Parse Atom XML entries using regex (no DOM parser in CF Workers, but TextDecoder works)
+    const entryMatches = xmlText.match(/<entry>([\s\S]*?)<\/entry>/g) || [];
+
+    for (const entry of entryMatches) {
+      if (problems.length >= max_per_site) break;
+
+      const titleMatch = entry.match(/<title>([\s\S]*?)<\/title>/);
+      const summaryMatch = entry.match(/<summary>([\s\S]*?)<\/summary>/);
+      const idMatch = entry.match(/<id>([\s\S]*?)<\/id>/);
+      const authorMatch = entry.match(/<name>([\s\S]*?)<\/name>/);
+      const publishedMatch = entry.match(/<published>([\s\S]*?)<\/published>/);
+
+      if (!titleMatch || !summaryMatch || !idMatch) continue;
+
+      const title = titleMatch[1].trim().replace(/\s+/g, ' ');
+      const summary = summaryMatch[1].trim().replace(/\s+/g, ' ').slice(0, 2000);
+      const arxivUrl = idMatch[1].trim();
+      const author = authorMatch ? authorMatch[1].trim() : 'arXiv Author';
+      const publishedAt = publishedMatch ? publishedMatch[1].trim() : new Date().toISOString();
+      const arxivId = arxivUrl.split('/abs/').pop() || arxivUrl.split('/').pop();
+
+      problems.push({
+        external_id: `arxiv_${arxivId.replace(/\./g, '_')}`,
+        title: `[Research] ${title}`,
+        description: summary,
+        url: arxivUrl,
+        author,
+        tags: ['arxiv', 'research', 'AI/ML', 'paper'],
+        category: 'AI/ML',
+        difficulty: 'hard',
+        upvotes: 0,
+        views: 0,
+        created_at: publishedAt,
+        quality_score: 0.85, // Research papers get high quality score by default
+        source_metadata: {
+          arxiv_id: arxivId,
+          source: 'arxiv',
+          type: 'research_paper'
+        }
+      });
+    }
+
+    return problems.slice(0, max_per_site);
+
+  } catch (error) {
+    console.error(`arXiv scraping error: ${error.message}`);
+    return [];
+  }
 }
 
 async function scrapeDiscourseForums(categories, max_per_site, quality_threshold) {
-  return []; // Mock implementation
+  return []; // Future implementation
 }
 
 async function scrapeCustomRSS(categories, max_per_site, quality_threshold) {
-  return []; // Mock implementation
+  return []; // Future implementation
 }
 
 // Cross-posting function (mock implementation)
@@ -10801,7 +11091,7 @@ router.post('/api/intelligence/harvest', async (request, env) => {
 // ========================
 
 // Bookmark management endpoints
-router.post('/api/bookmarks', async (request, env) => {
+router.post('/api/bookmarks', async (request, env, ctx) => {
   try {
     await initDatabase(env);
 
@@ -10830,6 +11120,16 @@ router.post('/api/bookmarks', async (request, env) => {
       'INSERT OR IGNORE INTO bookmarks (user_id, content_type, content_id) VALUES (?, ?, ?)'
     ).bind(authResult.id, content_type, content_id).run();
 
+    // Log bookmark analytics (non-blocking)
+    ctx.waitUntil(logAnalyticsEvent(env, {
+      event_type: 'bookmark_add',
+      user_id: authResult.id,
+      page_url: '/api/bookmarks',
+      user_agent: request.headers.get('User-Agent'),
+      ip_address: request.headers.get('CF-Connecting-IP'),
+      event_data: JSON.stringify({ content_type, content_id })
+    }));
+
     return Response.json({
       success: true,
       message: 'Content bookmarked successfully',
@@ -10848,7 +11148,7 @@ router.post('/api/bookmarks', async (request, env) => {
   }
 });
 
-router.delete('/api/bookmarks/:contentType/:contentId', async (request, env) => {
+router.delete('/api/bookmarks/:contentType/:contentId', async (request, env, ctx) => {
   try {
     await initDatabase(env);
 
@@ -10865,6 +11165,16 @@ router.delete('/api/bookmarks/:contentType/:contentId', async (request, env) => 
     await env.AIHANGOUT_DB.prepare(
       'DELETE FROM bookmarks WHERE user_id = ? AND content_type = ? AND content_id = ?'
     ).bind(authResult.id, contentType, contentId).run();
+
+    // Log bookmark removal analytics (non-blocking)
+    ctx.waitUntil(logAnalyticsEvent(env, {
+      event_type: 'bookmark_remove',
+      user_id: authResult.id,
+      page_url: '/api/bookmarks',
+      user_agent: request.headers.get('User-Agent'),
+      ip_address: request.headers.get('CF-Connecting-IP'),
+      event_data: JSON.stringify({ content_type: contentType, content_id: contentId })
+    }));
 
     return Response.json({
       success: true,
@@ -11047,6 +11357,67 @@ function calculateCompetitiveValue(event) {
 
   return Math.min(score, 5.0); // Cap at 5.0
 }
+
+// ========================
+// UNIVERSAL EVENT BATCH INGESTION ENDPOINT
+// ========================
+
+// POST /api/events/batch - Universal event ingestion from frontend AnalyticsTracker
+router.post('/api/events/batch', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+
+    // Parse body - supports both application/json and text/plain (sendBeacon)
+    let body;
+    try {
+      body = JSON.parse(await request.text());
+    } catch {
+      return Response.json({ success: true, processed: 0 }, { headers: corsHeaders });
+    }
+
+    const { events, session_id } = body;
+    if (!events || !Array.isArray(events) || events.length === 0) {
+      return Response.json({ success: true, processed: 0 }, { headers: corsHeaders });
+    }
+
+    // Cap at 50 events per batch to stay within D1 limits
+    const batch = events.slice(0, 50);
+
+    // Use D1 batch API for efficiency (single round trip)
+    const statements = batch.map(event =>
+      env.AIHANGOUT_DB.prepare(`
+        INSERT INTO analytics_events (
+          event_type, user_id, user_type, session_id, page_url,
+          user_agent, ip_address, event_data, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        event.event_type || 'unknown',
+        user?.id || event.user_id || null,
+        user?.ai_agent_type || event.user_type || 'anonymous',
+        session_id || event.session_id || null,
+        event.page_url || null,
+        request.headers.get('User-Agent'),
+        request.headers.get('CF-Connecting-IP'),
+        JSON.stringify(event.metadata || {}),
+        event.timestamp || new Date().toISOString()
+      )
+    );
+
+    await env.AIHANGOUT_DB.batch(statements);
+
+    return Response.json({
+      success: true,
+      processed: batch.length,
+      dropped: Math.max(0, events.length - 50)
+    }, { headers: corsHeaders });
+
+  } catch (error) {
+    console.error('Event batch ingestion error:', error);
+    return Response.json({ success: false, error: error.message }, {
+      status: 500, headers: corsHeaders
+    });
+  }
+});
 
 // ========================
 // SEARCH ANALYTICS API ENDPOINT - AI OPTIMIZATION SYSTEM
@@ -12121,11 +12492,63 @@ router.get('*', async (request, env) => {
   }
 });
 
+// Lightweight request logger - non-blocking, silent on failure
+async function logRequestToD1(env, data) {
+  try {
+    await env.AIHANGOUT_DB.prepare(
+      'INSERT INTO request_log (method, path, status, duration_ms, user_agent, ip_address, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(data.method, data.path, data.status, data.duration_ms, data.user_agent, data.ip_address, data.timestamp).run();
+  } catch (e) {
+    // Silent failure - request logging must never break the app
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
-    // Initialize database on first run
     await initDatabase(env);
 
-    return router.handle(request, env, ctx);
+    const startTime = Date.now();
+    const url = new URL(request.url);
+    const response = await router.handle(request, env, ctx);
+
+    // Log API requests non-blocking (skip batch endpoint to avoid noise)
+    if (url.pathname.startsWith('/api/') && !url.pathname.includes('/events/batch')) {
+      ctx.waitUntil(logRequestToD1(env, {
+        method: request.method,
+        path: url.pathname,
+        status: response?.status || 0,
+        duration_ms: Date.now() - startTime,
+        user_agent: request.headers.get('User-Agent'),
+        ip_address: request.headers.get('CF-Connecting-IP'),
+        timestamp: new Date().toISOString()
+      }));
+    }
+
+    return response;
+  },
+
+  // Daily harvest cron trigger (0 6 * * * = 6 AM UTC daily)
+  async scheduled(event, env, ctx) {
+    console.log(`[Cron] Daily harvest triggered at ${new Date(event.scheduledTime).toISOString()}`);
+    ctx.waitUntil(runDailyHarvest(env));
   },
 };
+
+async function runDailyHarvest(env) {
+  try {
+    await initDatabase(env);
+    const allSites = ['stackoverflow', 'github_issues', 'reddit_programming', 'dev_to', 'hackernews', 'arxiv'];
+    const result = await initializeMultiSiteHarvesting(env, {
+      sites: allSites,
+      categories: ['javascript', 'python', 'ai', 'machine-learning', 'backend', 'frontend'],
+      difficulty_filters: ['easy', 'medium', 'hard'],
+      max_per_site: 10,
+      quality_threshold: 0.6,
+      auto_assign_agents: false
+    });
+    const total = result?.total_problems_stored || 0;
+    console.log(`[Cron] Daily harvest complete: ${total} new problems stored across ${allSites.length} sites`);
+  } catch (error) {
+    console.error(`[Cron] Daily harvest failed: ${error.message}`);
+  }
+}
