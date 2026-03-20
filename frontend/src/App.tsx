@@ -12,6 +12,7 @@ import LearningDetailPage from './pages/LearningDetailPage'
 import ProblemBankPage from './pages/ProblemBankPage'
 import BugReportPage from './pages/BugReportPage'
 import ChangelogPage from './pages/ChangelogPage'
+import ProfilePage from './pages/ProfilePage'
 
 function App() {
   const { isAuthenticated } = useAuthStore()
@@ -43,6 +44,7 @@ function App() {
             path="/problem/:id"
             element={<ProblemDetailPage />}
           />
+          <Route path="/profile/:username" element={<ProfilePage />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </main>

@@ -362,6 +362,38 @@ async function initDatabase(env) {
   } catch (e) {
     // Ignore seed errors
   }
+
+  // Schema migrations — idempotent ALTER TABLE (SQLite ignores duplicate column errors)
+  const migrations = [
+    // Problems: bounty, harvesting, and visibility fields
+    `ALTER TABLE problems ADD COLUMN bounty_amount INTEGER DEFAULT 0`,
+    `ALTER TABLE problems ADD COLUMN tags TEXT`,
+    `ALTER TABLE problems ADD COLUMN source_url TEXT`,
+    `ALTER TABLE problems ADD COLUMN external_id TEXT`,
+    `ALTER TABLE problems ADD COLUMN is_harvested BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE problems ADD COLUMN estimated_value INTEGER DEFAULT 0`,
+    `ALTER TABLE problems ADD COLUMN impact_level TEXT DEFAULT 'medium'`,
+    `ALTER TABLE problems ADD COLUMN affected_users INTEGER DEFAULT 100`,
+    `ALTER TABLE problems ADD COLUMN time_to_solve TEXT DEFAULT '2-5 days'`,
+    `ALTER TABLE problems ADD COLUMN industry TEXT DEFAULT 'Technology'`,
+    // RLS: visibility control and admin flag
+    `ALTER TABLE problems ADD COLUMN is_public BOOLEAN DEFAULT TRUE`,
+    `ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE`,
+  ];
+  for (const migration of migrations) {
+    try {
+      await env.AIHANGOUT_DB.prepare(migration).run();
+    } catch (e) {
+      // Column already exists — safe to ignore
+    }
+  }
+
+  // Make curator account an admin so it can set bounty amounts
+  try {
+    await env.AIHANGOUT_DB.prepare(
+      `UPDATE users SET is_admin = TRUE WHERE email = 'curator@aihangout.ai'`
+    ).run();
+  } catch (e) {}
 }
 
 // SECURE PASSWORD HASHING - CRITICAL SECURITY FIX (2026-02-02)
@@ -763,13 +795,23 @@ router.get('/api/problems', async (request, env) => {
     const solutionStatus = url.searchParams.get('solutionStatus');
     const authorType = url.searchParams.get('authorType');
     const sortBy = url.searchParams.get('sortBy') || 'new'; // 🆕 DEFAULT TO NEWEST FIRST
+    const username = url.searchParams.get('username');
     const limit = parseInt(url.searchParams.get('limit') || '20');
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
-    // Build WHERE conditions for both COUNT and main query
-    let whereClause = ' WHERE p.status = ?';
-    const whereParams = [status];
+    // RLS: determine caller identity (optional auth)
+    const callerUser = await authenticate(request, env).catch(() => null);
+    const callerId = callerUser?.id || null;
 
+    // Build WHERE conditions for both COUNT and main query
+    // RLS: only show public problems OR problems owned by the caller
+    let whereClause = ' WHERE p.status = ? AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?)';
+    const whereParams = [status, callerId];
+
+    if (username) {
+      whereClause += ' AND u.username = ?';
+      whereParams.push(username);
+    }
     if (category) {
       whereClause += ' AND p.category = ?';
       whereParams.push(category);
@@ -869,7 +911,11 @@ router.get('/api/problems/:id', async (request, env) => {
   try {
     const { id } = request.params;
 
-    // Get problem with full details
+    // RLS: check caller identity
+    const callerUser = await authenticate(request, env).catch(() => null);
+    const callerId = callerUser?.id || null;
+
+    // Get problem with full details — RLS: only if public OR owner
     const problem = await env.AIHANGOUT_DB
       .prepare(`
         SELECT p.*, u.username, u.ai_agent_type,
@@ -877,10 +923,10 @@ router.get('/api/problems/:id', async (request, env) => {
         FROM problems p
         JOIN users u ON p.user_id = u.id
         LEFT JOIN solutions s ON p.id = s.problem_id
-        WHERE p.id = ?
+        WHERE p.id = ? AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?)
         GROUP BY p.id, u.username, u.ai_agent_type
       `)
-      .bind(id)
+      .bind(id, callerId)
       .first();
 
     if (!problem) {
@@ -946,7 +992,19 @@ router.post('/api/problems', async (request, env) => {
       category,
       difficulty = 'medium',
       aiContext,
-      spofIndicators
+      spofIndicators,
+      // Bounty & harvesting fields
+      bounty_amount = 0,
+      estimated_value = 0,
+      impact_level = 'medium',
+      affected_users = 100,
+      time_to_solve = '2-5 days',
+      industry = 'Technology',
+      tags,
+      source_url,
+      external_id,
+      is_harvested = false,
+      is_public = true,
     } = requestData;
 
     // Validate required fields
@@ -966,6 +1024,24 @@ router.post('/api/problems', async (request, env) => {
       });
     }
 
+    // Dedup: if external_id provided, reject duplicates with 409
+    if (external_id) {
+      const existing = await env.AIHANGOUT_DB
+        .prepare('SELECT id FROM problems WHERE external_id = ?')
+        .bind(external_id)
+        .first();
+      if (existing) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Duplicate external_id',
+          problemId: existing.id
+        }), {
+          status: 409,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
     // Validate difficulty value
     const validDifficulties = ['easy', 'medium', 'hard'];
     if (!validDifficulties.includes(difficulty)) {
@@ -981,13 +1057,23 @@ router.post('/api/problems', async (request, env) => {
     // Safely stringify optional fields
     const aiContextJson = aiContext ? JSON.stringify(aiContext) : null;
     const spofIndicatorsJson = spofIndicators ? JSON.stringify(spofIndicators) : null;
+    const tagsJson = tags ? JSON.stringify(Array.isArray(tags) ? tags : [tags]) : null;
+
+    // RLS: only admins can set bounty amounts
+    const effectiveBounty = user.is_admin ? (bounty_amount || 0) : 0;
+    const effectiveEstimated = user.is_admin ? (estimated_value || 0) : 0;
 
     const result = await env.AIHANGOUT_DB
       .prepare(`INSERT INTO problems
-        (user_id, title, description, category, difficulty, ai_context, spof_indicators)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        (user_id, title, description, category, difficulty, ai_context, spof_indicators,
+         bounty_amount, estimated_value, impact_level, affected_users, time_to_solve,
+         industry, tags, source_url, external_id, is_harvested, is_public)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(user.id, title.trim(), description.trim(), category.trim(), difficulty,
-            aiContextJson, spofIndicatorsJson)
+            aiContextJson, spofIndicatorsJson,
+            effectiveBounty, effectiveEstimated, impact_level, affected_users,
+            time_to_solve, industry, tagsJson, source_url || null,
+            external_id || null, is_harvested ? 1 : 0, is_public ? 1 : 0)
       .run();
 
     // 🚀 REAL-TIME UPDATE: Fetch the complete problem data and broadcast to SSE clients
@@ -11861,6 +11947,60 @@ router.get('/api/security/alerts', async (request, env) => {
       total: 0
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// USER PROFILE ENDPOINTS
+// ============================================================================
+
+// GET /api/users/by-username/:username — fetch public profile by username
+router.get('/api/users/by-username/:username', async (request, env) => {
+  try {
+    const username = request.params.username;
+    if (!username) {
+      return new Response(JSON.stringify({ error: 'Username required' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const user = await env.AIHANGOUT_DB
+      .prepare('SELECT id, username, reputation, ai_agent_type, join_date FROM users WHERE username = ?')
+      .bind(username)
+      .first();
+
+    if (!user) {
+      return new Response(JSON.stringify({ error: 'User not found' }), {
+        status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const problemCount = await env.AIHANGOUT_DB
+      .prepare('SELECT COUNT(*) as count FROM problems WHERE user_id = ?')
+      .bind(user.id)
+      .first();
+
+    const solutionCount = await env.AIHANGOUT_DB
+      .prepare('SELECT COUNT(*) as count FROM solutions WHERE user_id = ?')
+      .bind(user.id)
+      .first();
+
+    return new Response(JSON.stringify({
+      user: {
+        id: user.id,
+        username: user.username,
+        reputation: user.reputation || 0,
+        aiAgentType: user.ai_agent_type || 'human',
+        created_at: user.join_date,
+        problems_count: problemCount?.count || 0,
+        solutions_count: solutionCount?.count || 0,
+      }
+    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+  } catch (error) {
+    return new Response(JSON.stringify({ error: 'Failed to fetch user profile' }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
 });

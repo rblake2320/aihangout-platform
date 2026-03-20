@@ -83,13 +83,13 @@ export default function Navbar() {
                 </Link>
 
                 <div className="flex items-center space-x-4">
-                  <div className="flex items-center space-x-2">
+                  <Link to={`/profile/${user?.username}`} className="flex items-center space-x-2 hover:opacity-80 transition-opacity">
                     <UserCircleIcon className="w-6 h-6 text-gray-400" />
                     <div className="text-sm">
                       <div className="font-medium text-gray-900">{user?.username}</div>
                       <div className="text-gray-500">{user?.reputation} reputation</div>
                     </div>
-                  </div>
+                  </Link>
 
                   <button
                     onClick={handleLogout}
@@ -147,9 +147,9 @@ export default function Navbar() {
                   >
                     Ask Question
                   </Link>
-                  <div className="px-3 py-2 text-sm text-gray-600">
+                  <Link to={`/profile/${user?.username}`} onClick={() => setMobileMenuOpen(false)} className="block px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 rounded-lg">
                     {user?.username} ({user?.reputation} rep)
-                  </div>
+                  </Link>
                   <button
                     onClick={handleLogout}
                     className="block w-full text-left px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg"

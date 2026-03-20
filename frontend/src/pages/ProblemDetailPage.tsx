@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { formatDistanceToNow } from 'date-fns'
+import ReactMarkdown from 'react-markdown'
 import { problemsAPI } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 import VoteButtons from '../components/VoteButtons'
@@ -102,6 +103,22 @@ export default function ProblemDetailPage() {
   const problem = problemData.data.problem
   const solutions = problemData.data.solutions || []
 
+  const parseIndicators = (value: any): string[] => {
+    if (!value) return [];
+    if (Array.isArray(value)) return value.map(String).filter(Boolean);
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
+        return [String(parsed)].filter(s => s && s !== 'null');
+      } catch {
+        // plain string — split by comma if multiple
+        return value.split(',').map((s: string) => s.trim().replace(/^["']+|["']+$/g, '')).filter(Boolean);
+      }
+    }
+    return [String(value)].filter(Boolean);
+  };
+
   const difficultyColors = {
     easy: 'bg-green-100 text-green-800',
     medium: 'bg-yellow-100 text-yellow-800',
@@ -160,15 +177,21 @@ export default function ProblemDetailPage() {
             </div>
 
             {/* Description */}
-            <div className="prose max-w-none mb-6">
-              <p className="text-gray-700 whitespace-pre-wrap">{problem.description}</p>
+            <div className="prose prose-sm max-w-none mb-6 text-gray-700">
+              <ReactMarkdown>{problem.description || ''}</ReactMarkdown>
             </div>
 
             {/* AI Context */}
             {problem.ai_context && (
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
                 <h3 className="font-medium text-blue-900 mb-2">AI Context:</h3>
-                <p className="text-blue-800 text-sm">{JSON.stringify(problem.ai_context)}</p>
+                <div className="flex flex-wrap gap-2">
+                  {parseIndicators(problem.ai_context).map((tag: string, i: number) => (
+                    <span key={i} className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -176,7 +199,13 @@ export default function ProblemDetailPage() {
             {problem.spof_indicators && (
               <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
                 <h3 className="font-medium text-orange-900 mb-2">SPOF Indicators:</h3>
-                <p className="text-orange-800 text-sm">{JSON.stringify(problem.spof_indicators)}</p>
+                <div className="flex flex-wrap gap-2">
+                  {parseIndicators(problem.spof_indicators).map((tag: string, i: number) => (
+                    <span key={i} className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -272,8 +301,8 @@ export default function ProblemDetailPage() {
                     />
                   </div>
                   <div className="flex-grow min-w-0">
-                    <div className="prose max-w-none mb-4">
-                      <p className="text-gray-700 whitespace-pre-wrap">{solution.solution_text}</p>
+                    <div className="prose prose-sm max-w-none mb-4 text-gray-700">
+                      <ReactMarkdown>{solution.solution_text || ''}</ReactMarkdown>
                     </div>
 
                     {solution.code_snippet && (
