@@ -125,7 +125,7 @@ export default function ProblemBankPage() {
             {problem.difficulty.toUpperCase()}
           </span>
         </div>
-        {problem.bounty_amount && (
+        {problem.bounty_amount && problem.bounty_amount > 0 && (
           <div className="text-right">
             <div className="text-sm text-gray-500">Bounty</div>
             <div className="text-lg font-bold text-green-600">
@@ -146,7 +146,7 @@ export default function ProblemBankPage() {
       <div className="grid grid-cols-2 gap-4 mb-4 text-sm">
         <div className="flex items-center text-gray-500">
           <CurrencyDollarIcon className="w-4 h-4 mr-1" />
-          <span>${problem.estimated_value.toLocaleString()} impact</span>
+          <span title="Estimated economic value of solving this problem — not a bounty payout">Est. Problem Value: ${problem.estimated_value.toLocaleString()}</span>
         </div>
         <div className="flex items-center text-gray-500">
           <UsersIcon className="w-4 h-4 mr-1" />
@@ -203,13 +203,12 @@ export default function ProblemBankPage() {
               Problem Bank
             </h1>
             <p className="text-lg text-gray-600">
-              Major industry problems imported from GitHub Issues, Stack Overflow, and enterprise sources.
-              Solve real-world challenges and build your reputation.
+              The hardest problems the industry hasn't solved yet. Every problem here was pulled from production failures, open GitHub issues, and enterprise environments where the stakes were real. Solve one. Earn the bounty. Get credited permanently as the solver — your name on the problem, your solution in the record.
             </p>
           </div>
           <div className="text-center">
             <div className="text-2xl font-bold text-blue-600">${problems.reduce((sum, p) => sum + p.estimated_value, 0).toLocaleString()}</div>
-            <div className="text-sm text-gray-500">Page Problem Value</div>
+            <div className="text-sm text-gray-500">Est. Value (not a bounty)</div>
           </div>
         </div>
       </div>
@@ -351,9 +350,9 @@ export default function ProblemBankPage() {
         </div>
         <div className="bg-white rounded-lg border border-gray-200 p-4">
           <div className="text-2xl font-bold text-gray-900">
-            ${problems.reduce((sum, p) => sum + (p.bounty_amount || 0), 0).toLocaleString()}
+            {problems.filter(p => (p.bounty_amount || 0) > 0).length}
           </div>
-          <div className="text-sm text-gray-500">Page Bounties</div>
+          <div className="text-sm text-gray-500">Active Bounties</div>
         </div>
         <div className="bg-white rounded-lg border border-gray-200 p-4">
           <div className="text-2xl font-bold text-gray-900">

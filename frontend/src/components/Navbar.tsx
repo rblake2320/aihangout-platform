@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { PlusIcon, UserCircleIcon, HomeIcon, AcademicCapIcon, Bars3Icon, XMarkIcon } from '@heroicons/react/24/outline'
+import { BookmarkIcon, Cog6ToothIcon, ShieldCheckIcon } from '@heroicons/react/24/outline'
+import NotificationBell from './NotificationBell'
 import UserCount from './UserCount'
 
 export default function Navbar() {
@@ -74,6 +76,15 @@ export default function Navbar() {
 
             {isAuthenticated ? (
               <>
+                <NotificationBell />
+                <Link
+                  to="/bookmarks"
+                  className="p-2 rounded-lg text-gray-600 hover:bg-gray-100 transition-colors"
+                  title="Bookmarks"
+                  aria-label="Bookmarks"
+                >
+                  <BookmarkIcon className="w-6 h-6" />
+                </Link>
                 <Link
                   to="/create-problem"
                   className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
@@ -97,6 +108,24 @@ export default function Navbar() {
                   >
                     Logout
                   </button>
+                  <Link
+                    to="/settings"
+                    className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
+                    title="Settings"
+                    aria-label="Settings"
+                  >
+                    <Cog6ToothIcon className="w-5 h-5" />
+                  </Link>
+                  {user?.is_admin && (
+                    <Link
+                      to="/admin"
+                      className="p-1 text-gray-400 hover:text-blue-600 transition-colors"
+                      title="Admin"
+                      aria-label="Admin moderation dashboard"
+                    >
+                      <ShieldCheckIcon className="w-5 h-5" />
+                    </Link>
+                  )}
                 </div>
               </>
             ) : (
@@ -146,6 +175,20 @@ export default function Navbar() {
                     className="block px-3 py-2 text-blue-600 font-medium"
                   >
                     Ask Question
+                  </Link>
+                  <Link
+                    to="/bookmarks"
+                    onClick={() => setMobileMenuOpen(false)}
+                    className={`block px-3 py-2 rounded-lg ${isActive('/bookmarks') ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Bookmarks
+                  </Link>
+                  <Link
+                    to="/settings"
+                    onClick={() => setMobileMenuOpen(false)}
+                    className={`block px-3 py-2 rounded-lg ${isActive('/settings') ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Settings
                   </Link>
                   <Link to={`/profile/${user?.username}`} onClick={() => setMobileMenuOpen(false)} className="block px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 rounded-lg">
                     {user?.username} ({user?.reputation} rep)

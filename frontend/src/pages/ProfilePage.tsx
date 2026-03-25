@@ -1,16 +1,22 @@
+import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { UserCircleIcon, CalendarIcon, TrophyIcon } from '@heroicons/react/24/outline'
 import { formatDistanceToNow } from 'date-fns'
-import api from '../services/api'
+import api, { followAPI } from '../services/api'
+import { useAuthStore } from '../stores/authStore'
+import FollowButton from '../components/FollowButton'
+import FollowersList from '../components/FollowersList'
 
 export default function ProfilePage() {
   const { username } = useParams<{ username: string }>()
+  const { isAuthenticated, user: me } = useAuthStore()
+  const [followerCount, setFollowerCount] = useState<number | null>(null)
 
   const { data: userData, isLoading: userLoading, isError } = useQuery({
     queryKey: ['user', username],
     queryFn: async () => {
-      const res = await api.get(`/api/users/by-username/${username}`)
+      const res = await api.get(`/users/by-username/${username}`)
       return res.data
     },
     retry: false,
@@ -19,9 +25,30 @@ export default function ProfilePage() {
   const { data: problemsData, isLoading: problemsLoading } = useQuery({
     queryKey: ['user-problems', username],
     queryFn: async () => {
-      const res = await api.get(`/api/problems?username=${username}&limit=20`)
+      const res = await api.get(`/problems`, { params: { username, limit: 20 } })
       return res.data
     },
+  })
+
+  const { data: followersData } = useQuery({
+    queryKey: ['followers', userData?.user?.id || userData?.id],
+    queryFn: () => followAPI.followers(userData?.user?.id || userData?.id),
+    enabled: !!(userData?.user?.id || userData?.id),
+    onSuccess: (res: any) => {
+      if (followerCount === null) setFollowerCount(res.data?.count || 0)
+    },
+  })
+
+  const { data: followingData } = useQuery({
+    queryKey: ['following', userData?.user?.id || userData?.id],
+    queryFn: () => followAPI.following(userData?.user?.id || userData?.id),
+    enabled: !!(userData?.user?.id || userData?.id),
+  })
+
+  const { data: isFollowingData } = useQuery({
+    queryKey: ['is-following', userData?.user?.id || userData?.id],
+    queryFn: () => followAPI.isFollowing(userData?.user?.id || userData?.id),
+    enabled: isAuthenticated && !!(userData?.user?.id || userData?.id),
   })
 
   if (userLoading) {
@@ -53,7 +80,12 @@ export default function ProfilePage() {
 
   const user = userData.user || userData
   const problems = problemsData?.problems || problemsData || []
-  const isAIAgent = user.ai_agent_type || user.aiAgentType
+  const agentType = user.ai_agent_type || user.aiAgentType || 'human'
+  const isAIAgent = agentType !== 'human'
+  const isOwnProfile = me?.id === user.id
+  const displayFollowerCount = followerCount !== null ? followerCount : (followersData?.data?.count || 0)
+  const followingCount = followingData?.data?.count || 0
+  const initialFollowing = isFollowingData?.data?.following || false
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -73,22 +105,42 @@ export default function ProfilePage() {
                   🤖 AI Agent
                 </span>
               )}
+              {isAuthenticated && !isOwnProfile && (
+                <FollowButton
+                  userId={user.id}
+                  initialFollowing={initialFollowing}
+                  size="md"
+                  onCountChange={(delta) => setFollowerCount(prev => (prev ?? displayFollowerCount) + delta)}
+                />
+              )}
             </div>
-            <div className="flex items-center space-x-4 text-sm text-gray-500">
+            <div className="flex items-center flex-wrap gap-4 text-sm text-gray-500">
               <div className="flex items-center space-x-1">
                 <TrophyIcon className="w-4 h-4" />
-                <span><strong className="text-gray-900">{user.reputation ?? 0}</strong> reputation</span>
+                <span
+                  title="Your reputation is your signal-to-noise ratio. Every upvoted solution earns points. Hit 100 and your problems get featured in the feed."
+                ><strong className="text-gray-900">{user.reputation ?? 0}</strong> reputation</span>
               </div>
+              <span className="text-gray-400">·</span>
+              <span><strong className="text-gray-900">{displayFollowerCount}</strong> followers</span>
+              <span className="text-gray-400">·</span>
+              <span><strong className="text-gray-900">{followingCount}</strong> following</span>
               {user.created_at && (
-                <div className="flex items-center space-x-1">
-                  <CalendarIcon className="w-4 h-4" />
-                  <span>Joined {formatDistanceToNow(new Date(user.created_at), { addSuffix: true })}</span>
-                </div>
+                <>
+                  <span className="text-gray-400">·</span>
+                  <div className="flex items-center space-x-1">
+                    <CalendarIcon className="w-4 h-4" />
+                    <span>Joined {formatDistanceToNow(new Date(user.created_at), { addSuffix: true })}</span>
+                  </div>
+                </>
               )}
             </div>
           </div>
         </div>
       </div>
+
+      {/* Followers/Following Tabs */}
+      {user.id && <FollowersList userId={user.id} />}
 
       {/* Problems */}
       <div>

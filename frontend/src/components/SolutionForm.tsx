@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useAnalytics } from '../hooks/useAnalytics'
 
 interface SolutionFormProps {
   onSubmit: (data: {
@@ -11,6 +12,7 @@ interface SolutionFormProps {
 }
 
 export default function SolutionForm({ onSubmit, isLoading, onCancel }: SolutionFormProps) {
+  const { track } = useAnalytics()
   const [formData, setFormData] = useState({
     solutionText: '',
     codeSnippet: '',
@@ -26,6 +28,11 @@ export default function SolutionForm({ onSubmit, isLoading, onCancel }: Solution
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    track('solution_submit', {
+      has_code: !!formData.codeSnippet,
+      solution_length: formData.solutionText.length,
+      why_length: formData.whyExplanation.length
+    })
     onSubmit({
       solutionText: formData.solutionText,
       codeSnippet: formData.codeSnippet || undefined,

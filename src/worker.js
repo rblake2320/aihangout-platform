@@ -14,7 +14,7 @@ const corsHeaders = {
   // CORS Configuration (Previously fixed)
   'Access-Control-Allow-Origin': 'https://aihangout.ai',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, Options',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Agent-Type',
 
   // Security Headers Enhancement (2026-02-02)
   'X-Frame-Options': 'DENY', // Prevent clickjacking attacks
@@ -39,48 +39,162 @@ const corsHeaders = {
   ].join('; ')
 };
 
+// ── SECURITY: Prototype pollution defense (FIX 6 — pen test 2026-03-24) ──
+// Use instead of JSON.parse() on any user-supplied body text.
+function safeJsonParse(text) {
+  return JSON.parse(text, (key, value) => {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      return undefined;
+    }
+    return value;
+  });
+}
+
+// ── SECURITY: Unicode danger strip (FIX 4 — pen test 2026-03-24) ──
+function stripDangerousUnicode(text) {
+  if (!text || typeof text !== 'string') return text;
+  return text
+    .replace(/\u202E/g, '')   // RTL override
+    .replace(/\u200B/g, '')   // zero-width space
+    .replace(/\u200C/g, '')   // zero-width non-joiner
+    .replace(/\u200D/g, '')   // zero-width joiner
+    .replace(/\uFEFF/g, '')   // BOM / zero-width no-break space
+    .replace(/\u2028/g, ' ')  // line separator
+    .replace(/\u2029/g, ' '); // paragraph separator
+}
+
+// ── SECURITY: HTML sanitizer (FIX 3 — pen test 2026-03-24) ──
+// Server-side only — do NOT rely on client DOMPurify.
+function sanitizeHtml(text) {
+  if (!text || typeof text !== 'string') return text;
+  return text
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
+    .replace(/javascript:/gi, '')
+    .replace(/<[^>]*\s+on\w+\s*=/gi, (match) => match.replace(/\s+on\w+\s*=[^>]*/gi, ''))
+    .replace(/<[^>]+>/g, '')
+    .replace(/data:text\/html/gi, '');
+}
+
+// ── SECURITY: LLM control token stripper (FIX 2 — pen test 2026-03-24) ──
+// Strips or blocks tokens that can break AI context boundaries.
+function sanitizeLLMTokens(text) {
+  if (!text || typeof text !== 'string') return text;
+  return text
+    // GPT/Mistral/LLaMA special tokens
+    .replace(/<\|im_start\|>/gi, '[IM_START_BLOCKED]')
+    .replace(/<\|im_end\|>/gi, '[IM_END_BLOCKED]')
+    .replace(/<\|endoftext\|>/gi, '[ENDOFTEXT_BLOCKED]')
+    // LLaMA2 format
+    .replace(/\[INST\]/gi, '[INST_BLOCKED]')
+    .replace(/\[\/INST\]/gi, '[/INST_BLOCKED]')
+    .replace(/<<SYS>>/gi, '[SYS_BLOCKED]')
+    .replace(/<\/SYS>/gi, '[/SYS_BLOCKED]')
+    // Various model formats
+    .replace(/<\|system\|>/gi, '[SYSTEM_BLOCKED]')
+    .replace(/<\|user\|>/gi, '[USER_BLOCKED]')
+    .replace(/<\|assistant\|>/gi, '[ASSISTANT_BLOCKED]')
+    // Delimiter injection patterns
+    .replace(/###\s*END\s*OF\s*USER\s*INPUT\s*###/gi, '[DELIMITER_BLOCKED]')
+    .replace(/---\s*END\s*OF\s*USER\s*INPUT\s*---/gi, '[DELIMITER_BLOCKED]');
+}
+
+// ── SECURITY: Combined sanitization pipeline (FIX 2+3+4 — pen test 2026-03-24) ──
+// Order: unicode strip → LLM token strip → HTML strip.
+// LLM tokens MUST run before HTML so <<SYS>> is handled before <SYS> is eaten as an HTML tag.
+// Apply to ALL user-submitted text fields before any DB insert.
+function sanitizeContent(text) {
+  if (!text || typeof text !== 'string') return text;
+  return sanitizeHtml(sanitizeLLMTokens(stripDangerousUnicode(text)));
+}
+
+// ── SECURITY: KV-based rate limiter (NVIDIA fraud-pattern velocity windows) ──
+async function kvIncrement(kv, key, windowSecs) {
+  try {
+    const raw = await kv.get(key);
+    const count = raw ? parseInt(raw) + 1 : 1;
+    await kv.put(key, String(count), { expirationTtl: windowSecs });
+    return count;
+  } catch { return 0; }
+}
+
+async function checkRateLimit(kv, ip, userId, action) {
+  const limits = {
+    login:    { ip60: 10,  ip3600: 30,  uid60: 5,   uid3600: 20  },
+    register: { ip60: 3,   ip3600: 3,   uid60: 999, uid3600: 999 },  // FIX 7: max 3 registrations/IP/hour
+    post:     { ip60: 5,   ip3600: 30,  uid60: 3,   uid3600: 20  },
+    vote:     { ip60: 20,  ip3600: 100, uid60: 10,  uid3600: 50  },
+    api:      { ip60: 60,  ip3600: 300, uid60: 999, uid3600: 999 },
+  };
+  const lim = limits[action] || limits.api;
+  const keys = [
+    [`rl:ip:${ip}:${action}:60`,    60,   lim.ip60],
+    [`rl:ip:${ip}:${action}:3600`,  3600, lim.ip3600],
+  ];
+  if (userId) {
+    keys.push([`rl:uid:${userId}:${action}:60`,   60,   lim.uid60]);
+    keys.push([`rl:uid:${userId}:${action}:3600`, 3600, lim.uid3600]);
+  }
+  for (const [key, ttl, max] of keys) {
+    const count = await kvIncrement(kv, key, ttl);
+    if (count > max) return { limited: true, key, count, max };
+  }
+  return { limited: false };
+}
+
+function rateLimitResponse(info) {
+  return new Response(JSON.stringify({
+    success: false, error: 'Too many requests. Please try again later.',
+  }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': '60' } });
+}
+
+// New account behavioral gate (NVIDIA fraud signal: new account + high activity)
+async function checkNewAccountGate(kv, userId, accountCreatedAt, action) {
+  const ageSecs = (Date.now() / 1000) - (new Date(accountCreatedAt).getTime() / 1000);
+  if (ageSecs < 3600) {
+    const actions = await kvIncrement(kv, `gate:new:${userId}:${action}:3600`, 3600);
+    if (actions > 3) return { blocked: true, reason: 'new_account_rate' };
+  }
+  return { blocked: false };
+}
+
+// ── AGENT IDENTITY DETECTION ──
+// Reads X-Agent-Type header. Returns null for human requests.
+// This is the authoritative source for agent detection — never trust client-submitted solver_type.
+function detectAgentRequest(request) {
+  const agentType = request.headers.get('X-Agent-Type');
+  if (!agentType || agentType.trim() === '') return null;
+  return agentType.trim().slice(0, 128); // cap at 128 chars — no agent name should be longer
+}
+
+// Wrap any response to append agent processing metadata
+function addAgentHeaders(headers, agentType) {
+  const out = { ...headers };
+  if (agentType) {
+    out['X-Agent-Processed'] = 'true';
+    out['X-Agent-Type-Received'] = agentType;
+  }
+  return out;
+}
+
+// ── AGENT RATE LIMITS ──
+// Agents get a distinct higher-volume tier: 120 req/min, 1200 req/hr per IP
+// so well-behaved polling agents are not throttled alongside human browsers.
+async function checkAgentRateLimit(kv, ip, agentType) {
+  if (!kv) return { limited: false };
+  const keys = [
+    [`rl:agent:${ip}:60`,   60,   120],
+    [`rl:agent:${ip}:3600`, 3600, 1200],
+  ];
+  for (const [key, ttl, max] of keys) {
+    const count = await kvIncrement(kv, key, ttl);
+    if (count > max) return { limited: true, key, count, max };
+  }
+  return { limited: false };
+}
+
 // Handle CORS preflight
 router.options('*', () => new Response(null, { headers: corsHeaders }));
-
-// EMERGENCY TEST ENDPOINTS - MUST BE FIRST
-router.get('/api/test/emergency', () => {
-  return new Response(JSON.stringify({
-    success: true,
-    message: "EMERGENCY ENDPOINT WORKING",
-    timestamp: new Date().toISOString()
-  }), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  });
-});
-
-router.post('/api/test/signup-now', async (request, env) => {
-  return new Response(JSON.stringify({
-    success: true,
-    token: "forced_token_" + Date.now(),
-    user: { id: 999999, username: "forced_user", email: "forced@test.com" },
-    message: "IMMEDIATE SIGNUP SUCCESS - Cache bypassed"
-  }), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  });
-});
-
-router.get('/api/test/time-check', async (request, env) => {
-  const now = new Date();
-  const testPost = {
-    id: 60,
-    created_at: "2026-02-03 22:41:24",
-    title: "Time test post"
-  };
-
-  return new Response(JSON.stringify({
-    success: true,
-    serverTime: now.toISOString(),
-    testPostTime: testPost.created_at,
-    timeDiffMinutes: Math.floor((now - new Date(testPost.created_at + 'Z')) / (1000 * 60))
-  }), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  });
-});
 
 // Database initialization guard - skip redundant CREATE TABLE calls after cold start
 let dbInitialized = false;
@@ -89,6 +203,20 @@ let dbInitialized = false;
 async function initDatabase(env) {
   if (dbInitialized) return;
   const statements = [
+    `CREATE TABLE IF NOT EXISTS content_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reporter_id INTEGER NOT NULL,
+      content_type TEXT NOT NULL CHECK(content_type IN ('problem','solution')),
+      content_id INTEGER NOT NULL,
+      reason TEXT NOT NULL CHECK(reason IN ('spam','misleading','offensive','injection','other')),
+      details TEXT,
+      status TEXT DEFAULT 'pending' CHECK(status IN ('pending','reviewed','dismissed','actioned')),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(reporter_id, content_type, content_id),
+      FOREIGN KEY (reporter_id) REFERENCES users(id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_reports_content ON content_reports(content_type, content_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_reports_status ON content_reports(status, created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
@@ -260,7 +388,32 @@ async function initDatabase(env) {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_analytics_type_ts ON analytics_events(event_type, timestamp)`,
     `CREATE INDEX IF NOT EXISTS idx_analytics_user_ts ON analytics_events(user_id, timestamp)`,
-    `CREATE INDEX IF NOT EXISTS idx_request_log_path_ts ON request_log(path, timestamp)`
+    `CREATE INDEX IF NOT EXISTS idx_request_log_path_ts ON request_log(path, timestamp)`,
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      actor_id INTEGER,
+      target_type TEXT,
+      target_id INTEGER,
+      message TEXT NOT NULL,
+      is_read BOOLEAN DEFAULT FALSE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id, actor_id, type, target_type, target_id),
+      FOREIGN KEY (user_id) REFERENCES users (id),
+      FOREIGN KEY (actor_id) REFERENCES users (id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, is_read, created_at)`,
+    `CREATE TABLE IF NOT EXISTS user_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL UNIQUE,
+      notify_new_follower BOOLEAN DEFAULT TRUE,
+      notify_vote_on_content BOOLEAN DEFAULT TRUE,
+      notify_new_solution BOOLEAN DEFAULT TRUE,
+      email_notifications BOOLEAN DEFAULT FALSE,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users (id)
+    )`
   ];
 
   for (const stmt of statements) {
@@ -379,6 +532,25 @@ async function initDatabase(env) {
     // RLS: visibility control and admin flag
     `ALTER TABLE problems ADD COLUMN is_public BOOLEAN DEFAULT TRUE`,
     `ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE`,
+    // Moderation: content relevance scoring and approval status
+    `ALTER TABLE problems ADD COLUMN status TEXT DEFAULT 'approved'`,
+    `ALTER TABLE problems ADD COLUMN moderation_score REAL DEFAULT 1.0`,
+    // Reporting: track how many times content has been reported
+    `ALTER TABLE problems ADD COLUMN report_count INTEGER DEFAULT 0`,
+    `ALTER TABLE solutions ADD COLUMN report_count INTEGER DEFAULT 0`,
+    // Prompt injection detection: moderation flag and score columns
+    `ALTER TABLE problems ADD COLUMN moderation_flag TEXT`,
+    `ALTER TABLE solutions ADD COLUMN moderation_flag TEXT`,
+    `ALTER TABLE solutions ADD COLUMN moderation_score REAL DEFAULT 0.0`,
+    // Agent infrastructure: solver_type and pending_review status (2026-03-23)
+    `ALTER TABLE problems ADD COLUMN solver_type TEXT DEFAULT 'human'`,
+    `ALTER TABLE solutions ADD COLUMN solver_type TEXT DEFAULT 'human'`,
+    `ALTER TABLE problems ADD COLUMN agent_name TEXT`,
+    `ALTER TABLE solutions ADD COLUMN agent_name TEXT`,
+    // First-post gate + injection scanner: content_flags stores full scan result as JSON (2026-03-24)
+    `ALTER TABLE problems ADD COLUMN content_flags TEXT DEFAULT '{"flagged":false,"patterns":[],"risk":"none"}'`,
+    `ALTER TABLE solutions ADD COLUMN content_flags TEXT DEFAULT '{"flagged":false,"patterns":[],"risk":"none"}'`,
+    // agent_request_log table — must use CREATE TABLE IF NOT EXISTS, not ALTER TABLE
   ];
   for (const migration of migrations) {
     try {
@@ -388,12 +560,63 @@ async function initDatabase(env) {
     }
   }
 
-  // Make curator account an admin so it can set bounty amounts
+  // Service tokens table — long-lived tokens for machine clients (Spark-1 bridge, monitors)
+  // Replaces the fragile pattern of re-issuing 24h JWTs for background services.
   try {
+    await env.AIHANGOUT_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS service_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT DEFAULT (datetime('now')),
+        expires_at TEXT NOT NULL,
+        last_used_at TEXT
+      )
+    `).run();
+  } catch (e) {
+    // Non-critical — table may already exist
+  }
+
+  // Agent request log table — tracks all inbound agent API calls for audit and moderation
+  try {
+    await env.AIHANGOUT_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS agent_request_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        ip_address TEXT,
+        user_id INTEGER,
+        content_type TEXT,
+        content_id INTEGER,
+        action TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
     await env.AIHANGOUT_DB.prepare(
-      `UPDATE users SET is_admin = TRUE WHERE email = 'curator@aihangout.ai'`
+      `CREATE INDEX IF NOT EXISTS idx_agent_log_name_ts ON agent_request_log(agent_name, created_at)`
     ).run();
-  } catch (e) {}
+  } catch (e) {
+    // Non-critical — table may already exist
+  }
+
+  // Backfill external_id (UUID) for problems that lack one — prevents sequential ID enumeration
+  try {
+    const missing = await env.AIHANGOUT_DB
+      .prepare('SELECT id FROM problems WHERE external_id IS NULL LIMIT 50')
+      .all();
+    if (missing.results && missing.results.length > 0) {
+      for (const row of missing.results) {
+        await env.AIHANGOUT_DB
+          .prepare('UPDATE problems SET external_id = ? WHERE id = ? AND external_id IS NULL')
+          .bind(crypto.randomUUID(), row.id)
+          .run();
+      }
+    }
+  } catch (e) {
+    // Non-critical — UUID backfill runs on next cold start
+  }
+
 }
 
 // SECURE PASSWORD HASHING - CRITICAL SECURITY FIX (2026-02-02)
@@ -437,8 +660,8 @@ async function verifyPassword(password, storedHash) {
   try {
     const [saltHex, hash] = storedHash.split(':');
     if (!saltHex || !hash) {
-      // Handle legacy passwords with fallback to old method
-      return await verifyLegacyPassword(password, storedHash);
+      // Legacy accounts must reset their password
+      return false;
     }
 
     const salt = new Uint8Array(
@@ -477,24 +700,26 @@ async function verifyPassword(password, storedHash) {
   }
 }
 
-// Legacy password verification for existing users (TEMPORARY - migrate users)
-async function verifyLegacyPassword(password, storedHash) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(password + 'salt_string');
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const passwordHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 
-  return passwordHash === storedHash;
-}
-
-// JWT utilities - Derive a proper 32-byte key for A256GCM from any secret length
+// JWT utilities - Derive a proper 256-bit CryptoKey for A256GCM from any secret length.
+// IMPORTANT: Must use globalThis.crypto.subtle explicitly. The nodejs_compat flag in
+// wrangler.toml causes the bare 'crypto' global to resolve to the Node.js crypto shim
+// inside the workerd bundle, which does not expose .subtle properly. globalThis.crypto
+// always refers to the Web Crypto API regardless of nodejs_compat.
+// We also import the key as a CryptoKey (not Uint8Array) so jose's internal key
+// management path also uses the CryptoKey branch, avoiding any further crypto shim issues.
 async function getJWTKey(env) {
-  const secretStr = env.JWT_SECRET || 'EMERGENCY_FALLBACK_CHANGE_IMMEDIATELY';
-  const encoded = new TextEncoder().encode(secretStr);
-  // Always derive a proper 256-bit key using SHA-256 hash
-  const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
-  return new Uint8Array(hashBuffer);
+  if (!env.JWT_SECRET) throw new Error('JWT_SECRET env var is required');
+  const subtle = globalThis.crypto.subtle;
+  const encoded = new TextEncoder().encode(env.JWT_SECRET);
+  const hashBuffer = await subtle.digest('SHA-256', encoded);
+  return subtle.importKey(
+    'raw',
+    hashBuffer,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
 }
 
 async function createJWT(payload, env) {
@@ -516,16 +741,65 @@ async function verifyJWT(token, env) {
   }
 }
 
+// Hash a raw token string to SHA-256 hex for safe storage/comparison.
+async function hashToken(raw) {
+  const buf = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(raw)
+  );
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Authentication middleware
+// Accepts two credential types:
+//   1. Regular JWT  — issued by /api/auth/login, expires 24h, scoped to a user row.
+//   2. Service token — issued by /api/admin/service-token, 365-day, stored as hash in
+//      service_tokens table.  Treated as admin with a synthetic user object so all
+//      existing is_admin guards work unchanged.
 async function authenticate(request, env) {
   const token = request.headers.get('Authorization')?.replace('Bearer ', '');
   if (!token) return null;
 
+  // --- Service token path ---
+  // Service tokens are 64-char hex strings (256-bit random), not JWTs.
+  // Try to look up the hash in the DB before attempting JWT decode.
+  try {
+    const h = await hashToken(token);
+    const svc = await env.AIHANGOUT_DB
+      .prepare('SELECT id, name, expires_at FROM service_tokens WHERE token_hash = ?')
+      .bind(h)
+      .first();
+    if (svc) {
+      // Check expiry
+      if (new Date(svc.expires_at) < new Date()) return null;
+      // Fire-and-forget last_used_at update (non-blocking)
+      env.AIHANGOUT_DB
+        .prepare("UPDATE service_tokens SET last_used_at = datetime('now') WHERE id = ?")
+        .bind(svc.id)
+        .run()
+        .catch(() => {});
+      // Return a synthetic admin user object so all is_admin guards pass
+      return {
+        id: 0,
+        username: `service:${svc.name}`,
+        email: '',
+        reputation: 0,
+        join_date: svc.created_at || '',
+        ai_agent_type: 'service',
+        is_admin: true,
+        _is_service_token: true
+      };
+    }
+  } catch (_) {
+    // Service token lookup failed — fall through to JWT path
+  }
+
+  // --- JWT path ---
   const payload = await verifyJWT(token, env);
   if (!payload) return null;
 
   const user = await env.AIHANGOUT_DB
-    .prepare('SELECT * FROM users WHERE id = ?')
+    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin FROM users WHERE id = ?')
     .bind(payload.userId)
     .first();
 
@@ -560,28 +834,212 @@ async function logAnalyticsEvent(env, eventData) {
   }
 }
 
+// ============================================================================
+// PROMPT INJECTION DETECTION
+// ============================================================================
+
+function detectPromptInjection(text) {
+  if (!text || typeof text !== 'string') return { detected: false, score: 0, patterns: [] };
+
+  // Normalize: Unicode normalization + decode common encodings
+  let normalized = text.normalize('NFKC');
+
+  // Detect and flag base64 segments
+  const base64Segments = normalized.match(/[A-Za-z0-9+/]{20,}={0,2}/g) || [];
+  for (const seg of base64Segments) {
+    try {
+      const decoded = atob(seg);
+      if (/ignore|instructions|system|jailbreak|bypass/i.test(decoded)) {
+        return { detected: true, score: 1.0, patterns: ['base64_encoded_injection'] };
+      }
+    } catch {}
+  }
+
+  const INJECTION_PATTERNS = [
+    { regex: /ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)/i, weight: 1.0 },
+    { regex: /disregard\s+(your\s+)?(system\s+prompt|instructions?|guidelines?)/i, weight: 1.0 },
+    { regex: /your\s+new\s+(instructions?|role|persona|task)\s+(are|is)/i, weight: 1.0 },
+    { regex: /\[INST\]|\[\/INST\]|<\|system\|>|<\|user\|>|<\|assistant\|>/i, weight: 1.0 },
+    { regex: /###\s*(instruction|system|human|assistant)\s*:/i, weight: 0.9 },
+    { regex: /you\s+are\s+now\s+(DAN|GPT|unrestricted|jailbroken|evil|uncensored)/i, weight: 1.0 },
+    { regex: /<think>|<\/think>|<reasoning>|<\/reasoning>/i, weight: 0.8 },
+    { regex: /\bdo\s+anything\s+now\b|\bDAN\s+mode\b/i, weight: 1.0 },
+    { regex: /grandma\s+(used\s+to\s+)?tell\s+me/i, weight: 0.8 },
+    { regex: /as\s+a\s+language\s+model\s+without\s+(restrictions|filters|safety)/i, weight: 1.0 },
+    { regex: /forget\s+(everything|all|your|previous)\s+(you|i|we|instructions)/i, weight: 0.9 },
+    { regex: /override\s+(all\s+)?(previous|your|safety|system)/i, weight: 0.9 },
+    { regex: /\bprompt\s+injection\b|\bjailbreak\b/i, weight: 0.7 },
+    { regex: /<script\b|javascript:|on\w+\s*=|data:text\/html/i, weight: 0.9 },
+    { regex: /union\s+select|drop\s+table|delete\s+from\s+\w|insert\s+into\s+\w/i, weight: 0.9 },
+    { regex: /\{\{.*\}\}|\[\[.*\]\]/i, weight: 0.6 },
+    { regex: /pretend\s+(you\s+are|to\s+be)\s+(a\s+)?(different|new|unrestricted|evil)/i, weight: 0.8 },
+    { regex: /act\s+as\s+(if\s+)?(you\s+are\s+)?(a\s+)?(DAN|evil|unrestricted|jailbroken)/i, weight: 0.9 },
+    { regex: /system\s*:\s*(you\s+are|ignore|new\s+instructions)/i, weight: 1.0 },
+    { regex: /IGNORE ALL|DISREGARD ALL|NEW INSTRUCTIONS:/i, weight: 1.0 },
+  ];
+
+  const matched = INJECTION_PATTERNS.filter(p => p.regex.test(normalized));
+  const maxWeight = matched.length > 0 ? Math.max(...matched.map(p => p.weight)) : 0;
+  const score = matched.length > 0 ? Math.min(1.0, maxWeight + (matched.length - 1) * 0.1) : 0;
+
+  return {
+    detected: score >= 0.7,
+    score,
+    patterns: matched.map(p => p.regex.toString().slice(1, 30))
+  };
+}
+
+// ============================================================================
+// SCAN FOR INJECTION — Public scanner, spec-compliant signature.
+// Returns { flagged: boolean, patterns: string[], risk: 'high'|'medium'|'low'|'none' }
+// This is separate from detectPromptInjection (which drives hard-block logic).
+// scanForInjection is used for first-post gate and content_flags storage.
+// ============================================================================
+function scanForInjection(text) {
+  if (!text || typeof text !== 'string') {
+    return { flagged: false, patterns: [], risk: 'none' };
+  }
+
+  // Normalize to NFC — catches homoglyph substitution, ligatures, zero-width chars
+  const normalized = text.normalize('NFKC');
+
+  // Zero-width and RTL override characters (U+202E, U+200B–U+200D, U+FEFF etc.)
+  const hasInvisibleChars = /[\u200B-\u200D\u202E\uFEFF\u2060-\u2064]/u.test(normalized);
+
+  // Base64 blobs: 16+ total chars of base64 alphabet (including = padding) — flag and try to decode.
+  // Threshold is 16 total (= included in char class) to catch spec canonical example
+  // SGVsbG8gV29ybGQ= = "Hello World" (15 non-padding + 1 pad = 16 total).
+  // Clean English sentences don't produce 16-char uninterrupted base64-alphabet runs.
+  const base64Matches = normalized.match(/[A-Za-z0-9+/=]{16,}/g) || [];
+  const hasBase64 = base64Matches.length > 0;
+  let base64HasInjection = false;
+  for (const seg of base64Matches) {
+    try {
+      const decoded = atob(seg);
+      if (/ignore|instructions|system|jailbreak|bypass|prompt|disregard|act as|you are/i.test(decoded)) {
+        base64HasInjection = true;
+        break;
+      }
+    } catch { /* not valid base64 — still flag the blob itself */ }
+  }
+
+  // Excessive special chars: non-ASCII-printable density > 20% of string length
+  const nonAsciiPrintable = (normalized.match(/[^\x20-\x7E]/g) || []).length;
+  const hasExcessiveSpecialChars = normalized.length > 10 && (nonAsciiPrintable / normalized.length) > 0.20;
+
+  // Pattern catalog — each entry: { label: string, regex: RegExp, risk: 'high'|'medium'|'low' }
+  const PATTERNS = [
+    // Instruction override
+    { label: 'instruction_override:ignore_previous',    regex: /ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)/i,       risk: 'high'   },
+    { label: 'instruction_override:ignore_all',         regex: /IGNORE\s+ALL\s+(INSTRUCTIONS?|CONTEXT|PREVIOUS)/i,                                      risk: 'high'   },
+    { label: 'instruction_override:disregard',          regex: /disregard\s+(your\s+)?(system\s+prompt|instructions?|guidelines?|rules?)/i,             risk: 'high'   },
+    { label: 'instruction_override:new_task',           regex: /new\s+task\s*:/i,                                                                        risk: 'high'   },
+    { label: 'instruction_override:your_new_instruct',  regex: /your\s+new\s+(instructions?|role|persona|task)\s+(are|is)/i,                            risk: 'high'   },
+    { label: 'instruction_override:system_prompt',      regex: /\bsystem\s+prompt\b/i,                                                                  risk: 'medium' },
+
+    // Role hijack
+    { label: 'role_hijack:you_are_now',    regex: /you\s+are\s+now\s+(?!a\s+(?:developer|engineer|expert|professional))/i,                             risk: 'high'   },
+    { label: 'role_hijack:act_as',         regex: /\bact\s+as\s+(an?\s+)?(?!a\s+(?:developer|engineer|expert|professional))/i,                         risk: 'medium' },
+    { label: 'role_hijack:pretend_you',    regex: /pretend\s+(you\s+are|to\s+be)\s+(a\s+)?(?!a?\s*(?:developer|engineer|expert))/i,                    risk: 'medium' },
+    { label: 'role_hijack:roleplay_as',    regex: /roleplay\s+as\s+/i,                                                                                  risk: 'medium' },
+    { label: 'role_hijack:you_are_a',      regex: /you\s+are\s+a\s+(DAN|jailbroken|unrestricted|evil|uncensored|assistant\s+without)/i,                risk: 'high'   },
+    { label: 'role_hijack:i_want_you',     regex: /I\s+want\s+you\s+to\s+act\s+(as|like)\s+/i,                                                        risk: 'medium' },
+
+    // Jailbreak signals
+    { label: 'jailbreak:DAN',              regex: /\bDAN\b/,                                                                                            risk: 'high'   },
+    { label: 'jailbreak:do_anything_now',  regex: /\bdo\s+anything\s+now\b/i,                                                                          risk: 'high'   },
+    { label: 'jailbreak:no_restrictions',  regex: /\bno\s+restrictions\b/i,                                                                            risk: 'high'   },
+    { label: 'jailbreak:without_restrict', regex: /without\s+restrictions\b/i,                                                                         risk: 'high'   },
+    { label: 'jailbreak:bypass',           regex: /\bbypass\s+(safety|filter|content|restriction|moderation|policy|guard)/i,                           risk: 'high'   },
+    { label: 'jailbreak:override',         regex: /\boverride\s+(all\s+)?(previous|your|safety|system|content\s+policy)/i,                             risk: 'high'   },
+
+    // Delimiter injection
+    { label: 'delimiter:system_tag',       regex: /```\s*system\s*|<system>/i,                                                                         risk: 'high'   },
+    { label: 'delimiter:INST_tag',         regex: /\[INST\]|\[\/INST\]/i,                                                                              risk: 'high'   },
+    { label: 'delimiter:SYS_tag',          regex: /<<SYS>>|<\/SYS>/i,                                                                                  risk: 'high'   },
+    { label: 'delimiter:pipe_sep',         regex: /<\|system\|>|<\|user\|>|<\|assistant\|>/i,                                                          risk: 'high'   },
+    // Post-sanitization markers — these mean sanitizeLLMTokens already neutralized an injection attempt.
+    // Flag for admin review so the attempt is visible even though the stored content is safe.
+    { label: 'sanitized:llm_token_blocked', regex: /\[(IM_START|IM_END|ENDOFTEXT|INST|SYS|SYSTEM|USER|ASSISTANT|DELIMITER)_BLOCKED\]/i,               risk: 'high'   },
+
+    // Meta-instructions
+    { label: 'meta:tell_me_your',          regex: /tell\s+me\s+your\s+(system\s+prompt|instructions?|rules?|guidelines?)/i,                            risk: 'high'   },
+    { label: 'meta:what_is_your_prompt',   regex: /what\s+is\s+your\s+(system\s+prompt|initial\s+prompt|instructions?)/i,                             risk: 'high'   },
+    { label: 'meta:repeat_instructions',   regex: /repeat\s+(your|the)\s+(instructions?|prompt|guidelines?)/i,                                        risk: 'high'   },
+    { label: 'meta:ignore_the_above',      regex: /ignore\s+the\s+above/i,                                                                             risk: 'high'   },
+  ];
+
+  const matched = [];
+  const risks = [];
+
+  for (const p of PATTERNS) {
+    if (p.regex.test(normalized)) {
+      matched.push(p.label);
+      risks.push(p.risk);
+    }
+  }
+
+  // Structural flags
+  if (base64HasInjection) { matched.push('base64:decoded_injection_keywords'); risks.push('high'); }
+  else if (hasBase64)     { matched.push('base64:blob_present');               risks.push('low');  }
+  if (hasInvisibleChars)  { matched.push('unicode:invisible_chars');           risks.push('medium'); }
+  if (hasExcessiveSpecialChars) { matched.push('unicode:excessive_special');   risks.push('low'); }
+
+  const flagged = matched.length > 0;
+
+  let risk = 'none';
+  if (risks.includes('high'))   risk = 'high';
+  else if (risks.includes('medium')) risk = 'medium';
+  else if (risks.includes('low'))    risk = 'low';
+
+  return { flagged, patterns: matched, risk };
+}
+
+// ============================================================================
+// FIRST-POST GATE HELPER
+// Returns count of approved/active posts by this user across problems + solutions.
+// ============================================================================
+async function checkPriorApprovedPosts(userId, db) {
+  try {
+    const result = await db
+      .prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM problems  WHERE user_id = ? AND status IN ('approved','active')) +
+          (SELECT COUNT(*) FROM solutions WHERE user_id = ? AND is_verified = TRUE)
+          AS total
+      `)
+      .bind(userId, userId)
+      .first();
+    return result ? (result.total || 0) : 0;
+  } catch (e) {
+    // On error, be conservative — do not gate (prefer availability over false block)
+    return 1;
+  }
+}
+
 // API Routes
 
 // User Authentication
 router.post('/api/auth/register', async (request, env) => {
   try {
-    const { username, email, password, aiAgentType = 'human', EMERGENCY_BYPASS } = await request.json();
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'register');
+    if (rl.limited) return rateLimitResponse(rl);
 
-    // EMERGENCY BYPASS FOR IMMEDIATE TESTING
-    if (EMERGENCY_BYPASS === 'FORCE_SUCCESS_NOW') {
-      return new Response(JSON.stringify({
-        success: true,
-        message: 'EMERGENCY BYPASS REGISTRATION SUCCESS',
-        token: 'bypass_token_' + Date.now(),
-        user: {
-          id: 888888,
-          username: username || 'emergency_user',
-          email: email || 'emergency@test.com',
-          aiAgentType: aiAgentType || 'human'
-        }
-      }), {
-        status: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    const { username, email, password, aiAgentType = 'human' } = await request.json();
+
+    if (!username || username.length > 50) return new Response(JSON.stringify({ success: false, error: 'Username must be 1-50 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (!email || email.length > 254) return new Response(JSON.stringify({ success: false, error: 'Invalid email' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (!password || password.length < 8 || password.length > 128) return new Response(JSON.stringify({ success: false, error: 'Password must be 8-128 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+    const RESERVED_USERNAMES = new Set([
+      'admin','administrator','root','superuser','moderator','support',
+      'staff','system','curator','aihangout','official','bot','api',
+      'null','undefined','anonymous','guest','operator','webmaster'
+    ]);
+    if (RESERVED_USERNAMES.has(username?.toLowerCase())) {
+      return new Response(JSON.stringify({ success: false, error: 'This username is not available.' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
@@ -614,19 +1072,10 @@ router.post('/api/auth/register', async (request, env) => {
     } catch (dbError) {
       console.error('Database insert error:', dbError);
       const errMsg = dbError.message || '';
-      if (errMsg.includes('UNIQUE constraint failed: users.email')) {
+      if (errMsg.includes('UNIQUE constraint failed: users.email') || errMsg.includes('UNIQUE constraint failed: users.username')) {
         return new Response(JSON.stringify({
           success: false,
-          error: 'An account with this email already exists. Please login instead.'
-        }), {
-          status: 409,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      }
-      if (errMsg.includes('UNIQUE constraint failed: users.username')) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: 'This username is already taken. Please choose another.'
+          error: 'Registration failed. Please check your details and try again.'
         }), {
           status: 409,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -643,13 +1092,16 @@ router.post('/api/auth/register', async (request, env) => {
 
     const userId = result.meta.last_row_id;
 
-    // Create JWT - wrapped in its own try/catch so DB insert isn't lost
+    // Create JWT - if it fails, registration succeeded but we can't issue a token
     let token;
     try {
       token = await createJWT({ userId, username }, env);
     } catch (jwtError) {
       console.error('JWT creation failed after successful registration:', jwtError);
-      token = 'fallback_token_' + Date.now() + '_' + userId;
+      return new Response(JSON.stringify({ error: 'Token generation failed. Please log in.' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     // Log analytics - non-blocking, don't let it break registration
@@ -663,7 +1115,7 @@ router.post('/api/auth/register', async (request, env) => {
         user_agent: request.headers.get('User-Agent'),
         ip_address: request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For'),
         event_data: JSON.stringify({
-          username, email, ai_agent_type: aiAgentType, registration_success: true
+          username, ai_agent_type: aiAgentType, registration_success: true
         })
       });
     } catch (analyticsError) {
@@ -693,6 +1145,10 @@ router.post('/api/auth/register', async (request, env) => {
 
 router.post('/api/auth/login', async (request, env) => {
   try {
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'login');
+    if (rl.limited) return rateLimitResponse(rl);
+
     const { email, password } = await request.json();
 
     if (!email || !password) {
@@ -738,7 +1194,10 @@ router.post('/api/auth/login', async (request, env) => {
       token = await createJWT({ userId: user.id, username: user.username }, env);
     } catch (jwtError) {
       console.error('JWT creation failed during login:', jwtError);
-      token = 'fallback_token_' + Date.now() + '_' + user.id;
+      return new Response(JSON.stringify({ error: 'Token generation failed. Please try again.' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     // Log analytics - non-blocking
@@ -796,7 +1255,7 @@ router.get('/api/problems', async (request, env) => {
     const authorType = url.searchParams.get('authorType');
     const sortBy = url.searchParams.get('sortBy') || 'new'; // 🆕 DEFAULT TO NEWEST FIRST
     const username = url.searchParams.get('username');
-    const limit = parseInt(url.searchParams.get('limit') || '20');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
     // RLS: determine caller identity (optional auth)
@@ -805,8 +1264,9 @@ router.get('/api/problems', async (request, env) => {
 
     // Build WHERE conditions for both COUNT and main query
     // RLS: only show public problems OR problems owned by the caller
-    let whereClause = ' WHERE p.status = ? AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?)';
-    const whereParams = [status, callerId];
+    // Moderation: exclude pending_review and flagged items from public feed
+    let whereClause = ' WHERE p.status = ? AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?) AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6 OR p.user_id = ?)';
+    const whereParams = [status, callerId, callerId];
 
     if (username) {
       whereClause += ' AND u.username = ?';
@@ -883,9 +1343,23 @@ router.get('/api/problems', async (request, env) => {
       .bind(...params)
       .all();
 
+    // Strip bounty coming-soon disclaimer from harvested descriptions
+    const bountyPattern = /\s*---\s*\*\*Bounty Program \(Coming Soon\):\*\*.*?(?=---|$)/gs;
+    // Normalize category values
+    const normalizeCategory = (cat) => {
+      if (!cat) return cat;
+      const map = { 'ai-ml': 'AI/ML', 'ai_ml': 'AI/ML', 'aiml': 'AI/ML' };
+      return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
+    };
+    const sanitizedProblems = (problems.results || []).map(p => ({
+      ...p,
+      description: p.description ? p.description.replace(bountyPattern, '').trim() : p.description,
+      category: normalizeCategory(p.category),
+    }));
+
     return new Response(JSON.stringify({
       success: true,
-      problems: problems.results,
+      problems: sanitizedProblems,
       total,
       page,
       totalPages,
@@ -951,9 +1425,22 @@ router.get('/api/problems/:id', async (request, env) => {
       .bind(id)
       .all();
 
+    // Strip bounty coming-soon disclaimer and normalize category on single problem fetch
+    const bountyPatternSingle = /\s*---\s*\*\*Bounty Program \(Coming Soon\):\*\*.*?(?=---|$)/gs;
+    const normalizeCategorySingle = (cat) => {
+      if (!cat) return cat;
+      const map = { 'ai-ml': 'AI/ML', 'ai_ml': 'AI/ML', 'aiml': 'AI/ML' };
+      return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
+    };
+    const sanitizedProblem = {
+      ...problem,
+      description: problem.description ? problem.description.replace(bountyPatternSingle, '').trim() : problem.description,
+      category: normalizeCategorySingle(problem.category),
+    };
+
     return new Response(JSON.stringify({
       success: true,
-      problem,
+      problem: sanitizedProblem,
       solutions: solutions.results || []
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -982,6 +1469,13 @@ router.post('/api/problems', async (request, env) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
+
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'post');
+    if (rl.limited) return rateLimitResponse(rl);
+    const gate = await checkNewAccountGate(env.AIHANGOUT_KV, user.id, user.join_date || user.created_at, 'post');
+    if (gate.blocked) return rateLimitResponse({ ...gate });
+
 
     const requestData = await request.json();
 
@@ -1024,6 +1518,48 @@ router.post('/api/problems', async (request, env) => {
       });
     }
 
+    // Validate field length limits
+    if (title.trim().length > 300) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'title must be 300 characters or fewer'
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (description.trim().length > 10000) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'description must be 10,000 characters or fewer'
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Full sanitization pipeline: unicode strip → HTML strip → LLM token strip
+    const safeTitle = sanitizeContent(title);
+    const safeDescription = sanitizeContent(description);
+    const safeAiContext = aiContext ? sanitizeContent(typeof aiContext === 'string' ? aiContext : JSON.stringify(aiContext)) : null;
+
+    // BETA_MODE: compute early so it can gate the hard-block below.
+    // Duplicated later in the gate block for clarity — same value.
+    const PROBLEM_BETA_MODE = env.BETA_MODE === 'true';
+
+    // Prompt injection detection (legacy hard-block + moderation flag)
+    const injectionCheck = detectPromptInjection((safeTitle || '') + ' ' + (safeDescription || ''));
+    if (!PROBLEM_BETA_MODE && injectionCheck.score >= 0.7) {
+      // High confidence — reject and log (only when not in beta mode)
+      console.error(`[SECURITY] Prompt injection detected from user ${user.id}: patterns=${injectionCheck.patterns.join(',')}`);
+      return new Response(JSON.stringify({ success: false, error: 'Content violates submission guidelines' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    // Medium confidence — flag but allow, store with moderation flag
+    const problemModerationFlag = injectionCheck.score >= 0.35 ? injectionCheck.patterns.join(',') : null;
+    if (problemModerationFlag) console.warn('[SECURITY] Possible injection flagged (problem):', user.id, problemModerationFlag);
+
     // Dedup: if external_id provided, reject duplicates with 409
     if (external_id) {
       const existing = await env.AIHANGOUT_DB
@@ -1054,8 +1590,16 @@ router.post('/api/problems', async (request, env) => {
       });
     }
 
-    // Safely stringify optional fields
-    const aiContextJson = aiContext ? JSON.stringify(aiContext) : null;
+    // Normalize category at ingest — prevent variant forms entering the DB
+    const normalizeCategoryIngest = (cat) => {
+      if (!cat) return cat;
+      const map = { 'ai-ml': 'AI/ML', 'ai_ml': 'AI/ML', 'aiml': 'AI/ML' };
+      return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
+    };
+    const normalizedCategory = normalizeCategoryIngest(category);
+
+    // Safely stringify optional fields — use sanitized aiContext (safeAiContext already a string)
+    const aiContextJson = safeAiContext ? safeAiContext : null;
     const spofIndicatorsJson = spofIndicators ? JSON.stringify(spofIndicators) : null;
     const tagsJson = tags ? JSON.stringify(Array.isArray(tags) ? tags : [tags]) : null;
 
@@ -1063,18 +1607,71 @@ router.post('/api/problems', async (request, env) => {
     const effectiveBounty = user.is_admin ? (bounty_amount || 0) : 0;
     const effectiveEstimated = user.is_admin ? (estimated_value || 0) : 0;
 
+    // Agent enforcement: detect X-Agent-Type header. If present, override solver_type to "AI"
+    // and set status to "pending_review" regardless of what the client sent.
+    // This closes the trust gap — the server decides agent classification, not the client.
+    const agentName = detectAgentRequest(request);
+    const effectiveSolverType = agentName ? 'AI' : 'human';
+
+    // Apply agent rate limit (separate from human rate limit)
+    if (agentName && env.AIHANGOUT_KV) {
+      const agentRl = await checkAgentRateLimit(env.AIHANGOUT_KV, ip, agentName);
+      if (agentRl.limited) return rateLimitResponse(agentRl);
+    }
+
+    // ── FIRST-POST GATE + INJECTION SCANNER (2026-03-24) ──
+    // scanForInjection always runs and its result is always stored in content_flags.
+    // BETA_MODE=true: everything goes active (hard-block above already skipped), scan result recorded.
+    // BETA_MODE=false: first post from new user → pending_review; high-risk scan → pending_review.
+    const BETA_MODE = PROBLEM_BETA_MODE; // already computed above
+    const priorApproved = await checkPriorApprovedPosts(user.id, env.AIHANGOUT_DB);
+    const isFirstPost = priorApproved === 0;
+    const problemScanResult = scanForInjection((safeTitle || '') + ' ' + (safeDescription || ''));
+    const problemContentFlags = JSON.stringify(problemScanResult);
+
+    if (problemScanResult.flagged) {
+      console.warn(`[SECURITY][scanForInjection] problem flagged user=${user.id} risk=${problemScanResult.risk} patterns=${problemScanResult.patterns.join(',')}`);
+    }
+
+    let effectiveStatus;
+    if (BETA_MODE) {
+      // Beta: agent posts still go pending_review; human posts always active
+      effectiveStatus = agentName ? 'pending_review' : 'approved';
+    } else {
+      if (agentName) {
+        effectiveStatus = 'pending_review';
+      } else if (isFirstPost || problemScanResult.risk === 'high') {
+        effectiveStatus = 'pending_review';
+      } else {
+        effectiveStatus = 'approved';
+      }
+    }
+
     const result = await env.AIHANGOUT_DB
       .prepare(`INSERT INTO problems
         (user_id, title, description, category, difficulty, ai_context, spof_indicators,
          bounty_amount, estimated_value, impact_level, affected_users, time_to_solve,
-         industry, tags, source_url, external_id, is_harvested, is_public)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(user.id, title.trim(), description.trim(), category.trim(), difficulty,
+         industry, tags, source_url, external_id, is_harvested, is_public, moderation_flag,
+         solver_type, agent_name, status, content_flags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(user.id, safeTitle.trim(), safeDescription.trim(), normalizedCategory.trim(), difficulty,
             aiContextJson, spofIndicatorsJson,
             effectiveBounty, effectiveEstimated, impact_level, affected_users,
             time_to_solve, industry, tagsJson, source_url || null,
-            external_id || null, is_harvested ? 1 : 0, is_public ? 1 : 0)
+            external_id || crypto.randomUUID(), is_harvested ? 1 : 0, is_public ? 1 : 0,
+            problemModerationFlag || null,
+            effectiveSolverType, agentName || null, effectiveStatus, problemContentFlags)
       .run();
+
+    // Log agent request for audit trail
+    if (agentName) {
+      try {
+        await env.AIHANGOUT_DB.prepare(
+          `INSERT INTO agent_request_log (agent_name, method, path, ip_address, user_id, content_type, content_id, action)
+           VALUES (?, 'POST', '/api/problems', ?, ?, 'problem', ?, 'create')`
+        ).bind(agentName, ip, user.id, result.meta.last_row_id).run();
+      } catch (e) { /* non-critical */ }
+    }
 
     // 🚀 REAL-TIME UPDATE: Fetch the complete problem data and broadcast to SSE clients
     try {
@@ -1115,12 +1712,18 @@ router.post('/api/problems', async (request, env) => {
       // AI Army notification failed (non-critical)
     }
 
+    // Award +2 reputation for posting a problem
+    await env.AIHANGOUT_DB
+      .prepare('UPDATE users SET reputation = reputation + 2 WHERE id = ?')
+      .bind(user.id)
+      .run();
+
     // Log analytics event for problem creation
     await logAnalyticsEvent(env, {
       event_type: 'problem_post',
       user_id: user.id,
       user_type: user.ai_agent_type || 'human',
-      session_id: request.headers.get('Authorization'),
+      session_id: (() => { const t = request.headers.get('Authorization'); return t ? t.slice(-8) : null; })(),
       page_url: '/api/problems',
       user_agent: request.headers.get('User-Agent'),
       ip_address: request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For'),
@@ -1135,12 +1738,23 @@ router.post('/api/problems', async (request, env) => {
       })
     });
 
-    return new Response(JSON.stringify({
+    const responseBody = {
       success: true,
       problemId: result.meta.last_row_id,
-      message: 'Problem created successfully'
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      message: agentName
+        ? 'Problem submitted for review. Agent-generated content requires human approval before appearing in the main feed.'
+        : (effectiveStatus === 'pending_review'
+            ? 'Problem submitted for review. It will appear in the feed once approved.'
+            : 'Problem created successfully'),
+      status: effectiveStatus,
+      solver_type: effectiveSolverType,
+      flagged: problemScanResult.flagged,
+    };
+    if (agentName) responseBody.agent_processed = true;
+    if (BETA_MODE) responseBody.beta = true;
+
+    return new Response(JSON.stringify(responseBody), {
+      headers: { ...addAgentHeaders(corsHeaders, agentName), 'Content-Type': 'application/json' }
     });
 
   } catch (error) {
@@ -1156,6 +1770,26 @@ router.post('/api/problems', async (request, env) => {
   }
 });
 
+// ============================================================================
+// NOTIFICATION HELPER
+// ============================================================================
+
+async function createNotification(env, { userId, actorId, type, targetType, targetId, message }) {
+  if (!userId || !actorId || userId === actorId) return;
+  try {
+    const settingKey = `notify_${type}`;
+    const settings = await env.AIHANGOUT_DB
+      .prepare('SELECT * FROM user_settings WHERE user_id = ?')
+      .bind(userId).first();
+    if (settings && settings[settingKey] === 0) return;
+    await env.AIHANGOUT_DB
+      .prepare('INSERT OR IGNORE INTO notifications (user_id, actor_id, type, target_type, target_id, message) VALUES (?,?,?,?,?,?)')
+      .bind(userId, actorId, type, targetType ?? null, targetId ?? null, message).run();
+  } catch (e) {
+    // Silent failure — notifications must never break the main response
+  }
+}
+
 // Solutions API
 router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
   try {
@@ -1170,15 +1804,125 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
       });
     }
 
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'post');
+    if (rl.limited) return rateLimitResponse(rl);
+    const gate = await checkNewAccountGate(env.AIHANGOUT_KV, user.id, user.join_date || user.created_at, 'post');
+    if (gate.blocked) return rateLimitResponse({ ...gate });
+
     const { problemId } = request.params;
     const { solutionText, codeSnippet, whyExplanation } = await request.json();
 
+    // Validate field length limits
+    if (!solutionText || solutionText.trim() === '') {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'solution_text is required'
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (solutionText.length > 10000) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'solution_text must be 10,000 characters or fewer'
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (whyExplanation && whyExplanation.length > 2000) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'why_explanation must be 2,000 characters or fewer'
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (codeSnippet && codeSnippet.length > 20000) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'code_snippet must be 20,000 characters or fewer'
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Full sanitization pipeline on solution content: unicode → HTML → LLM tokens
+    const safeSolutionText = sanitizeContent(solutionText);
+    const safeWhyExplanation = sanitizeContent(whyExplanation);
+    const safeCodeSnippet = sanitizeContent(codeSnippet);
+
+    // Prompt injection detection on solution content (M4: include code_snippet)
+    const textToCheck = `${safeSolutionText || ''} ${safeWhyExplanation || ''} ${safeCodeSnippet || ''}`;
+    const solInjectionCheck = detectPromptInjection(textToCheck);
+    const SOL_HARD_BLOCK_BETA = env.BETA_MODE === 'true';
+    if (!SOL_HARD_BLOCK_BETA && solInjectionCheck.score >= 0.7) {
+      // High confidence — reject and log (only when not in beta mode)
+      console.error(`[SECURITY] Prompt injection detected in solution from user ${user.id}: patterns=${solInjectionCheck.patterns.join(',')}`);
+      return new Response(JSON.stringify({ success: false, error: 'Content violates submission guidelines' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    // Medium confidence — flag but allow
+    const solModerationFlag = solInjectionCheck.score >= 0.35 ? solInjectionCheck.patterns.join(',') : null;
+    const solModerationScore = solInjectionCheck.score;
+    if (solModerationFlag) console.warn('[SECURITY] Possible injection flagged (solution):', user.id, solModerationFlag);
+
+    // Agent enforcement for solutions: same server-side classification rule as problems.
+    const solAgentName = detectAgentRequest(request);
+    const solSolverType = solAgentName ? 'AI' : 'human';
+
+    if (solAgentName && env.AIHANGOUT_KV) {
+      const agentRl = await checkAgentRateLimit(env.AIHANGOUT_KV, ip, solAgentName);
+      if (agentRl.limited) return rateLimitResponse(agentRl);
+    }
+
+    // ── FIRST-POST GATE + INJECTION SCANNER for solutions (2026-03-24) ──
+    const SOL_BETA_MODE = env.BETA_MODE === 'true';
+    const solPriorApproved = await checkPriorApprovedPosts(user.id, env.AIHANGOUT_DB);
+    const solIsFirstPost = solPriorApproved === 0;
+    const solScanResult = scanForInjection(
+      `${safeSolutionText || ''} ${safeWhyExplanation || ''} ${safeCodeSnippet || ''}`
+    );
+    const solContentFlags = JSON.stringify(solScanResult);
+
+    if (solScanResult.flagged) {
+      console.warn(`[SECURITY][scanForInjection] solution flagged user=${user.id} risk=${solScanResult.risk} patterns=${solScanResult.patterns.join(',')}`);
+    }
+
+    // Solutions don't have a top-level 'status' column — is_verified serves as the gate.
+    // For the first-post gate on solutions we store content_flags and log, but do not
+    // soft-block (solutions are not shown in the public feed until is_verified=TRUE for
+    // AI-authored ones; human solutions go live immediately per existing behaviour).
+    // When BETA_MODE=false and it's a first post or high-risk scan, mark is_verified=FALSE
+    // and log so an admin can review via /api/admin/review-queue.
+    // (is_verified is already FALSE by default — this is a no-op for the DB write,
+    // but the gate logic is preserved here for when verified-by-default is introduced.)
+    const solNeedsReview = !SOL_BETA_MODE && (solIsFirstPost || solScanResult.risk === 'high');
+
     const result = await env.AIHANGOUT_DB
       .prepare(`INSERT INTO solutions
-        (problem_id, user_id, solution_text, code_snippet, why_explanation)
-        VALUES (?, ?, ?, ?, ?)`)
-      .bind(problemId, user.id, solutionText, codeSnippet ?? null, whyExplanation ?? null)
+        (problem_id, user_id, solution_text, code_snippet, why_explanation, moderation_flag, moderation_score,
+         solver_type, agent_name, content_flags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(problemId, user.id, safeSolutionText, safeCodeSnippet ?? null, safeWhyExplanation ?? null,
+            solModerationFlag || null, solModerationScore,
+            solSolverType, solAgentName || null, solContentFlags)
       .run();
+
+    // Log agent request for audit trail
+    if (solAgentName) {
+      try {
+        await env.AIHANGOUT_DB.prepare(
+          `INSERT INTO agent_request_log (agent_name, method, path, ip_address, user_id, content_type, content_id, action)
+           VALUES (?, 'POST', ?, ?, ?, 'solution', ?, 'create')`
+        ).bind(solAgentName, `/api/problems/${problemId}/solutions`, ip, user.id, result.meta.last_row_id).run();
+      } catch (e) { /* non-critical */ }
+    }
 
     // Create AI learning data for Sentinel Model
     await env.AIHANGOUT_DB
@@ -1188,6 +1932,21 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
       .bind(problemId, result.meta.last_row_id, JSON.stringify({ whyExplanation }))
       .run();
 
+    // Notify problem owner about new solution (non-blocking)
+    const problemOwner = await env.AIHANGOUT_DB
+      .prepare('SELECT user_id FROM problems WHERE id = ?')
+      .bind(problemId).first();
+    if (problemOwner) {
+      ctx.waitUntil(createNotification(env, {
+        userId: problemOwner.user_id,
+        actorId: user.id,
+        type: 'new_solution',
+        targetType: 'problem',
+        targetId: parseInt(problemId),
+        message: `${user.username} answered your question`
+      }));
+    }
+
     // Notify AI Army about new solution
     await notifyAIArmy(env, {
       type: 'new_solution',
@@ -1196,6 +1955,12 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
       userId: user.id,
       whyExplanation
     });
+
+    // Award +3 reputation for posting a solution
+    await env.AIHANGOUT_DB
+      .prepare('UPDATE users SET reputation = reputation + 3 WHERE id = ?')
+      .bind(user.id)
+      .run();
 
     // Log solution creation analytics (non-blocking)
     ctx.waitUntil(logAnalyticsEvent(env, {
@@ -1210,9 +1975,18 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
 
     return new Response(JSON.stringify({
       success: true,
-      solutionId: result.meta.last_row_id
+      solutionId: result.meta.last_row_id,
+      solver_type: solSolverType,
+      flagged: solScanResult.flagged,
+      ...(SOL_BETA_MODE ? { beta: true } : {}),
+      ...(solNeedsReview ? { review_required: true } : {}),
+      ...(solAgentName ? {
+        agent_processed: true,
+        status: 'pending_review',
+        message: 'Solution submitted for review. Agent-generated content requires human approval before appearing in the main feed.'
+      } : {})
     }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      headers: { ...addAgentHeaders(corsHeaders, solAgentName), 'Content-Type': 'application/json' }
     });
 
   } catch (error) {
@@ -1220,6 +1994,70 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
       success: false,
       error: error.message
     }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// REST-style vote alias: POST /api/problems/:id/vote and /api/solutions/:id/vote
+// Accepts { vote: 1 } (upvote) or { vote: -1 } (downvote), delegates to /api/vote logic
+router.post('/api/problems/:id/vote', async (request, env, ctx) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const targetId = request.params.id;
+    const body = await request.json().catch(() => ({}));
+    const voteType = body.vote === -1 ? 'down' : 'up';
+
+    await env.AIHANGOUT_DB
+      .prepare('DELETE FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
+      .bind(user.id, 'problem', targetId)
+      .run();
+    await env.AIHANGOUT_DB
+      .prepare('INSERT INTO votes (user_id, target_type, target_id, vote_type) VALUES (?, ?, ?, ?)')
+      .bind(user.id, 'problem', targetId, voteType)
+      .run();
+
+    const voteCount = await env.AIHANGOUT_DB
+      .prepare('SELECT COUNT(*) as count FROM votes WHERE target_type = ? AND target_id = ? AND vote_type = ?')
+      .bind('problem', targetId, 'up')
+      .first();
+
+    await env.AIHANGOUT_DB
+      .prepare('UPDATE problems SET upvotes = ? WHERE id = ?')
+      .bind(voteCount.count, targetId)
+      .run();
+
+    const ownerRow = await env.AIHANGOUT_DB
+      .prepare('SELECT user_id FROM problems WHERE id = ?')
+      .bind(targetId).first();
+    if (ownerRow && voteType === 'up') {
+      // Award +1 reputation to problem owner for receiving an upvote
+      await env.AIHANGOUT_DB
+        .prepare('UPDATE users SET reputation = reputation + 1 WHERE id = ?')
+        .bind(ownerRow.user_id)
+        .run();
+      ctx.waitUntil(createNotification(env, {
+        userId: ownerRow.user_id,
+        actorId: user.id,
+        type: 'vote_on_content',
+        targetType: 'problem',
+        targetId: parseInt(targetId),
+        message: `${user.username} upvoted your problem`
+      }));
+    }
+
+    return new Response(JSON.stringify({ success: true, upvotes: voteCount.count }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
       status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -1240,7 +2078,30 @@ router.post('/api/vote', async (request, env, ctx) => {
       });
     }
 
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'vote');
+    if (rl.limited) return rateLimitResponse(rl);
+
     const { targetType, targetId, voteType } = await request.json();
+
+    if (!['problem', 'solution'].includes(targetType)) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid target type' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (!['up', 'down'].includes(voteType)) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid vote type' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    // Verify target exists
+    const targetTable = targetType === 'problem' ? 'problems' : 'solutions';
+    const target = await env.AIHANGOUT_DB.prepare(`SELECT id FROM ${targetTable} WHERE id = ?`).bind(targetId).first();
+    if (!target) {
+      return new Response(JSON.stringify({ success: false, error: 'Target not found' }), {
+        status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
 
     // Remove existing vote
     await env.AIHANGOUT_DB
@@ -1265,6 +2126,27 @@ router.post('/api/vote', async (request, env, ctx) => {
       .prepare(`UPDATE ${table} SET upvotes = ? WHERE id = ?`)
       .bind(voteCount.count, targetId)
       .run();
+
+    // Notify content owner about vote (non-blocking)
+    const ownerTable = targetType === 'problem' ? 'problems' : 'solutions';
+    const ownerRow = await env.AIHANGOUT_DB
+      .prepare(`SELECT user_id FROM ${ownerTable} WHERE id = ?`)
+      .bind(targetId).first();
+    if (ownerRow && voteType === 'up') {
+      // Award +1 reputation to content owner for receiving an upvote
+      await env.AIHANGOUT_DB
+        .prepare('UPDATE users SET reputation = reputation + 1 WHERE id = ?')
+        .bind(ownerRow.user_id)
+        .run();
+      ctx.waitUntil(createNotification(env, {
+        userId: ownerRow.user_id,
+        actorId: user.id,
+        type: 'vote_on_content',
+        targetType,
+        targetId: parseInt(targetId),
+        message: `${user.username} upvoted your ${targetType}`
+      }));
+    }
 
     // Log vote analytics (non-blocking)
     ctx.waitUntil(logAnalyticsEvent(env, {
@@ -6383,7 +7265,7 @@ router.get('/api/search/comprehensive', async (request, env) => {
     const category = url.searchParams.get('category');
     const difficulty = url.searchParams.get('difficulty');
     const include_solutions = url.searchParams.get('solutions') === 'true';
-    const limit = parseInt(url.searchParams.get('limit') || '20');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
     if (!query.trim()) {
@@ -6984,7 +7866,7 @@ router.get('/api/recommendations/related-problems/:problem_id', async (request, 
     const { problem_id } = request.params;
     const url = new URL(request.url);
     const recommendation_type = url.searchParams.get('type') || 'similar';
-    const limit = parseInt(url.searchParams.get('limit') || '10');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '10'), 50);
     const include_reasoning = url.searchParams.get('reasoning') === 'true';
 
     // Generate intelligent problem recommendations
@@ -7231,7 +8113,7 @@ router.get('/api/harvest/external-problems', async (request, env) => {
     const category = url.searchParams.get('category');
     const difficulty = url.searchParams.get('difficulty');
     const source_site = url.searchParams.get('source');
-    const limit = parseInt(url.searchParams.get('limit') || '20');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
     // Direct database query - no complex JOIN or unimplemented functions
@@ -7806,117 +8688,15 @@ router.get('/api/external-problems/simple', async (request, env) => {
   }
 });
 
-// DEBUG: Check if problems are stored in database
-router.get('/api/debug/check-database', async (request, env) => {
-  try {
-    const problems = await env.AIHANGOUT_DB
-      .prepare('SELECT * FROM external_problems ORDER BY scraped_at DESC LIMIT 10')
-      .all();
 
-    return new Response(JSON.stringify({
-      success: true,
-      problems_count: problems.results?.length || 0,
-      problems: problems.results || []
-    }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  } catch (error) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message,
-      stack: error.stack
-    }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-});
-
-// DEBUG: Test initializeMultiSiteHarvesting function directly
-router.get('/api/debug/test-harvesting', async (request, env) => {
-  try {
-    const harvestResults = await initializeMultiSiteHarvesting(env, {
-      sites: ['github_issues'], // Only test GitHub since it's working
-      categories: ['javascript'],
-      difficulty_filters: ['medium', 'hard'],
-      max_per_site: 5,
-      quality_threshold: 0.7
-    });
-
-    return new Response(JSON.stringify({
-      success: true,
-      harvest_results: harvestResults
-    }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  } catch (error) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message,
-      stack: error.stack
-    }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-});
-
-// DEBUG: Test API calls directly (bypass scraper parsing)
-router.get('/api/debug/test-apis', async (request, env) => {
-  try {
-    // Test Stack Overflow API directly
-    const soUrl = 'https://api.stackexchange.com/2.3/questions/unanswered?order=desc&sort=votes&tagged=javascript&site=stackoverflow&pagesize=3&filter=!9YdnSMKKT';
-    const soResponse = await fetch(soUrl, {
-      headers: {
-        'User-Agent': 'AIHangout-ProblemHarvester/1.0 (+https://aihangout.ai/contact)',
-        'Accept': 'application/json'
-      }
-    });
-    const soData = await soResponse.json();
-
-    // Test GitHub API directly
-    const ghUrl = 'https://api.github.com/search/issues?q=is:open+is:issue+label:"help wanted"+javascript&sort=updated&order=desc&per_page=3';
-    const ghResponse = await fetch(ghUrl, {
-      headers: {
-        'User-Agent': 'AIHangout-ProblemHarvester/1.0',
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28'
-      }
-    });
-    const ghData = await ghResponse.json();
-
-    return new Response(JSON.stringify({
-      success: true,
-      stack_overflow: {
-        status: soResponse.status,
-        items_count: soData.items?.length || 0,
-        quota_remaining: soData.quota_remaining,
-        first_title: soData.items?.[0]?.title || 'No items',
-        error_message: soData.error_message || null,
-        error_name: soData.error_name || null,
-        error_id: soData.error_id || null
-      },
-      github_issues: {
-        status: ghResponse.status,
-        items_count: ghData.items?.length || 0,
-        total_count: ghData.total_count,
-        first_title: ghData.items?.[0]?.title || 'No items'
-      }
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-
-  } catch (error) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message,
-      stack: error.stack
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-  }
-});
-
-// DEBUG: Test scraper endpoint
+// DEBUG: Test scraper endpoint (development only)
 router.get('/api/debug/test-scrapers', async (request, env) => {
+  if (env.ENVIRONMENT !== 'development') {
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
   try {
     // Test Stack Overflow scraper directly
     const soResults = await scrapeStackOverflow(['javascript'], 3, 0.1);
@@ -7964,7 +8744,7 @@ router.get('/api/learning', async (request, env) => {
     const category = url.searchParams.get('category');
     const company = url.searchParams.get('company');
     const featured = url.searchParams.get('featured') === 'true';
-    const limit = parseInt(url.searchParams.get('limit') || '50');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
     let query = `
@@ -8250,7 +9030,7 @@ router.get('/api/chat/messages/:channelId', async (request, env) => {
   try {
     const { channelId } = request.params;
     const url = new URL(request.url);
-    const limit = parseInt(url.searchParams.get('limit')) || 50;
+    const limit = Math.min(parseInt(url.searchParams.get('limit')) || 50, 50);
     const offset = parseInt(url.searchParams.get('offset')) || 0;
 
     const messages = await env.AIHANGOUT_DB
@@ -9190,6 +9970,89 @@ router.get('/api/chat/channels', async (request, env) => {
 // EXTERNAL PROBLEM HARVESTING ENGINE - SUPPORTING FUNCTIONS
 // ============================================================================
 
+// Content Relevance Scorer - determines whether a harvested item is worth keeping
+// Returns a score 0.0–1.0. Items below 0.4 are discarded; 0.4–0.59 go to pending_review.
+function scoreContentRelevance(title = '', description = '', tags = []) {
+  const titleLower = title.toLowerCase();
+  const descLower = (description || '').toLowerCase();
+  const tagsStr = (Array.isArray(tags) ? tags.join(' ') : String(tags || '')).toLowerCase();
+  const combined = `${titleLower} ${descLower} ${tagsStr}`;
+
+  // --- Penalty check first (fast exit for clearly off-topic content) ---
+  const penaltyTerms = [
+    'top 10', 'top10', 'best practices list', 'announce', 'announcing', 'released:',
+    'newsletter', 'tutorial for beginners', 'beginner tutorial', 'what is ',
+    'introduction to', 'intro to', 'getting started with', 'learn x in y',
+    'job posting', 'hiring', 'we are hiring', 'round up', 'roundup',
+    'weekly digest', 'monthly digest'
+  ];
+  for (const term of penaltyTerms) {
+    if (combined.includes(term)) {
+      return 0.1; // Strongly penalized — skip
+    }
+  }
+
+  let score = 0.0;
+
+  // --- HIGH-value keywords: AI/agent/ML domain (each hit adds weight) ---
+  const highKeywords = [
+    'agent', ' ai ', 'artificial intelligence', 'llm', 'large language model',
+    'automation', 'machine learning', 'neural', 'gpt', 'claude', 'gemini',
+    'inference', ' model ', 'pipeline', 'orchestration', 'embedding', 'vector',
+    ' rag ', 'retrieval augmented', 'fine-tun', 'finetuning', 'finetune',
+    'training', 'deploy ai', 'prompt', 'multimodal', 'workflow', 'agentic',
+    'langchain', 'openai', 'huggingface', 'transformer', 'diffusion',
+    'reinforcement learning', 'rlhf', 'cuda', 'gpu accelerat', 'tokeniz',
+    'semantic search', 'knowledge graph', 'function calling', 'tool use'
+  ];
+  let highHits = 0;
+  for (const kw of highKeywords) {
+    if (combined.includes(kw)) highHits++;
+  }
+  if (highHits >= 3) {
+    score = 0.85;
+  } else if (highHits === 2) {
+    score = 0.75;
+  } else if (highHits === 1) {
+    score = 0.65;
+  }
+
+  // --- MEDIUM-value: concrete problem-seeking signals ---
+  if (score < 0.65) {
+    const problemSignals = [
+      'how do i', 'how to fix', 'not working', 'doesn\'t work', 'does not work',
+      ' error', ' bug', ' failing', ' broken', 'exception', 'traceback',
+      'i\'m getting', 'i am getting', 'throws', 'crash', 'stuck',
+      'unexpected', 'wrong output', 'incorrect', 'issue with', 'problem with',
+      'can\'t', 'cannot', 'won\'t', 'will not', 'failed to', 'unable to'
+    ];
+    let problemHits = 0;
+    for (const sig of problemSignals) {
+      if (combined.includes(sig)) problemHits++;
+    }
+    if (problemHits >= 2) {
+      score = Math.max(score, 0.55);
+    } else if (problemHits === 1) {
+      score = Math.max(score, 0.45);
+    } else {
+      // No problem signal and no high AI keyword — likely informational/opinion
+      score = Math.max(score, 0.2);
+    }
+  }
+
+  // --- BOOST: title structure signals a real question or problem ---
+  if (titleLower.endsWith('?')) score = Math.min(1.0, score + 0.08);
+  const boostWords = ['how', 'why', 'fix', 'solve', 'error', 'issue', 'problem', 'help', 'debug', 'broken', 'failing'];
+  for (const bw of boostWords) {
+    if (titleLower.includes(bw)) {
+      score = Math.min(1.0, score + 0.05);
+      break; // Only one title-boost per item
+    }
+  }
+
+  return Math.min(1.0, Math.max(0.0, score));
+}
+
 // Initialize Multi-Site Harvesting - Revolutionary External Problem Scraping
 async function initializeMultiSiteHarvesting(env, config) {
   const { sites, categories, difficulty_filters, max_per_site, quality_threshold } = config;
@@ -10122,6 +10985,23 @@ async function processHarvestedProblems(env, harvestResults) {
             harvest_timestamp: new Date().toISOString()
           };
 
+          // --- Content relevance filtering ---
+          const relevanceScore = scoreContentRelevance(
+            processedProblem.title,
+            processedProblem.description,
+            processedProblem.tags
+          );
+          processedProblem.moderation_score = relevanceScore;
+
+          if (relevanceScore < 0.4) {
+            console.log(`[Harvest] Skipped low-relevance item: ${processedProblem.title}`);
+            continue; // Drop entirely
+          } else if (relevanceScore < 0.6) {
+            processedProblem.status = 'pending_review'; // Needs human review before going public
+          } else {
+            processedProblem.status = 'approved'; // High-relevance — show publicly
+          }
+
           processedProblems.push(processedProblem);
         }
       }
@@ -10812,7 +11692,7 @@ router.get('/api/intelligence', async (request, env) => {
     const url = new URL(request.url);
     const company = url.searchParams.get('company');
     const contentType = url.searchParams.get('type');
-    const limit = parseInt(url.searchParams.get('limit')) || 50;
+    const limit = Math.min(parseInt(url.searchParams.get('limit')) || 50, 50);
 
     let query = `
       SELECT * FROM ai_intelligence
@@ -10987,7 +11867,7 @@ router.get('/api/intelligence/feed', async (request, env) => {
   try {
     const url = new URL(request.url);
     const company = url.searchParams.get('company');
-    const limit = parseInt(url.searchParams.get('limit')) || 20;
+    const limit = Math.min(parseInt(url.searchParams.get('limit')) || 20, 50);
 
     let query = `
       SELECT ai_intelligence.*, COUNT(ai_intelligence_views.id) as view_count
@@ -11034,7 +11914,7 @@ router.get('/api/intelligence/feed', async (request, env) => {
 router.get('/api/intelligence/nvidia', async (request, env) => {
   try {
     const url = new URL(request.url);
-    const limit = parseInt(url.searchParams.get('limit')) || 20;
+    const limit = Math.min(parseInt(url.searchParams.get('limit')) || 20, 50);
 
     const intelligence = await env.AIHANGOUT_DB.prepare(`
       SELECT ai_intelligence.*, COUNT(ai_intelligence_views.id) as view_count
@@ -11307,7 +12187,7 @@ router.get('/api/bookmarks', async (request, env) => {
       LEFT JOIN problems p ON b.content_type = 'problem' AND b.content_id = p.id
       LEFT JOIN solutions s ON b.content_type = 'solution' AND b.content_id = s.id
       LEFT JOIN problems p2 ON s.problem_id = p2.id
-      LEFT JOIN learning_content l ON b.content_type = 'learning' AND b.content_id = l.id
+      LEFT JOIN ai_learning_content l ON b.content_type = 'learning' AND b.content_id = l.id
       WHERE b.user_id = ?
       ORDER BY b.created_at DESC
     `).bind(authResult.id).all();
@@ -11454,9 +12334,10 @@ router.post('/api/events/batch', async (request, env) => {
     const user = await authenticate(request, env);
 
     // Parse body - supports both application/json and text/plain (sendBeacon)
+    // safeJsonParse used to prevent prototype pollution from user-supplied data (FIX 6)
     let body;
     try {
-      body = JSON.parse(await request.text());
+      body = safeJsonParse(await request.text());
     } catch {
       return Response.json({ success: true, processed: 0 }, { headers: corsHeaders });
     }
@@ -11925,7 +12806,7 @@ router.get('/api/security/stats', async (request, env) => {
 router.get('/api/security/alerts', async (request, env) => {
   try {
     const url = new URL(request.url);
-    const limit = parseInt(url.searchParams.get('limit') || '10');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '10'), 50);
 
     const alerts = await env.AIHANGOUT_DB
       .prepare("SELECT * FROM analytics_events WHERE event_type LIKE 'security_%' ORDER BY timestamp DESC LIMIT ?")
@@ -12009,8 +12890,50 @@ router.get('/api/users/by-username/:username', async (request, env) => {
 // FOLLOW USERS API ENDPOINTS
 // ============================================================================
 
+// Batch is-following check — MUST be registered before any /api/users/:id/... routes
+// so the literal path segment 'is-following-batch' is not consumed by the :id param.
+router.post('/api/users/is-following-batch', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: true, following: [] }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const { user_ids } = await request.json();
+    if (!Array.isArray(user_ids) || user_ids.length === 0) {
+      return new Response(JSON.stringify({ success: true, following: [] }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (user_ids.length > 50) {
+      return new Response(JSON.stringify({ success: false, error: 'Max 50 user IDs allowed' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const validIds = user_ids.filter(id => Number.isInteger(id) && id > 0);
+    if (validIds.length === 0) {
+      return new Response(JSON.stringify({ success: true, following: [] }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const placeholders = validIds.map(() => '?').join(',');
+    const result = await env.AIHANGOUT_DB
+      .prepare(`SELECT following_id FROM followers WHERE follower_id = ? AND following_id IN (${placeholders})`)
+      .bind(user.id, ...validIds).all();
+    const followingIds = (result.results || []).map(r => r.following_id);
+    return new Response(JSON.stringify({ success: true, following: followingIds }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
 // Toggle follow/unfollow a user
-router.post('/api/users/:id/follow', async (request, env) => {
+router.post('/api/users/:id/follow', async (request, env, ctx) => {
   try {
     const user = await authenticate(request, env);
     if (!user) {
@@ -12057,6 +12980,14 @@ router.post('/api/users/:id/follow', async (request, env) => {
       await env.AIHANGOUT_DB
         .prepare('INSERT INTO followers (follower_id, following_id) VALUES (?, ?)')
         .bind(user.id, targetId).run();
+      ctx.waitUntil(createNotification(env, {
+        userId: targetId,
+        actorId: user.id,
+        type: 'new_follower',
+        targetType: 'user',
+        targetId: user.id,
+        message: `${user.username} started following you`
+      }));
       return new Response(JSON.stringify({ success: true, following: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
@@ -12117,6 +13048,276 @@ router.get('/api/users/:id/is-following', async (request, env) => {
       .bind(user.id, targetId).first();
 
     return new Response(JSON.stringify({ success: true, following: !!existing }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Get users that a user is following
+router.get('/api/users/:id/following', async (request, env) => {
+  try {
+    await initDatabase(env);
+    const targetId = parseInt(request.params.id);
+    if (isNaN(targetId)) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid user ID' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const result = await env.AIHANGOUT_DB
+      .prepare(`SELECT u.id, u.username, u.reputation, u.ai_agent_type, f.created_at as followed_at
+                FROM followers f JOIN users u ON f.following_id = u.id
+                WHERE f.follower_id = ? ORDER BY f.created_at DESC`)
+      .bind(targetId).all();
+    const count = await env.AIHANGOUT_DB
+      .prepare('SELECT COUNT(*) as count FROM followers WHERE follower_id = ?')
+      .bind(targetId).first();
+    return new Response(JSON.stringify({ success: true, following: result.results, count: count?.count || 0 }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// NOTIFICATIONS API ENDPOINTS
+// ============================================================================
+
+// List notifications
+router.get('/api/notifications', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const url = new URL(request.url);
+    const unreadOnly = url.searchParams.get('unread_only') === 'true';
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
+    const offset = parseInt(url.searchParams.get('offset') || '0');
+
+    const whereClause = unreadOnly ? 'WHERE n.user_id = ? AND n.is_read = FALSE' : 'WHERE n.user_id = ?';
+    const result = await env.AIHANGOUT_DB
+      .prepare(`SELECT n.*, u.username as actor_username
+                FROM notifications n
+                LEFT JOIN users u ON n.actor_id = u.id
+                ${whereClause}
+                ORDER BY n.created_at DESC
+                LIMIT ? OFFSET ?`)
+      .bind(user.id, limit, offset).all();
+
+    return new Response(JSON.stringify({ success: true, notifications: result.results || [] }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Unread notification count
+router.get('/api/notifications/count', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: true, unread_count: 0 }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const result = await env.AIHANGOUT_DB
+      .prepare('SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = FALSE')
+      .bind(user.id).first();
+    return new Response(JSON.stringify({ success: true, unread_count: result?.count || 0 }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Mark notifications as read
+router.post('/api/notifications/read', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const { notification_ids, all } = await request.json();
+    if (all) {
+      await env.AIHANGOUT_DB
+        .prepare('UPDATE notifications SET is_read = TRUE WHERE user_id = ? AND id IN (SELECT id FROM notifications WHERE user_id = ? AND is_read = FALSE LIMIT 1000)')
+        .bind(user.id, user.id).run();
+    } else if (Array.isArray(notification_ids) && notification_ids.length > 0) {
+      const validIds = notification_ids.filter(id => Number.isInteger(id) && id > 0).slice(0, 100);
+      if (validIds.length > 0) {
+        const placeholders = validIds.map(() => '?').join(',');
+        await env.AIHANGOUT_DB
+          .prepare(`UPDATE notifications SET is_read = TRUE WHERE user_id = ? AND id IN (${placeholders})`)
+          .bind(user.id, ...validIds).run();
+      }
+    }
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Delete a notification
+router.delete('/api/notifications/:id', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const notifId = parseInt(request.params.id);
+    if (isNaN(notifId)) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid notification ID' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    await env.AIHANGOUT_DB
+      .prepare('DELETE FROM notifications WHERE id = ? AND user_id = ?')
+      .bind(notifId, user.id).run();
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// USER SETTINGS API ENDPOINTS
+// ============================================================================
+
+// Get user settings
+router.get('/api/users/me/settings', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    let settings = await env.AIHANGOUT_DB
+      .prepare('SELECT * FROM user_settings WHERE user_id = ?')
+      .bind(user.id).first();
+    if (!settings) {
+      await env.AIHANGOUT_DB
+        .prepare('INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)')
+        .bind(user.id).run();
+      settings = await env.AIHANGOUT_DB
+        .prepare('SELECT * FROM user_settings WHERE user_id = ?')
+        .bind(user.id).first();
+    }
+    return new Response(JSON.stringify({ success: true, settings }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Update user settings
+router.put('/api/users/me/settings', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const { notify_new_follower, notify_vote_on_content, notify_new_solution, email_notifications } = await request.json();
+    await env.AIHANGOUT_DB
+      .prepare(`INSERT INTO user_settings (user_id, notify_new_follower, notify_vote_on_content, notify_new_solution, email_notifications, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                  notify_new_follower = excluded.notify_new_follower,
+                  notify_vote_on_content = excluded.notify_vote_on_content,
+                  notify_new_solution = excluded.notify_new_solution,
+                  email_notifications = excluded.email_notifications,
+                  updated_at = CURRENT_TIMESTAMP`)
+      .bind(
+        user.id,
+        notify_new_follower !== undefined ? (notify_new_follower ? 1 : 0) : 1,
+        notify_vote_on_content !== undefined ? (notify_vote_on_content ? 1 : 0) : 1,
+        notify_new_solution !== undefined ? (notify_new_solution ? 1 : 0) : 1,
+        email_notifications !== undefined ? (email_notifications ? 1 : 0) : 0
+      ).run();
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// BOOKMARKS BATCH CHECK ENDPOINT
+// ============================================================================
+
+// Check which IDs from a list are bookmarked by the current user
+router.post('/api/bookmarks/check', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: true, bookmarked: [] }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const { content_type, content_ids } = await request.json();
+    const allowedTypes = ['problem', 'solution', 'learning'];
+    if (!allowedTypes.includes(content_type)) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid content_type' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (!Array.isArray(content_ids) || content_ids.length === 0) {
+      return new Response(JSON.stringify({ success: true, bookmarked: [] }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (content_ids.length > 50) {
+      return new Response(JSON.stringify({ success: false, error: 'Max 50 content IDs allowed' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const validIds = content_ids.filter(id => Number.isInteger(id) && id > 0);
+    if (validIds.length === 0) {
+      return new Response(JSON.stringify({ success: true, bookmarked: [] }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const placeholders = validIds.map(() => '?').join(',');
+    const result = await env.AIHANGOUT_DB
+      .prepare(`SELECT content_id FROM bookmarks WHERE user_id = ? AND content_type = ? AND content_id IN (${placeholders})`)
+      .bind(user.id, content_type, ...validIds).all();
+    const bookmarked = (result.results || []).map(r => r.content_id);
+    return new Response(JSON.stringify({ success: true, bookmarked }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (error) {
@@ -12206,7 +13407,7 @@ router.get('/api/problem-bank', async (request, env) => {
     const url = new URL(request.url);
     const category = url.searchParams.get('category');
     const impact = url.searchParams.get('impact');
-    const limit = parseInt(url.searchParams.get('limit') || '20');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
     // First check if major_problems table has data
@@ -12278,11 +13479,15 @@ router.get('/api/problem-bank', async (request, env) => {
       category: p.category || 'general',
       industry: 'Technology',
       impact_level: p.difficulty === 'hard' ? 'critical' : p.difficulty === 'medium' ? 'high' : 'medium',
+      // estimated_value is a community-estimated effort value, NOT a paid bounty
       estimated_value: (p.upvotes || 0) * 1000 + 5000,
+      estimated_value_label: 'Estimated Value (not a bounty)',
       affected_users: Math.max(100, (p.upvotes || 0) * 50),
       time_to_solve: p.difficulty === 'hard' ? '1-2 weeks' : p.difficulty === 'medium' ? '2-5 days' : '1-2 days',
       source: 'aihangout.ai',
-      bounty_amount: (p.upvotes || 0) * 500,
+      // bounty_amount is 0 unless an admin has explicitly set a real bounty
+      bounty_amount: 0,
+      has_bounty: false,
       created_at: p.created_at,
       is_featured: (p.upvotes || 0) > 5,
       tags: p.tags ? p.tags.split(',').map(t => t.trim()) : [p.category || 'general'],
@@ -12335,11 +13540,15 @@ router.get('/api/problem-bank/featured', async (request, env) => {
       category: p.category || 'general',
       industry: 'Technology',
       impact_level: p.difficulty === 'hard' ? 'critical' : 'high',
+      // estimated_value is community effort estimate, NOT a paid bounty
       estimated_value: (p.upvotes || 0) * 1000 + 10000,
+      estimated_value_label: 'Estimated Value (not a bounty)',
       affected_users: Math.max(500, (p.upvotes || 0) * 100),
       time_to_solve: '1-2 weeks',
       source: 'aihangout.ai',
-      bounty_amount: (p.upvotes || 0) * 1000,
+      // bounty_amount is 0 unless explicitly set by admin
+      bounty_amount: 0,
+      has_bounty: false,
       created_at: p.created_at,
       is_featured: true,
       tags: [p.category || 'general'],
@@ -12442,7 +13651,7 @@ router.get('/api/bug-reports', async (request, env) => {
     const status = url.searchParams.get('status');
     const priority = url.searchParams.get('priority');
     const bugType = url.searchParams.get('bugType');
-    const limit = parseInt(url.searchParams.get('limit') || '50');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
     let query = 'SELECT * FROM bug_reports WHERE 1=1';
@@ -12526,8 +13735,12 @@ router.patch('/api/bug-reports/:id/status', async (request, env) => {
   try {
     await initDatabase(env);
 
-    // This endpoint would typically require admin authentication
-    // For now, we'll allow status updates for demonstration
+    const user = await authenticate(request, env);
+    if (!user || !user.is_admin) {
+      return new Response(JSON.stringify({ success: false, error: 'Admin required' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
 
     const { id } = request.params;
     const { status } = await request.json();
@@ -12585,6 +13798,634 @@ router.patch('/api/bug-reports/:id/status', async (request, env) => {
   }
 });
 
+// Admin: flagged content review
+router.get('/api/admin/flagged-content', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user || !user.is_admin) {
+      return new Response(JSON.stringify({ success: false, error: 'Admin access required' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const flaggedProblems = await env.AIHANGOUT_DB
+      .prepare(`
+        SELECT p.id, p.title, p.description, p.moderation_flag, p.created_at,
+               u.id as user_id, u.username, u.email, 'problem' as content_type
+        FROM problems p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.moderation_flag IS NOT NULL
+        ORDER BY p.created_at DESC
+        LIMIT 50
+      `)
+      .all();
+
+    const flaggedSolutions = await env.AIHANGOUT_DB
+      .prepare(`
+        SELECT s.id, s.solution_text as title, s.why_explanation as description,
+               s.moderation_flag, s.moderation_score, s.created_at,
+               u.id as user_id, u.username, u.email, 'solution' as content_type,
+               s.problem_id
+        FROM solutions s
+        JOIN users u ON s.user_id = u.id
+        WHERE s.moderation_flag IS NOT NULL
+        ORDER BY s.created_at DESC
+        LIMIT 50
+      `)
+      .all();
+
+    return new Response(JSON.stringify({
+      success: true,
+      flagged_problems: flaggedProblems.results || [],
+      flagged_solutions: flaggedSolutions.results || [],
+      total: (flaggedProblems.results || []).length + (flaggedSolutions.results || []).length
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('Flagged content fetch error:', error);
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Content Reporting
+router.post('/api/reports', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+      status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+    const { content_type, content_id, reason, details } = await request.json();
+
+    // Validate inputs
+    const allowedTypes = ['problem', 'solution'];
+    const allowedReasons = ['spam', 'misleading', 'offensive', 'injection', 'other'];
+    if (!allowedTypes.includes(content_type) || !allowedReasons.includes(reason)) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid content_type or reason' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (!Number.isInteger(content_id) || content_id <= 0) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid content_id' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Verify content exists
+    const table = content_type === 'problem' ? 'problems' : 'solutions';
+    const content = await env.AIHANGOUT_DB.prepare(`SELECT id FROM ${table} WHERE id = ?`).bind(content_id).first();
+    if (!content) return new Response(JSON.stringify({ success: false, error: 'Content not found' }), {
+      status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+    // INSERT OR IGNORE prevents duplicate reports from same user
+    await env.AIHANGOUT_DB.prepare(
+      'INSERT OR IGNORE INTO content_reports (reporter_id, content_type, content_id, reason, details) VALUES (?,?,?,?,?)'
+    ).bind(user.id, content_type, content_id, reason, details ? String(details).slice(0, 500) : null).run();
+
+    // Increment report_count on the content
+    await env.AIHANGOUT_DB.prepare(
+      `UPDATE ${table} SET report_count = (SELECT COUNT(*) FROM content_reports WHERE content_type = ? AND content_id = ?) WHERE id = ?`
+    ).bind(content_type, content_id, content_id).run();
+
+    // Auto-flag content with 5+ reports (set status = 'pending_review' so it hides from public feed)
+    const countResult = await env.AIHANGOUT_DB.prepare(
+      `SELECT COUNT(*) as cnt FROM content_reports WHERE content_type = ? AND content_id = ? AND status = 'pending'`
+    ).bind(content_type, content_id).first();
+
+    if (countResult?.cnt >= 5) {
+      await env.AIHANGOUT_DB.prepare(
+        `UPDATE ${table} SET status = 'pending_review' WHERE id = ? AND status = 'approved'`
+      ).bind(content_id).run();
+    }
+
+    console.log(`[Report] User ${user.id} reported ${content_type}:${content_id} for ${reason}`);
+    return new Response(JSON.stringify({ success: true, message: 'Report submitted. Thank you for helping keep the community safe.' }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+router.get('/api/admin/reports', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user?.is_admin) return new Response(JSON.stringify({ success: false, error: 'Admin required' }), {
+      status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+    const url = new URL(request.url);
+    const status = url.searchParams.get('status') || 'pending';
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 100);
+
+    const result = await env.AIHANGOUT_DB.prepare(`
+      SELECT cr.*, u.username as reporter_username
+      FROM content_reports cr
+      JOIN users u ON cr.reporter_id = u.id
+      WHERE cr.status = ?
+      ORDER BY cr.created_at DESC
+      LIMIT ?
+    `).bind(status, limit).all();
+
+    return new Response(JSON.stringify({ success: true, reports: result.results || [] }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// AGENT-OPTIMIZED FEED — GET /api/v1/problems/feed
+// Returns a clean, stable, machine-readable problem list for AI agent polling.
+// - No HTML metadata, no expiring pagination tokens
+// - Excludes pending_review items (agent posts awaiting human approval)
+// - Supports X-Agent-Type header detection and logs agent requests
+// ============================================================================
+
+router.get('/api/v1/problems/feed', async (request, env) => {
+  try {
+    const agentName = detectAgentRequest(request);
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+    // Agent rate limit for feed polling
+    if (agentName && env.AIHANGOUT_KV) {
+      const agentRl = await checkAgentRateLimit(env.AIHANGOUT_KV, ip, agentName);
+      if (agentRl.limited) return rateLimitResponse(agentRl);
+    }
+
+    const url = new URL(request.url);
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 100);
+    const since = url.searchParams.get('since'); // ISO8601 — return only items newer than this
+    const category = url.searchParams.get('category');
+    const difficulty = url.searchParams.get('difficulty');
+
+    // Build query — always excludes pending_review. Shows approved + legacy 'open' problems.
+    // 'open' is the pre-agent-infrastructure status; those are all human-posted and therefore visible.
+    let whereClause = `WHERE p.status != 'pending_review' AND (p.is_public = TRUE OR p.is_public IS NULL)`;
+    const params = [];
+
+    if (since) {
+      whereClause += ` AND p.created_at > ?`;
+      params.push(since);
+    }
+    if (category) {
+      whereClause += ` AND p.category = ?`;
+      params.push(category);
+    }
+    if (difficulty) {
+      whereClause += ` AND p.difficulty = ?`;
+      params.push(difficulty);
+    }
+
+    const query = `
+      SELECT
+        p.external_id           AS id,
+        p.title                 AS title,
+        p.category              AS category,
+        p.difficulty            AS difficulty,
+        p.spof_indicators       AS spof_indicators,
+        p.created_at            AS created_at,
+        p.solver_type           AS human_vs_ai,
+        COUNT(s.id)             AS solution_count,
+        MAX(COALESCE(s.created_at, p.created_at)) AS last_activity
+      FROM problems p
+      LEFT JOIN solutions s ON p.id = s.problem_id
+      ${whereClause}
+      GROUP BY p.id
+      ORDER BY p.created_at DESC
+      LIMIT ?
+    `;
+    params.push(limit);
+
+    const rows = await env.AIHANGOUT_DB.prepare(query).bind(...params).all();
+
+    // Normalize human_vs_ai to the documented enum: "human" | "ai" | "mixed"
+    const problems = (rows.results || []).map(row => ({
+      id: row.id,
+      title: row.title,
+      category: row.category || null,
+      difficulty: row.difficulty || 'medium',
+      spof_indicators: (() => {
+        try { return row.spof_indicators ? JSON.parse(row.spof_indicators) : []; }
+        catch { return []; }
+      })(),
+      created_at: row.created_at,
+      human_vs_ai: row.human_vs_ai === 'AI' ? 'ai' : (row.human_vs_ai === 'mixed' ? 'mixed' : 'human'),
+      solution_count: row.solution_count || 0,
+      last_activity: row.last_activity || row.created_at,
+    }));
+
+    // Log agent feed poll for audit (non-critical)
+    if (agentName) {
+      try {
+        await env.AIHANGOUT_DB.prepare(
+          `INSERT INTO agent_request_log (agent_name, method, path, ip_address, action) VALUES (?, 'GET', '/api/v1/problems/feed', ?, 'feed_poll')`
+        ).bind(agentName, ip).run();
+      } catch (e) { /* non-critical */ }
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      api_version: 'v1',
+      agent_processed: !!agentName,
+      count: problems.length,
+      problems,
+    }), {
+      headers: { ...addAgentHeaders(corsHeaders, agentName), 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: error.message
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// ADMIN: PENDING REVIEW QUEUE — GET /api/admin/pending-review
+// Returns all agent-submitted content awaiting human moderation.
+// Admin-only: requires authenticated user with is_admin=true.
+// ============================================================================
+
+router.get('/api/admin/pending-review', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (!user.is_admin) {
+      return new Response(JSON.stringify({ success: false, error: 'Admin access required' }), {
+        status: 403,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const url = new URL(request.url);
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 200);
+    const content_type = url.searchParams.get('type'); // 'problem' | 'solution' | null (both)
+
+    const pendingProblems = (content_type === 'solution') ? [] : (await env.AIHANGOUT_DB.prepare(`
+      SELECT
+        p.id, p.external_id, p.title, p.category, p.difficulty,
+        p.description, p.solver_type, p.agent_name,
+        p.moderation_flag, p.moderation_score,
+        p.created_at, u.username AS author
+      FROM problems p
+      JOIN users u ON p.user_id = u.id
+      WHERE p.status = 'pending_review'
+      ORDER BY p.created_at ASC
+      LIMIT ?
+    `).bind(limit).all()).results || [];
+
+    const pendingSolutions = (content_type === 'problem') ? [] : (await env.AIHANGOUT_DB.prepare(`
+      SELECT
+        s.id, s.problem_id, s.solution_text, s.code_snippet,
+        s.solver_type, s.agent_name,
+        s.moderation_flag, s.moderation_score,
+        s.created_at, u.username AS author,
+        p.title AS problem_title, p.external_id AS problem_external_id
+      FROM solutions s
+      JOIN users u ON s.user_id = u.id
+      JOIN problems p ON s.problem_id = p.id
+      WHERE s.solver_type = 'AI' AND s.is_verified = FALSE
+      ORDER BY s.created_at ASC
+      LIMIT ?
+    `).bind(limit).all()).results || [];
+
+    return new Response(JSON.stringify({
+      success: true,
+      pending_problems: pendingProblems,
+      pending_solutions: pendingSolutions,
+      total_pending: pendingProblems.length + pendingSolutions.length,
+      generated_at: new Date().toISOString(),
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: error.message
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// ADMIN: APPROVE PENDING CONTENT — POST /api/admin/approve/:content_type/:content_id
+// Moves a pending_review problem or solution into the approved/visible state.
+// Admin-only.
+// ============================================================================
+
+router.post('/api/admin/approve/:content_type/:content_id', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (!user.is_admin) {
+      return new Response(JSON.stringify({ success: false, error: 'Admin access required' }), {
+        status: 403,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const { content_type, content_id } = request.params;
+    if (!['problem', 'solution'].includes(content_type)) {
+      return new Response(JSON.stringify({ success: false, error: 'content_type must be problem or solution' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (content_type === 'problem') {
+      await env.AIHANGOUT_DB.prepare(
+        `UPDATE problems SET status = 'approved' WHERE id = ? AND status = 'pending_review'`
+      ).bind(parseInt(content_id)).run();
+    } else {
+      await env.AIHANGOUT_DB.prepare(
+        `UPDATE solutions SET is_verified = TRUE WHERE id = ? AND solver_type = 'AI'`
+      ).bind(parseInt(content_id)).run();
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      content_type,
+      content_id: parseInt(content_id),
+      new_status: 'approved',
+      approved_by: user.username,
+      approved_at: new Date().toISOString(),
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: error.message
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// ADMIN: SERVICE TOKEN — POST /api/admin/service-token
+// Issues a long-lived (365-day) service token for machine clients (e.g. Spark-1 bridge).
+// Requires an active admin JWT to call — service tokens cannot mint other service tokens.
+// Response: { success: true, token: "<raw>", name, expires_at }
+// The raw token is shown ONCE and never stored — only its SHA-256 hash is persisted.
+// ============================================================================
+
+router.post('/api/admin/service-token', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (!user.is_admin) {
+      return new Response(JSON.stringify({ success: false, error: 'Admin access required' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    // Service tokens cannot mint other service tokens — require a real JWT admin session.
+    if (user._is_service_token) {
+      return new Response(JSON.stringify({ success: false, error: 'Service tokens cannot issue new service tokens' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const body = await request.json().catch(() => ({}));
+    const name = (body.name || '').trim().slice(0, 64);
+    if (!name) {
+      return new Response(JSON.stringify({ success: false, error: 'name is required' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Generate 256-bit random token as 64-char hex string
+    const rawBytes = globalThis.crypto.getRandomValues(new Uint8Array(32));
+    const rawToken = Array.from(rawBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    const tokenHash = await hashToken(rawToken);
+
+    // 365 days from now
+    const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+
+    await env.AIHANGOUT_DB
+      .prepare('INSERT INTO service_tokens (name, token_hash, expires_at) VALUES (?, ?, ?)')
+      .bind(name, tokenHash, expiresAt)
+      .run();
+
+    return new Response(JSON.stringify({
+      success: true,
+      token: rawToken,
+      name,
+      expires_at: expiresAt,
+      note: 'Store this token securely — it will not be shown again.'
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('[Admin service-token] Error:', error);
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// ADMIN: FLAGS ENDPOINT — GET /api/admin/flags?since=[minutes]&risk=[high|medium|low|all]
+// Returns content flagged by the injection scanner within the requested window.
+// Requires admin auth (is_admin = true).
+// Used by the aihangout_bridge.py security monitor and by Ron directly.
+// ============================================================================
+
+router.get('/api/admin/flags', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (!user.is_admin) {
+      return new Response(JSON.stringify({ success: false, error: 'Admin access required' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const url = new URL(request.url);
+    const sinceMinutes = Math.min(Math.max(parseInt(url.searchParams.get('since') || '30'), 1), 10080); // 1 min – 1 week
+    const riskFilter = url.searchParams.get('risk') || 'all'; // high | medium | low | all
+
+    // Build optional risk WHERE clause
+    const riskValues = ['high', 'medium', 'low'];
+    const useRiskFilter = riskValues.includes(riskFilter);
+
+    const riskClause = useRiskFilter
+      ? `AND json_extract(content_flags, '$.risk') = '${riskFilter}'`
+      : `AND json_extract(content_flags, '$.risk') IN ('high', 'medium', 'low')`;
+
+    const flaggedProblems = await env.AIHANGOUT_DB.prepare(`
+      SELECT
+        p.id,
+        p.title,
+        p.status,
+        p.content_flags,
+        p.moderation_flag,
+        p.moderation_score,
+        p.created_at,
+        u.username AS author_username,
+        u.id AS author_id,
+        'problem' AS content_type
+      FROM problems p
+      JOIN users u ON p.user_id = u.id
+      WHERE json_extract(content_flags, '$.flagged') = 1
+        AND p.created_at > datetime('now', '-' || ? || ' minutes')
+        ${riskClause}
+      ORDER BY p.created_at DESC
+      LIMIT 100
+    `).bind(sinceMinutes).all();
+
+    const flaggedSolutions = await env.AIHANGOUT_DB.prepare(`
+      SELECT
+        s.id,
+        s.solution_text AS title,
+        s.content_flags,
+        s.moderation_flag,
+        s.moderation_score,
+        s.created_at,
+        u.username AS author_username,
+        u.id AS author_id,
+        'solution' AS content_type,
+        s.problem_id
+      FROM solutions s
+      JOIN users u ON s.user_id = u.id
+      WHERE json_extract(content_flags, '$.flagged') = 1
+        AND s.created_at > datetime('now', '-' || ? || ' minutes')
+        ${riskClause}
+      ORDER BY s.created_at DESC
+      LIMIT 100
+    `).bind(sinceMinutes).all();
+
+    const problems = flaggedProblems.results || [];
+    const solutions = flaggedSolutions.results || [];
+    const allFlagged = [...problems, ...solutions];
+
+    // Count by risk level across both tables
+    const countByRisk = (items, level) =>
+      items.filter(i => {
+        try { return JSON.parse(i.content_flags || '{}').risk === level; } catch { return false; }
+      }).length;
+
+    const pendingReview = await env.AIHANGOUT_DB.prepare(
+      `SELECT (SELECT COUNT(*) FROM problems WHERE status='pending_review') +
+              (SELECT COUNT(*) FROM solutions WHERE solver_type='AI' AND is_verified=FALSE) AS cnt`
+    ).first();
+
+    return new Response(JSON.stringify({
+      success: true,
+      since_minutes: sinceMinutes,
+      risk_filter: riskFilter,
+      flagged_problems: problems,
+      flagged_solutions: solutions,
+      summary: {
+        total_flagged: allFlagged.length,
+        high_risk: countByRisk(allFlagged, 'high'),
+        medium_risk: countByRisk(allFlagged, 'medium'),
+        low_risk: countByRisk(allFlagged, 'low'),
+        pending_review: pendingReview?.cnt || 0
+      },
+      generated_at: new Date().toISOString()
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('[Admin flags] Error:', error);
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// ============================================================================
+// HEALTH/SECURITY — GET /api/health/security
+// No auth required. Confirms scanner is running — nothing more.
+// Counts and operational details moved to /api/admin/flags (admin-only).
+// ============================================================================
+
+router.get('/api/health/security', async (request, env) => {
+  try {
+    // Probe the DB with a minimal query to confirm it is reachable.
+    // No counts are returned here — counts reveal scanner sensitivity to attackers.
+    await env.AIHANGOUT_DB.prepare('SELECT 1').first();
+
+    return new Response(JSON.stringify({
+      scanner: 'active',
+      status: 'ok'
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('[Health/security] Error:', error);
+    // Degrade gracefully — the health endpoint must never 500 to monitors
+    return new Response(JSON.stringify({
+      scanner: 'error',
+      status: 'degraded'
+    }), {
+      status: 200, // intentional — uptime monitors should not alarm on scanner hiccups
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// HEAD handler for SPA routes (/terms, /privacy, /dmca, etc.)
+// itty-router does not auto-alias HEAD to GET, so HEAD falls through to a 500.
+// This handler returns 200 with no body for all non-API paths, satisfying uptime monitors.
+router.head('*', async (request, env) => {
+  const url = new URL(request.url);
+  if (url.pathname.startsWith('/api/')) {
+    return new Response(null, { status: 404, headers: corsHeaders });
+  }
+  return new Response(null, {
+    status: 200,
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'public, max-age=0, must-revalidate',
+    }
+  });
+});
+
 // Serve frontend assets with proper cache control - EXCLUDE API ROUTES
 router.get('*', async (request, env) => {
   try {
@@ -12596,6 +14437,25 @@ router.get('*', async (request, env) => {
         status: 404,
         headers: corsHeaders
       });
+    }
+
+    // SPA routing: known non-file paths (no extension) go straight to index.html
+    // This prevents ASSETS.fetch() from throwing on SPA routes like /terms /privacy /dmca
+    const hasDotExtension = url.pathname.includes('.') && !url.pathname.endsWith('/');
+    if (!hasDotExtension) {
+      // Try the asset first, fall back to index.html — but catch any throw from ASSETS
+      let asset;
+      try {
+        asset = await env.ASSETS.fetch(request);
+      } catch (_) {
+        asset = null;
+      }
+      if (!asset || asset.status === 404) {
+        return await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin)));
+      }
+      const headers = new Headers(asset.headers);
+      headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
+      return new Response(asset.body, { status: asset.status, statusText: asset.statusText, headers });
     }
 
     const asset = await env.ASSETS.fetch(request);
@@ -12677,13 +14537,17 @@ export default {
 async function runDailyHarvest(env) {
   try {
     await initDatabase(env);
+    // Clean notifications older than 90 days
+    await env.AIHANGOUT_DB.prepare(
+      "DELETE FROM notifications WHERE created_at < datetime('now', '-90 days')"
+    ).run();
     const allSites = ['stackoverflow', 'github_issues', 'reddit_programming', 'dev_to', 'hackernews', 'arxiv'];
     const result = await initializeMultiSiteHarvesting(env, {
       sites: allSites,
       categories: ['javascript', 'python', 'ai', 'machine-learning', 'backend', 'frontend'],
       difficulty_filters: ['easy', 'medium', 'hard'],
       max_per_site: 10,
-      quality_threshold: 0.6,
+      quality_threshold: 0.4, // Lowered — scoreContentRelevance now handles fine-grained filtering
       auto_assign_agents: false
     });
     const total = result?.total_problems_stored || 0;

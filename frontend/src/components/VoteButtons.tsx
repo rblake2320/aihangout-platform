@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline'
 import { votingAPI } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
+import { useAnalytics } from '../hooks/useAnalytics'
 import toast from 'react-hot-toast'
 
 interface VoteButtonsProps {
@@ -21,6 +22,7 @@ export default function VoteButtons({
   userVote = null
 }: VoteButtonsProps) {
   const { isAuthenticated } = useAuthStore()
+  const { track } = useAnalytics()
   const queryClient = useQueryClient()
   const [currentVote, setCurrentVote] = useState<'up' | 'down' | null>(userVote)
   const [voteCount, setVoteCount] = useState(upvotes)
@@ -69,6 +71,7 @@ export default function VoteButtons({
     }
 
     voteMutation.mutate({ voteType })
+    track('vote', { target_type: targetType, target_id: targetId, vote_type: voteType, previous_vote: currentVote })
   }
 
   const buttonSize = size === 'large' ? 'w-10 h-10' : 'w-8 h-8'

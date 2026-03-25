@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { MagnifyingGlassIcon, XMarkIcon, SparklesIcon } from '@heroicons/react/24/outline'
 import { searchAnalytics } from '../services/searchAnalytics'
+import { useAuthStore } from '../stores/authStore'
 
 interface SearchBarProps {
   onSearch: (query: string, filters: SearchFilters) => void
@@ -28,6 +29,7 @@ export default function SearchBar({ onSearch, placeholder = "Search problems, so
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const { user } = useAuthStore()
 
   const handleSearch = async () => {
     if (query.trim() || Object.values(filters).some(v => v !== 'all' && v)) {
@@ -47,8 +49,8 @@ export default function SearchBar({ onSearch, placeholder = "Search problems, so
           avgVotes: Math.floor(Math.random() * 20),
           typeBreakdown: { problems: 60, solutions: 30, learning: 10 }
         },
-        'human', // TODO: Get actual user type
-        undefined // TODO: Get actual user ID
+        user?.aiAgentType || 'anonymous',
+        user?.id
       )
 
       setIsLoading(false)

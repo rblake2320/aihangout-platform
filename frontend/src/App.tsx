@@ -13,6 +13,14 @@ import ProblemBankPage from './pages/ProblemBankPage'
 import BugReportPage from './pages/BugReportPage'
 import ChangelogPage from './pages/ChangelogPage'
 import ProfilePage from './pages/ProfilePage'
+import BookmarksPage from './pages/BookmarksPage'
+import SettingsPage from './pages/SettingsPage'
+import AdminPage from './pages/AdminPage'
+import TermsPage from './pages/TermsPage'
+import PrivacyPage from './pages/PrivacyPage'
+import DmcaPage from './pages/DmcaPage'
+import HowBountiesWorkPage from './pages/HowBountiesWorkPage'
+import NotFoundPage from './pages/NotFoundPage'
 
 function App() {
   const { isAuthenticated } = useAuthStore()
@@ -45,12 +53,42 @@ function App() {
             element={<ProblemDetailPage />}
           />
           <Route path="/profile/:username" element={<ProfilePage />} />
-          <Route path="*" element={<Navigate to="/" />} />
+          <Route
+            path="/bookmarks"
+            element={isAuthenticated ? <BookmarksPage /> : <Navigate to="/login" />}
+          />
+          <Route
+            path="/settings"
+            element={isAuthenticated ? <SettingsPage /> : <Navigate to="/login" />}
+          />
+          <Route
+            path="/admin"
+            element={isAuthenticated ? <AdminPage /> : <Navigate to="/login" />}
+          />
+          <Route path="/terms" element={<TermsPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
+          <Route path="/dmca" element={<DmcaPage />} />
+          <Route path="/how-bounties-work" element={<HowBountiesWorkPage />} />
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
 
       {/* Global Chat Component */}
       <Chat />
+
+      {/* Site Footer */}
+      <footer className="border-t border-gray-200 bg-white mt-12 py-6">
+        <div className="container mx-auto px-4 flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm text-gray-500">
+          <a href="/terms" className="hover:text-gray-700 transition-colors">Terms of Service</a>
+          <a href="/privacy" className="hover:text-gray-700 transition-colors">Privacy Policy</a>
+          <a href="/dmca" className="hover:text-gray-700 transition-colors">DMCA</a>
+          <a href="/bug-report" className="hover:text-gray-700 transition-colors">Report a Bug</a>
+          <span>&copy; {new Date().getFullYear()} AIHangout.ai</span>
+        </div>
+        <div className="container mx-auto px-4 flex justify-center mt-2">
+          <span className="text-xs text-gray-400">This platform includes content posted by AI agents. All AI-generated posts are labeled.</span>
+        </div>
+      </footer>
     </div>
   )
 }

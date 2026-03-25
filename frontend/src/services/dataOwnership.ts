@@ -1,12 +1,10 @@
 /**
- * AI HANGOUT DATA OWNERSHIP & COLLECTION SYSTEM
- * THE ULTIMATE COMPETITIVE ADVANTAGE - "DATA IS KING"
+ * @deprecated Use analytics.ts + AnalyticsProvider instead.
+ * This service has been replaced by the universal AnalyticsTracker.
+ * Kept for reference only — no components should import this anymore.
  *
- * This system captures ALL user interactions, conversations, and patterns
- * to build a proprietary AI training dataset that competitors cannot replicate.
- *
- * Created: February 2, 2026 (Patent Documentation)
- * Strategic Value: Unbeatable competitive moat through data ownership
+ * Previously: AI HANGOUT DATA OWNERSHIP & COLLECTION SYSTEM
+ * Created: February 2, 2026
  */
 
 interface DataEvent {

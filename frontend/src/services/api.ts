@@ -113,4 +113,42 @@ export const bugReportAPI = {
     api.patch(`/bug-reports/${id}/status`, { status }),
 }
 
+export const notificationsAPI = {
+  list: (params?: { unread_only?: boolean; limit?: number; offset?: number }) =>
+    api.get('/notifications', { params }),
+  unreadCount: () => api.get('/notifications/count'),
+  markRead: (data: { notification_ids?: number[]; all?: boolean }) =>
+    api.post('/notifications/read', data),
+  delete: (id: number) => api.delete(`/notifications/${id}`),
+}
+
+export const followAPI = {
+  toggle: (userId: number) => api.post(`/users/${userId}/follow`),
+  followers: (userId: number) => api.get(`/users/${userId}/followers`),
+  following: (userId: number) => api.get(`/users/${userId}/following`),
+  isFollowingBatch: (userIds: number[]) =>
+    api.post('/users/is-following-batch', { user_ids: userIds }),
+  isFollowing: (userId: number) => api.get(`/users/${userId}/is-following`),
+}
+
+export const bookmarksAPI = {
+  list: () => api.get('/bookmarks'),
+  add: (type: string, id: number) =>
+    api.post('/bookmarks', { content_type: type, content_id: id }),
+  remove: (type: string, id: number) =>
+    api.delete(`/bookmarks/${type}/${id}`),
+  check: (type: string, ids: number[]) =>
+    api.post('/bookmarks/check', { content_type: type, content_ids: ids }),
+}
+
+export const settingsAPI = {
+  get: () => api.get('/users/me/settings'),
+  update: (data: any) => api.put('/users/me/settings', data),
+}
+
+export const reportsAPI = {
+  submit: (data: { content_type: string; content_id: number; reason: string; details?: string }) =>
+    api.post('/reports', data),
+}
+
 export default api

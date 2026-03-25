@@ -1,10 +1,13 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { formatDistanceToNow } from 'date-fns'
 import VoteButtons from './VoteButtons'
 import { useAuthStore } from '../stores/authStore'
+import { bookmarksAPI } from '../services/api'
 import { ChatBubbleLeftIcon, UserIcon, StarIcon } from '@heroicons/react/24/outline'
 import { StarIcon as StarIconSolid } from '@heroicons/react/24/solid'
+import toast from 'react-hot-toast'
+import ReportButton from './ReportButton'
 
 interface Problem {
   id: string
@@ -21,12 +24,17 @@ interface Problem {
 
 interface ProblemCardProps {
   problem: Problem
+  isBookmarked?: boolean
 }
 
-export default function ProblemCard({ problem }: ProblemCardProps) {
-  const { isAuthenticated, token } = useAuthStore()
-  const [isBookmarked, setIsBookmarked] = useState(false)
+export default function ProblemCard({ problem, isBookmarked: initialBookmarked = false }: ProblemCardProps) {
+  const { isAuthenticated } = useAuthStore()
+  const [isBookmarked, setIsBookmarked] = useState(initialBookmarked)
   const [bookmarkLoading, setBookmarkLoading] = useState(false)
+
+  useEffect(() => {
+    setIsBookmarked(initialBookmarked)
+  }, [initialBookmarked])
 
   const difficultyColors = {
     easy: 'bg-green-100 text-green-800',
@@ -41,45 +49,22 @@ export default function ProblemCard({ problem }: ProblemCardProps) {
 
   const handleBookmark = async () => {
     if (!isAuthenticated) {
-      alert('Please log in to bookmark problems')
+      toast.error('Please log in to bookmark problems')
       return
     }
-
     setBookmarkLoading(true)
     try {
       if (isBookmarked) {
-        // Remove bookmark
-        const response = await fetch(`/api/bookmarks/problem/${problem.id}`, {
-          method: 'DELETE',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          }
-        })
-
-        if (response.ok) {
-          setIsBookmarked(false)
-        }
+        await bookmarksAPI.remove('problem', parseInt(problem.id))
+        setIsBookmarked(false)
+        toast.success('Bookmark removed')
       } else {
-        // Add bookmark
-        const response = await fetch('/api/bookmarks', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            content_type: 'problem',
-            content_id: problem.id
-          })
-        })
-
-        if (response.ok) {
-          setIsBookmarked(true)
-        }
+        await bookmarksAPI.add('problem', parseInt(problem.id))
+        setIsBookmarked(true)
+        toast.success('Bookmarked!')
       }
     } catch (error) {
-      console.error('Failed to toggle bookmark:', error)
+      toast.error('Failed to update bookmark')
     }
     setBookmarkLoading(false)
   }
@@ -148,9 +133,14 @@ export default function ProblemCard({ problem }: ProblemCardProps) {
                 {problem.difficulty}
               </span>
             )}
-            <span className={`px-2 py-1 text-xs font-medium rounded ${
-              agentTypeColors[problem.ai_agent_type as keyof typeof agentTypeColors] || agentTypeColors.human
-            }`}>
+            <span
+              className={`px-2 py-1 text-xs font-medium rounded ${
+                agentTypeColors[problem.ai_agent_type as keyof typeof agentTypeColors] || agentTypeColors.human
+              }`}
+              title={problem.ai_agent_type === 'human'
+                ? 'Human-authored problem. A real person wrote this from direct experience — not generated, not summarized by AI.'
+                : 'AI-assisted problem. Sourced from GitHub Issues, Stack Overflow, or enterprise logs. Solutions are community-reviewed.'}
+            >
               {problem.ai_agent_type === 'human' ? '👤 Human' : '🤖 AI Agent'}
             </span>
           </div>
@@ -166,6 +156,7 @@ export default function ProblemCard({ problem }: ProblemCardProps) {
                 <ChatBubbleLeftIcon className="w-4 h-4" />
                 <span>{problem.solution_count} solutions</span>
               </div>
+              <ReportButton contentType="problem" contentId={parseInt(problem.id)} />
             </div>
             <div>
               {(() => {

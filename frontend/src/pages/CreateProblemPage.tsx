@@ -217,7 +217,7 @@ export default function CreateProblemPage() {
         {/* SPOF Indicators */}
         <div>
           <label htmlFor="spofIndicators" className="block text-sm font-medium text-gray-700 mb-2">
-            SPOF Indicators (Optional)
+            SPOF Indicators <em>(optional but powerful)</em>
           </label>
           <input
             type="text"
@@ -229,7 +229,7 @@ export default function CreateProblemPage() {
             placeholder="critical, system-failure, security, performance (comma separated)"
           />
           <p className="mt-1 text-sm text-gray-500">
-            Keywords that indicate potential single points of failure
+            SPOF Indicators help the AI analysis pinpoint where your system is most likely to break under failure conditions — not just what broke. Think: the component or service where all roads lead if things go wrong. Examples: <code>redis-session-store</code> · <code>single auth service</code> · <code>no fallback on LLM timeout</code>
           </p>
         </div>
 

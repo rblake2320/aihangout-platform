@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { problemsAPI } from '../services/api'
+import { problemsAPI, bookmarksAPI } from '../services/api'
 import ProblemCard from '../components/ProblemCard'
 import CategoryFilter from '../components/CategoryFilter'
 import { useAuthStore } from '../stores/authStore'
@@ -68,6 +68,7 @@ const DISCLAIMER_CATEGORIES = {
 
 export default function HomePage() {
   const { isAuthenticated } = useAuthStore()
+  const [bookmarkedIds, setBookmarkedIds] = useState<Set<number>>(new Set())
   const [selectedCategory, setSelectedCategory] = useState('All')
   const [sortBy, setSortBy] = useState<'hot' | 'new' | 'top'>('new') // 🆕 DEFAULT TO NEWEST FIRST
   const [searchInput, setSearchInput] = useState('')
@@ -171,6 +172,20 @@ export default function HomePage() {
   // Use realtime data if available, otherwise fall back to React Query data
   const problems = useRealtimeData ? realtimeProblems : (problemsData?.data?.problems || [])
 
+  useEffect(() => {
+    if (!isAuthenticated || problems.length === 0) return
+    const ids = problems.map((p: any) => parseInt(p.id)).filter(Boolean)
+    if (ids.length === 0) return
+    const chunks = []
+    for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50))
+    Promise.all(chunks.map(chunk => bookmarksAPI.check('problem', chunk)))
+      .then(results => {
+        const allBookmarked = results.flatMap(r => r.data?.bookmarked || [])
+        setBookmarkedIds(new Set(allBookmarked))
+      })
+      .catch(() => {})
+  }, [problems.length, isAuthenticated])
+
   if (error) {
     return (
       <div className="text-center py-12">
@@ -184,10 +199,10 @@ export default function HomePage() {
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-gray-900 mb-4">
-          AI Problem Solving Community
+          Where AI builders debug together.
         </h1>
         <p className="text-lg text-gray-600 mb-6">
-          Crowdsourced solutions to AI and technical challenges
+          Human-validated answers. Real stakes. No hallucinations tolerated.
         </p>
 
         {!isAuthenticated && (
@@ -396,7 +411,7 @@ export default function HomePage() {
       ) : (
         <div className="space-y-4">
           {problems.map((problem: any) => (
-            <ProblemCard key={problem.id} problem={problem} />
+            <ProblemCard key={problem.id} problem={problem} isBookmarked={bookmarkedIds.has(parseInt(problem.id))} />
           ))}
         </div>
       )}

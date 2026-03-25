@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
-import { dataOwnership } from '../services/dataOwnership'
+import { useAnalytics } from '../hooks/useAnalytics'
 import {
   ChatBubbleLeftIcon,
   XMarkIcon,
@@ -39,6 +39,7 @@ interface OnlineData {
 
 export default function Chat() {
   const { isAuthenticated, user } = useAuthStore()
+  const { track } = useAnalytics()
   const [isOpen, setIsOpen] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [newMessage, setNewMessage] = useState('')
@@ -215,23 +216,13 @@ export default function Chat() {
         })
         setMessageTimestamps(prev => [...prev, sendTime])
 
-        // 🎯 CAPTURE MESSAGE DATA FOR COMPETITIVE ADVANTAGE (non-blocking)
-        try {
-          await dataOwnership.captureConversation(
-            [
-              { type: user?.aiAgentType === 'human' ? 'human' : 'ai', id: user?.username || 'unknown' }
-            ],
-            [
-              {
-                content: messageContent,
-                timestamp: sendTime.toISOString(),
-                author: user?.username || 'unknown'
-              }
-            ]
-          )
-        } catch (error) {
-          console.warn('Data ownership capture failed (non-critical):', error)
-        }
+        // Capture message data for analytics (non-blocking)
+        track('chat_message', {
+          author: user?.username || 'unknown',
+          author_type: user?.aiAgentType || 'anonymous',
+          message_length: messageContent.length,
+          timestamp: sendTime.toISOString()
+        })
 
       } else {
         console.error('❌ Message send failed:', data.error)
@@ -248,27 +239,16 @@ export default function Chat() {
   useEffect(() => {
     if (isOpen && !conversationStartTime) {
       setConversationStartTime(new Date())
-      // Log conversation start for analytics
-      dataOwnership.captureConversation([], [], 'conversation_started')
+      track('chat_open', { timestamp: new Date().toISOString() })
     }
-  }, [isOpen, conversationStartTime])
+  }, [isOpen, conversationStartTime, track])
 
   // 🎯 CAPTURE COMPLETE CONVERSATION WHEN CHAT CLOSES
   useEffect(() => {
     if (!isOpen && conversationStartTime && messages.length > 0) {
       const conversationDuration = Date.now() - conversationStartTime.getTime()
 
-      // Analyze conversation for competitive intelligence
-      const participants = Array.from(new Set(messages.map(m => ({
-        type: m.ai_agent_type === 'human' ? 'human' as const : 'ai' as const,
-        id: m.username
-      }))))
-
-      const conversationMessages = messages.map(m => ({
-        content: m.message,
-        timestamp: m.created_at,
-        author: m.username
-      }))
+      const uniqueUsernames = new Set(messages.map(m => m.username))
 
       // Determine outcome
       let outcome = 'general_discussion'
@@ -278,13 +258,18 @@ export default function Chat() {
         outcome = 'help_requested'
       }
 
-      dataOwnership.captureConversation(participants, conversationMessages, outcome)
+      track('chat_close', {
+        duration_ms: conversationDuration,
+        message_count: messages.length,
+        participant_count: uniqueUsernames.size,
+        outcome
+      })
 
       // Reset tracking
       setConversationStartTime(null)
       setMessageTimestamps([])
     }
-  }, [isOpen, conversationStartTime, messages])
+  }, [isOpen, conversationStartTime, messages, track])
 
   // Setup real-time connection and fallback polling when chat is open
   useEffect(() => {
