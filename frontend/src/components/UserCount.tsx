@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { UsersIcon } from '@heroicons/react/24/outline'
 
 interface OnlineData {
@@ -16,6 +16,10 @@ export default function UserCount() {
   const [loading, setLoading] = useState(true)
   const [sessionId, setSessionId] = useState<string | null>(null)
 
+  // Use a ref so the heartbeat always reads the latest session ID,
+  // avoiding the stale-closure issue that sends null after page loads.
+  const sessionIdRef = useRef<string | null>(null)
+
   const sendGuestHeartbeat = async () => {
     try {
       const response = await fetch('/api/sessions/guest-heartbeat', {
@@ -24,14 +28,14 @@ export default function UserCount() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          sessionId: sessionId,
+          sessionId: sessionIdRef.current,
           pageUrl: window.location.pathname
         })
       })
       const data = await response.json()
       if (data.success && data.sessionId) {
+        sessionIdRef.current = data.sessionId
         setSessionId(data.sessionId)
-        // Store in sessionStorage to persist across page refreshes
         sessionStorage.setItem('guestSessionId', data.sessionId)
       }
     } catch (error) {
@@ -59,6 +63,7 @@ export default function UserCount() {
     // Restore guest session ID from sessionStorage
     const storedSessionId = sessionStorage.getItem('guestSessionId')
     if (storedSessionId) {
+      sessionIdRef.current = storedSessionId
       setSessionId(storedSessionId)
     }
 

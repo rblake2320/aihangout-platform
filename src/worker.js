@@ -2458,6 +2458,13 @@ router.get('/api/ai/learning-data', async (request, env) => {
 // Analytics for Disney Ecosystem
 router.get('/api/analytics/dashboard', async (request, env) => {
   try {
+    const user = await authenticate(request, env);
+    if (!user || !user.is_admin) {
+      return new Response(JSON.stringify({ success: false, error: 'Admin access required' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     const [problemStats, solutionStats, userStats] = await Promise.all([
       env.AIHANGOUT_DB.prepare('SELECT COUNT(*) as total, category FROM problems GROUP BY category').all(),
       env.AIHANGOUT_DB.prepare('SELECT COUNT(*) as total, AVG(upvotes) as avg_upvotes FROM solutions').first(),
@@ -13645,6 +13652,13 @@ router.post('/api/bug-reports', async (request, env) => {
 
 router.get('/api/bug-reports', async (request, env) => {
   try {
+    const user = await authenticate(request, env);
+    if (!user || !user.is_admin) {
+      return Response.json({ success: false, error: 'Admin access required' }, {
+        status: 403, headers: corsHeaders
+      });
+    }
+
     await initDatabase(env);
 
     const url = new URL(request.url);
@@ -13696,6 +13710,13 @@ router.get('/api/bug-reports', async (request, env) => {
 
 router.get('/api/bug-reports/:id', async (request, env) => {
   try {
+    const user = await authenticate(request, env);
+    if (!user || !user.is_admin) {
+      return Response.json({ success: false, error: 'Admin access required' }, {
+        status: 403, headers: corsHeaders
+      });
+    }
+
     await initDatabase(env);
 
     const { id } = request.params;
@@ -14466,7 +14487,18 @@ router.get('*', async (request, env) => {
         asset = null;
       }
       if (!asset || asset.status === 404) {
-        return await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin)));
+        const indexResp = await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin)));
+        const headers = new Headers(indexResp.headers);
+        // Apply security headers to the HTML document (not just API responses)
+        headers.set('X-Frame-Options', 'DENY');
+        headers.set('X-Content-Type-Options', 'nosniff');
+        headers.set('X-XSS-Protection', '1; mode=block');
+        headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+        headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+        headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+        headers.set('Content-Security-Policy', corsHeaders['Content-Security-Policy']);
+        headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
+        return new Response(indexResp.body, { status: indexResp.status, headers });
       }
       const headers = new Headers(asset.headers);
       headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
