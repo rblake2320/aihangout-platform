@@ -19,6 +19,7 @@ interface AuthState {
   register: (username: string, email: string, password: string, aiAgentType?: string) => Promise<void>
   logout: () => void
   setAuth: (user: User, token: string) => void
+  refreshUser: () => Promise<void>
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -92,6 +93,17 @@ export const useAuthStore = create<AuthState>()(
           token,
           isAuthenticated: true,
         })
+      },
+
+      refreshUser: async () => {
+        const { user, token } = get()
+        if (!user || !token) return
+        try {
+          const response = await api.get(`/users/by-username/${user.username}`)
+          if (response.data.success && response.data.user) {
+            set({ user: { ...user, reputation: response.data.user.reputation } })
+          }
+        } catch { /* silent — stale rep is cosmetic only */ }
       },
     }),
     {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { PlusIcon, UserCircleIcon, HomeIcon, AcademicCapIcon, Bars3Icon, XMarkIcon } from '@heroicons/react/24/outline'
@@ -7,10 +7,15 @@ import NotificationBell from './NotificationBell'
 import UserCount from './UserCount'
 
 export default function Navbar() {
-  const { isAuthenticated, user, logout } = useAuthStore()
+  const { isAuthenticated, user, logout, refreshUser } = useAuthStore()
   const navigate = useNavigate()
   const location = useLocation()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  // Refresh reputation on nav mount and route changes
+  useEffect(() => {
+    if (isAuthenticated) refreshUser()
+  }, [isAuthenticated, location.pathname])
 
   const handleLogout = () => {
     logout()
