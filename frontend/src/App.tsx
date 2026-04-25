@@ -23,7 +23,7 @@ import HowBountiesWorkPage from './pages/HowBountiesWorkPage'
 import NotFoundPage from './pages/NotFoundPage'
 
 function App() {
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, user } = useAuthStore()
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -63,7 +63,7 @@ function App() {
           />
           <Route
             path="/admin"
-            element={isAuthenticated ? <AdminPage /> : <Navigate to="/login" />}
+            element={isAuthenticated && (user as any)?.is_admin ? <AdminPage /> : <Navigate to="/" />}
           />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />

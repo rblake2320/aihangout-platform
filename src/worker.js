@@ -27,7 +27,7 @@ const corsHeaders = {
   // Content Security Policy - Balanced security with functionality
   'Content-Security-Policy': [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://unpkg.com",
+    "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://unpkg.com",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
     "font-src 'self' https://fonts.gstatic.com",
     "img-src 'self' data: https: blob:",
@@ -690,10 +690,17 @@ async function verifyPassword(password, storedHash) {
     );
 
     const exportedKey = await crypto.subtle.exportKey('raw', derivedKey);
-    const computedHash = Array.from(new Uint8Array(exportedKey))
-      .map(b => b.toString(16).padStart(2, '0')).join('');
 
-    return computedHash === hash;
+    // Constant-time comparison — prevents timing side-channel attacks.
+    // Compare raw byte arrays directly instead of hex strings.
+    const storedBytes = new Uint8Array(
+      hash.match(/.{1,2}/g).map(b => parseInt(b, 16))
+    );
+    const computedBytes = new Uint8Array(exportedKey);
+    if (storedBytes.length !== computedBytes.length) return false;
+    let diff = 0;
+    for (let i = 0; i < storedBytes.length; i++) diff |= storedBytes[i] ^ computedBytes[i];
+    return diff === 0;
   } catch (error) {
     console.error('Password verification error:', error);
     return false;
@@ -748,6 +755,13 @@ async function hashToken(raw) {
     new TextEncoder().encode(raw)
   );
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Non-reversible 16-char session identifier for analytics logging.
+// Stores a prefix of the SHA-256 hash — enough to correlate events, never enough to recover the token.
+async function hashSessionId(token) {
+  const full = await hashToken(token);
+  return full.slice(0, 16);
 }
 
 // Authentication middleware
@@ -1110,7 +1124,7 @@ router.post('/api/auth/register', async (request, env) => {
         event_type: 'user_registration',
         user_id: userId,
         user_type: aiAgentType || 'human',
-        session_id: token,
+        session_id: await hashSessionId(token),
         page_url: '/api/auth/register',
         user_agent: request.headers.get('User-Agent'),
         ip_address: request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For'),
@@ -1206,7 +1220,7 @@ router.post('/api/auth/login', async (request, env) => {
         event_type: 'user_login',
         user_id: user.id,
         user_type: user.ai_agent_type || 'human',
-        session_id: token,
+        session_id: await hashSessionId(token),
         page_url: '/api/auth/login',
         user_agent: request.headers.get('User-Agent'),
         ip_address: request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For'),
@@ -1704,7 +1718,7 @@ router.post('/api/problems', async (request, env) => {
         type: 'new_problem',
         problemId: result.meta.last_row_id,
         userId: user.id,
-        title,
+        title: safeTitle,
         category,
         spofIndicators
       });
@@ -1929,7 +1943,7 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
       .prepare(`INSERT INTO ai_learning_data
         (problem_id, solution_id, why_vector)
         VALUES (?, ?, ?)`)
-      .bind(problemId, result.meta.last_row_id, JSON.stringify({ whyExplanation }))
+      .bind(problemId, result.meta.last_row_id, JSON.stringify({ whyExplanation: safeWhyExplanation }))
       .run();
 
     // Notify problem owner about new solution (non-blocking)
@@ -9000,7 +9014,10 @@ router.post('/api/learning', async (request, env) => {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .bind(
-        title, content_type, content, summary, author_company, author_name,
+        sanitizeContent(title), content_type, sanitizeContent(content),
+        summary ? sanitizeContent(summary) : null,
+        author_company ? sanitizeContent(author_company) : null,
+        author_name ? sanitizeContent(author_name) : null,
         version, tagsJson, category, difficulty, is_featured, is_nvidia_content,
         external_url, download_url
       )
@@ -9104,7 +9121,7 @@ router.post('/api/chat/message', async (request, env) => {
         INSERT INTO chat_messages (channel_id, user_id, message, message_type)
         VALUES (?, ?, ?, 'text')
       `)
-      .bind(channelId || 1, authResult.id, message.trim())
+      .bind(channelId || 1, authResult.id, sanitizeContent(message.trim()))
       .run();
 
     // Get the full message with user details for broadcasting
@@ -9806,10 +9823,10 @@ router.post('/api/ai-collaboration/contribute', async (request, env) => {
       `)
       .bind(
         session_token,
-        agent_name,
-        contribution_type || 'solution_approach',
-        content,
-        builds_on_agent || null,
+        sanitizeContent(agent_name),
+        sanitizeContent(contribution_type || 'solution_approach'),
+        sanitizeContent(content),
+        builds_on_agent ? sanitizeContent(builds_on_agent) : null,
         consensus_vote || null
       )
       .run();
@@ -13618,18 +13635,18 @@ router.post('/api/bug-reports', async (request, env) => {
         user_id, username
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
-      title,
-      description,
-      bugType,
+      sanitizeContent(title),
+      sanitizeContent(description),
+      sanitizeContent(bugType),
       priority,
-      stepsToReproduce || null,
-      expectedBehavior || null,
-      actualBehavior || null,
+      stepsToReproduce ? sanitizeContent(stepsToReproduce) : null,
+      expectedBehavior ? sanitizeContent(expectedBehavior) : null,
+      actualBehavior ? sanitizeContent(actualBehavior) : null,
       userAgent || null,
       url || null,
-      additionalInfo || null,
+      additionalInfo ? sanitizeContent(additionalInfo) : null,
       userId || null,
-      username
+      sanitizeContent(username)
     ).run();
 
     return Response.json({

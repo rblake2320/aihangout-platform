@@ -21,11 +21,20 @@ export default function RegisterPage() {
     })
   }
 
+  const [formError, setFormError] = useState('')
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setFormError('')
+
+    if (formData.password.length < 8) {
+      setFormError('Password must be at least 8 characters.')
+      return
+    }
 
     if (formData.password !== formData.confirmPassword) {
-      return // Error handling can be added here
+      setFormError('Passwords do not match.')
+      return
     }
 
     setIsLoading(true)
@@ -152,10 +161,14 @@ export default function RegisterPage() {
             </div>
           </div>
 
+          {formError && (
+            <p className="text-sm text-red-600 text-center">{formError}</p>
+          )}
+
           <div>
             <button
               type="submit"
-              disabled={isLoading || formData.password !== formData.confirmPassword}
+              disabled={isLoading || formData.password !== formData.confirmPassword || formData.password.length < 8}
               className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoading ? (
