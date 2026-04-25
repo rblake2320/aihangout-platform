@@ -1,5 +1,5 @@
 name = "aihangout-platform"
-main = "src/worker.js"
+main = "dist/worker.js"
 compatibility_date = "2024-01-15"
 compatibility_flags = ["nodejs_compat"]
 
@@ -34,12 +34,13 @@ id = "9cd27d12b2c341b3a5b77f47b69a89c0"
 ENVIRONMENT = "production"
 API_VERSION = "v1"
 AI_ARMY_SERVER = "http://192.168.12.132:8777"
+BETA_MODE = "false"
 
 [triggers]
 crons = ["0 6 * * *"]   # 6 AM UTC daily harvest
 
 [build]
-command = "npm run build"
+command = "npm run build:worker"
 
 [assets]
 directory = "./frontend/dist"

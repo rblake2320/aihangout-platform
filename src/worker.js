@@ -14408,6 +14408,21 @@ router.get('/api/health/security', async (request, env) => {
   }
 });
 
+// GET /api/health — simple uptime check for monitors and external tools
+router.get('/api/health', async (request, env) => {
+  try {
+    await env.AIHANGOUT_DB.prepare('SELECT 1').first();
+    return new Response(JSON.stringify({ status: 'ok', db: 'connected' }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ status: 'degraded', db: 'error' }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
 // HEAD handler for SPA routes (/terms, /privacy, /dmca, etc.)
 // itty-router does not auto-alias HEAD to GET, so HEAD falls through to a 500.
 // This handler returns 200 with no body for all non-API paths, satisfying uptime monitors.

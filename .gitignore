@@ -46,3 +46,27 @@ Thumbs.db
 *.key
 *.pem
 credentials.json
+
+# Test artifacts & local reports
+*.json
+!package.json
+!package-lock.json
+automated-regression-test.js
+continuous-monitoring.js
+crucible_tests.js
+verify-deployment.js
+test_online_counter.js
+test_sessions_direct.js
+manual_heartbeat_test.html
+regression-test-production-*.json
+AIHANGOUT_AI_LIVE_SUCCESS_SUMMARY.md
+CRITICAL_PROGRESS_CHECKPOINT_*.md
+DEPLOYMENT_VERIFICATION_REQUIRED.md
+REGRESSION_TESTING_GUIDE.md
+REGRESSION_TESTING_IMPLEMENTATION_COMPLETE.md
+REGRESSION_TEST_REPORT_*.md
+code-review-reports/
+test-coverage-analysis/
+
+# Playwright
+.playwright-cli/
