@@ -7705,6 +7705,10 @@ router.get('/api/knowledge-graph/related/:content_id', async (request, env) => {
 // Bulk export functionality for training data and analysis
 router.post('/api/export/bulk', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
     const {
       export_type,
       filters,
@@ -8028,6 +8032,10 @@ router.post('/api/collaboration/edit-session', async (request, env) => {
 // Automated problem scraping from external sites
 router.post('/api/harvest/scrape-problems', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
     const {
       target_sites,
       problem_categories,
@@ -8129,6 +8137,10 @@ router.post('/api/harvest/scrape-problems', async (request, env) => {
 // Get external problems available for AI agents to solve
 router.get('/api/harvest/external-problems', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
     const url = new URL(request.url);
     const status = url.searchParams.get('status') || 'unsolved';
     const category = url.searchParams.get('category');
@@ -8230,6 +8242,10 @@ router.get('/api/harvest/external-problems', async (request, env) => {
 // POST endpoint for triggering new external problem harvesting
 router.post('/api/harvest/external-problems', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
     const requestData = await request.json().catch(() => ({}));
     const {
       categories = ['bug', 'feature', 'help-wanted', 'good-first-issue'],
@@ -8302,6 +8318,9 @@ router.post('/api/harvest/external-problems', async (request, env) => {
 // AI agent claims/assigns themselves to solve external problems
 router.post('/api/harvest/claim-problem/:problem_id', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+
     const { problem_id } = request.params;
     const { agent_id, agent_capabilities, estimated_completion_time, solution_approach } = await request.json();
 
@@ -8397,6 +8416,9 @@ router.post('/api/harvest/claim-problem/:problem_id', async (request, env) => {
 // Submit solution for external problem
 router.post('/api/harvest/submit-solution/:problem_id', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+
     const { problem_id } = request.params;
     const {
       agent_id,
@@ -8511,6 +8533,10 @@ router.post('/api/harvest/submit-solution/:problem_id', async (request, env) => 
 // Analytics and monitoring for external problem solving
 router.get('/api/harvest/analytics', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
     const url = new URL(request.url);
     const timeframe = url.searchParams.get('timeframe') || '7d';
     const include_predictions = url.searchParams.get('predictions') === 'true';
@@ -8597,6 +8623,10 @@ router.get('/api/harvest/analytics', async (request, env) => {
 // Configure automated harvesting schedules and rules
 router.post('/api/harvest/configure-automation', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
     const {
       schedule_frequency,
       target_sites_config,
@@ -8687,6 +8717,10 @@ router.post('/api/harvest/configure-automation', async (request, env) => {
 // SIMPLE: Get external problems without complex processing (bypasses enhancement functions)
 router.get('/api/external-problems/simple', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
     const problems = await env.AIHANGOUT_DB
       .prepare('SELECT * FROM external_problems ORDER BY scraped_at DESC LIMIT 50')
       .all();
@@ -8699,10 +8733,10 @@ router.get('/api/external-problems/simple', async (request, env) => {
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (error) {
+    console.error('External problems error:', error);
     return new Response(JSON.stringify({
       success: false,
-      error: error.message,
-      stack: error.stack
+      error: 'Failed to fetch external problems'
     }), {
       headers: { 'Content-Type': 'application/json' }
     });
@@ -8743,8 +8777,7 @@ router.get('/api/debug/test-scrapers', async (request, env) => {
     console.error('Debug test error:', error);
     return new Response(JSON.stringify({
       success: false,
-      error: error.message,
-      stack: error.stack
+      error: 'An internal error occurred'
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -9052,6 +9085,9 @@ router.post('/api/learning', async (request, env) => {
 // Get chat messages for a channel
 router.get('/api/chat/messages/:channelId', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
     const { channelId } = request.params;
     const url = new URL(request.url);
     const limit = Math.min(parseInt(url.searchParams.get('limit')) || 50, 50);
@@ -9537,6 +9573,12 @@ router.post('/api/ai-agents/register-activity', async (request, env, ctx) => {
 
 // DEBUG: Minimal test endpoint to isolate Error 1101
 router.get('/api/debug/test', async (request, env) => {
+  if (env.ENVIRONMENT !== 'development') {
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
   try {
     return new Response(JSON.stringify({
       success: true,
@@ -9546,10 +9588,10 @@ router.get('/api/debug/test', async (request, env) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (error) {
+    console.error('Debug test error:', error);
     return new Response(JSON.stringify({
       success: false,
-      error: error.message,
-      stack: error.stack
+      error: 'An internal error occurred'
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -9559,6 +9601,12 @@ router.get('/api/debug/test', async (request, env) => {
 
 // DEBUG: Test database connection
 router.get('/api/debug/db-test', async (request, env) => {
+  if (env.ENVIRONMENT !== 'development') {
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
   try {
     const result = await env.AIHANGOUT_DB
       .prepare('SELECT 1 as test_value')
@@ -9572,11 +9620,11 @@ router.get('/api/debug/db-test', async (request, env) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (error) {
+    console.error('Debug db-test error:', error);
     return new Response(JSON.stringify({
       success: false,
       database_error: true,
-      error: error.message,
-      stack: error.stack
+      error: 'An internal error occurred'
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -9586,6 +9634,12 @@ router.get('/api/debug/db-test', async (request, env) => {
 
 // DEBUG: Test JSON parsing
 router.post('/api/debug/json-test', async (request, env) => {
+  if (env.ENVIRONMENT !== 'development') {
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
   try {
     const body = await request.json();
 
@@ -9597,11 +9651,11 @@ router.post('/api/debug/json-test', async (request, env) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (error) {
+    console.error('Debug json-test error:', error);
     return new Response(JSON.stringify({
       success: false,
       json_parsing_error: true,
-      error: error.message,
-      stack: error.stack
+      error: 'An internal error occurred'
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -9626,10 +9680,10 @@ router.post('/api/heartbeat/simple', async (request, env) => {
     });
 
   } catch (error) {
+    console.error('Heartbeat error:', error);
     return new Response(JSON.stringify({
       success: false,
-      error: error.message,
-      stack: error.stack,
+      error: 'An internal error occurred',
       endpoint: '/api/heartbeat/simple'
     }), {
       status: 500,
@@ -11770,6 +11824,10 @@ router.get('/api/intelligence', async (request, env) => {
 // POST /api/harvest/ai-intelligence - Trigger AI intelligence harvesting
 router.post('/api/harvest/ai-intelligence', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
     const requestData = await request.json().catch(() => ({}));
     const {
       companies = ['nvidia', 'openai', 'google', 'meta', 'anthropic'],
@@ -12780,6 +12838,10 @@ router.get('/api/live/count', async (request, env) => {
 // Security Stats & Alerts API
 router.get('/api/security/stats', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
     const totalChecks = await env.AIHANGOUT_DB
       .prepare('SELECT COUNT(*) as count FROM analytics_events WHERE event_type IN (?, ?, ?)')
       .bind('content_check', 'login_attempt', 'registration')
@@ -12829,11 +12891,15 @@ router.get('/api/security/stats', async (request, env) => {
 
 router.get('/api/security/alerts', async (request, env) => {
   try {
+    const authResult = await authenticate(request, env);
+    if (!authResult) return new Response(JSON.stringify({ error: 'Authentication required' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (!authResult.is_admin) return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
     const url = new URL(request.url);
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '10'), 50);
 
     const alerts = await env.AIHANGOUT_DB
-      .prepare("SELECT * FROM analytics_events WHERE event_type LIKE 'security_%' ORDER BY timestamp DESC LIMIT ?")
+      .prepare("SELECT id, event_type, timestamp, metadata FROM analytics_events WHERE event_type LIKE 'security_%' ORDER BY timestamp DESC LIMIT ?")
       .bind(limit)
       .all();
 
@@ -13596,6 +13662,11 @@ router.post('/api/bug-reports', async (request, env) => {
   try {
     await initDatabase(env);
 
+    // Resolve submitter identity from auth token — never trust body-supplied userId/username
+    const authResult = await authenticate(request, env);
+    const reportUserId = authResult?.id || null;
+    const reportUsername = authResult?.username || 'Anonymous';
+
     const {
       title,
       description,
@@ -13606,9 +13677,7 @@ router.post('/api/bug-reports', async (request, env) => {
       actualBehavior,
       userAgent,
       url,
-      additionalInfo,
-      userId,
-      username = 'Anonymous'
+      additionalInfo
     } = await request.json();
 
     // Validate required fields
@@ -13645,8 +13714,8 @@ router.post('/api/bug-reports', async (request, env) => {
       userAgent || null,
       url || null,
       additionalInfo ? sanitizeContent(additionalInfo) : null,
-      userId || null,
-      sanitizeContent(username)
+      reportUserId,
+      sanitizeContent(reportUsername)
     ).run();
 
     return Response.json({
