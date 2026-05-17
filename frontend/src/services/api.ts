@@ -151,4 +151,26 @@ export const reportsAPI = {
     api.post('/reports', data),
 }
 
+export const pathbooksAPI = {
+  list: (params?: {
+    q?: string
+    runtime?: string
+    trust_tier?: string
+    limit?: number
+    offset?: number
+  }) => api.get('/pathbooks', { params }),
+
+  lookup: (data: {
+    error?: string
+    error_message?: string
+    stderr?: string
+    runtime?: string
+    package_name?: string
+    limit?: number
+  }) => api.post('/pathbooks/lookup', data),
+
+  get: (id: string) => api.get(`/pathbooks/${id}`),
+  spec: () => api.get('/pathbooks/spec'),
+}
+
 export default api

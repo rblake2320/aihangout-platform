@@ -413,7 +413,40 @@ async function initDatabase(env) {
       email_notifications BOOLEAN DEFAULT FALSE,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users (id)
-    )`
+    )`,
+    `CREATE TABLE IF NOT EXISTS pathbooks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pathbook_id TEXT NOT NULL UNIQUE,
+      protocol_version TEXT NOT NULL DEFAULT 'pbp-0.1',
+      title TEXT NOT NULL,
+      summary TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('draft','active','deprecated','dangerous')),
+      trust_tier TEXT NOT NULL DEFAULT 'draft' CHECK(trust_tier IN ('draft','reproduced','verified','community_confirmed','maintainer_approved','deprecated','dangerous')),
+      ecosystem TEXT,
+      runtime TEXT,
+      package_name TEXT,
+      error_fingerprint TEXT NOT NULL,
+      error_signature TEXT NOT NULL,
+      trigger_yaml TEXT NOT NULL,
+      remediation_yaml TEXT NOT NULL,
+      verify_yaml TEXT,
+      failed_attempts_yaml TEXT,
+      provenance TEXT,
+      signature TEXT,
+      source_type TEXT DEFAULT 'community',
+      source_url TEXT,
+      times_applied INTEGER DEFAULT 0,
+      times_succeeded INTEGER DEFAULT 0,
+      confidence REAL DEFAULT 0.2,
+      token_savings_estimate INTEGER DEFAULT 0,
+      created_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_pathbooks_fingerprint ON pathbooks(error_fingerprint)`,
+    `CREATE INDEX IF NOT EXISTS idx_pathbooks_runtime_trust ON pathbooks(runtime, trust_tier, confidence DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_pathbooks_status_created ON pathbooks(status, created_at DESC)`
   ];
 
   for (const stmt of statements) {
@@ -514,6 +547,78 @@ async function initDatabase(env) {
     `).run();
   } catch (e) {
     // Ignore seed errors
+  }
+
+  // Seed the pathbook registry with the canonical motivating example.
+  try {
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT OR IGNORE INTO pathbooks (
+        pathbook_id, protocol_version, title, summary, status, trust_tier,
+        ecosystem, runtime, package_name, error_fingerprint, error_signature,
+        trigger_yaml, remediation_yaml, verify_yaml, failed_attempts_yaml,
+        provenance, source_type, source_url, confidence, token_savings_estimate
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      'PBP-WIN-PORTTXT-DELETE-0001',
+      'pbp-0.1',
+      'Remove stale Windows port.txt lock file',
+      'Deterministic remediation for stale local dev server port marker files that survive failed shutdowns on Windows.',
+      'active',
+      'draft',
+      'local-dev',
+      'windows-powershell',
+      'vite/wrangler/local-dev',
+      'sha256:stale-porttxt-windows-removeitem',
+      'EACCES or shell mismatch while deleting a stale port.txt file on Windows',
+      [
+        'trigger:',
+        '  match:',
+        '    any:',
+        '      - stderr_contains: "port.txt"',
+        '      - stderr_contains: "Access is denied"',
+        '      - command_contains: "rm"',
+        '  environment:',
+        '    os: windows',
+        '    shells: ["powershell", "pwsh"]'
+      ].join('\n'),
+      [
+        'remediation:',
+        '  steps:',
+        '    - name: Resolve the marker file path',
+        '      shell: powershell',
+        '      run: "$path = Resolve-Path .\\\\port.txt -ErrorAction SilentlyContinue"',
+        '    - name: Remove with native PowerShell semantics',
+        '      shell: powershell',
+        '      run: "if ($path) { Remove-Item -LiteralPath $path.Path -Force }"',
+        '    - name: Retry the original dev command',
+        '      shell: powershell',
+        '      run: "<retry_original_command>"'
+      ].join('\n'),
+      [
+        'verify:',
+        '  assertions:',
+        '    - file_absent: "./port.txt"',
+        '    - command_exit_code: 0'
+      ].join('\n'),
+      [
+        'failedAttempts:',
+        '  - shell: bash',
+        '    reason: "Unix rm syntax used in a Windows shell context"',
+        '  - shell: powershell',
+        '    reason: "Path not resolved before forced delete"'
+      ].join('\n'),
+      JSON.stringify({
+        captured_by: 'aihangout.ai seed',
+        signing: 'unsigned draft',
+        created_from: 'protocol design session'
+      }),
+      'seed',
+      'https://aihangout.ai/pathbooks',
+      0.2,
+      1200
+    ).run();
+  } catch (e) {
+    // Non-critical seed; registry endpoints still work without it.
   }
 
   // Schema migrations — idempotent ALTER TABLE (SQLite ignores duplicate column errors)
@@ -14480,6 +14585,292 @@ router.get('/api/admin/flags', async (request, env) => {
     return new Response(JSON.stringify({ success: false, error: error.message }), {
       status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
+  }
+});
+
+// ============================================================================
+// PATHBOOK PROTOCOL REGISTRY — machine-readable failure remediation
+// ============================================================================
+
+function jsonResponse(data, init = {}) {
+  return new Response(JSON.stringify(data), {
+    ...init,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json', ...(init.headers || {}) }
+  });
+}
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+async function fingerprintText(text) {
+  const normalized = String(text || '')
+    .toLowerCase()
+    .replace(/[a-f0-9]{32,}/g, '<hash>')
+    .replace(/\b\d+\b/g, '<num>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 2048);
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalized));
+  return `sha256:${Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function publicPathbook(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    pathbook_id: row.pathbook_id,
+    protocol_version: row.protocol_version,
+    title: row.title,
+    summary: row.summary,
+    status: row.status,
+    trust_tier: row.trust_tier,
+    ecosystem: row.ecosystem,
+    runtime: row.runtime,
+    package_name: row.package_name,
+    error_fingerprint: row.error_fingerprint,
+    error_signature: row.error_signature,
+    trigger_yaml: row.trigger_yaml,
+    remediation_yaml: row.remediation_yaml,
+    verify_yaml: row.verify_yaml,
+    failed_attempts_yaml: row.failed_attempts_yaml,
+    provenance: row.provenance ? safeJsonParse(row.provenance) : null,
+    signature: row.signature,
+    source_type: row.source_type,
+    source_url: row.source_url,
+    times_applied: row.times_applied,
+    times_succeeded: row.times_succeeded,
+    confidence: row.confidence,
+    token_savings_estimate: row.token_savings_estimate,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+const PATHBOOK_SPEC = {
+  protocol: 'Pathbook Protocol',
+  short_name: 'PBP',
+  version: 'pbp-0.1',
+  purpose: 'A signed, machine-consumable registry format for converting known failure patterns into deterministic remediation paths.',
+  trust_tiers: [
+    'draft',
+    'reproduced',
+    'verified',
+    'community_confirmed',
+    'maintainer_approved',
+    'deprecated',
+    'dangerous'
+  ],
+  endpoints: {
+    list: 'GET /api/pathbooks',
+    lookup: 'POST /api/pathbooks/lookup',
+    get: 'GET /api/pathbooks/{pathbook_id}',
+    contribute: 'POST /api/pathbooks',
+    spec: 'GET /api/pathbooks/spec'
+  },
+  mcp_surface: ['pathbook.lookup', 'pathbook.contribute', 'pathbook.verify', 'pathbook.execute'],
+  schema: {
+    pathbook_id: 'Stable public identifier, for example PBP-WIN-PORTTXT-DELETE-0001',
+    trigger_yaml: 'YAML describing error signatures and environment constraints',
+    remediation_yaml: 'YAML describing deterministic steps agents may execute',
+    verify_yaml: 'YAML assertions proving remediation succeeded',
+    provenance: 'JSON provenance metadata; signed records should include signer and digest references',
+    trust_tier: 'Registry governance state controlling whether agents may auto-execute'
+  }
+};
+
+router.get('/api/pathbooks/spec', async () => jsonResponse({ success: true, spec: PATHBOOK_SPEC }));
+
+router.get('/api/pathbooks', async (request, env) => {
+  try {
+    const url = new URL(request.url);
+    const q = (url.searchParams.get('q') || url.searchParams.get('query') || '').trim();
+    const runtime = (url.searchParams.get('runtime') || '').trim();
+    const trustTier = (url.searchParams.get('trust_tier') || '').trim();
+    const limit = clampNumber(url.searchParams.get('limit'), 1, 100, 25);
+    const offset = clampNumber(url.searchParams.get('offset'), 0, 10000, 0);
+
+    const where = ["status != 'dangerous'"];
+    const binds = [];
+    if (q) {
+      where.push('(title LIKE ? OR summary LIKE ? OR error_signature LIKE ? OR package_name LIKE ?)');
+      const like = `%${q}%`;
+      binds.push(like, like, like, like);
+    }
+    if (runtime) {
+      where.push('runtime = ?');
+      binds.push(runtime);
+    }
+    if (trustTier) {
+      where.push('trust_tier = ?');
+      binds.push(trustTier);
+    }
+
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT * FROM pathbooks
+      ${whereSql}
+      ORDER BY confidence DESC, times_succeeded DESC, updated_at DESC
+      LIMIT ? OFFSET ?
+    `).bind(...binds, limit, offset).all();
+    const count = await env.AIHANGOUT_DB.prepare(`
+      SELECT COUNT(*) AS total FROM pathbooks ${whereSql}
+    `).bind(...binds).first();
+
+    return jsonResponse({
+      success: true,
+      pathbooks: (rows.results || []).map(publicPathbook),
+      total: count?.total || 0,
+      limit,
+      offset
+    });
+  } catch (error) {
+    console.error('[Pathbooks/list] Error:', error);
+    return jsonResponse({ success: false, error: 'Failed to list pathbooks' }, { status: 500 });
+  }
+});
+
+router.post('/api/pathbooks/lookup', async (request, env) => {
+  try {
+    const body = safeJsonParse(await request.text());
+    const errorText = sanitizeContent(body.error || body.error_message || body.stderr || body.message || '');
+    const runtime = sanitizeContent(body.runtime || body.environment?.runtime || '');
+    const packageName = sanitizeContent(body.package_name || body.package || '');
+    const fingerprint = body.error_fingerprint || await fingerprintText(errorText);
+    const limit = clampNumber(body.limit, 1, 20, 5);
+
+    const binds = [fingerprint];
+    let sql = `
+      SELECT *, 1.0 AS match_score FROM pathbooks
+      WHERE error_fingerprint = ? AND status = 'active' AND trust_tier NOT IN ('deprecated','dangerous')
+    `;
+    if (runtime) {
+      sql += ' AND (runtime = ? OR runtime IS NULL)';
+      binds.push(runtime);
+    }
+    if (packageName) {
+      sql += ' AND (package_name = ? OR package_name IS NULL)';
+      binds.push(packageName);
+    }
+    sql += ' ORDER BY confidence DESC, times_succeeded DESC LIMIT ?';
+    binds.push(limit);
+
+    let rows = await env.AIHANGOUT_DB.prepare(sql).bind(...binds).all();
+    if (!rows.results || rows.results.length === 0) {
+      const like = `%${String(errorText || '').slice(0, 120)}%`;
+      rows = await env.AIHANGOUT_DB.prepare(`
+        SELECT *, 0.55 AS match_score FROM pathbooks
+        WHERE status = 'active'
+          AND trust_tier NOT IN ('deprecated','dangerous')
+          AND (? = '' OR error_signature LIKE ? OR title LIKE ? OR summary LIKE ?)
+        ORDER BY confidence DESC, times_succeeded DESC
+        LIMIT ?
+      `).bind(errorText ? 'x' : '', like, like, like, limit).all();
+    }
+
+    return jsonResponse({
+      success: true,
+      query: { error_fingerprint: fingerprint, runtime, package_name: packageName },
+      pathbooks: (rows.results || []).map(publicPathbook)
+    });
+  } catch (error) {
+    console.error('[Pathbooks/lookup] Error:', error);
+    return jsonResponse({ success: false, error: 'Failed to lookup pathbooks' }, { status: 500 });
+  }
+});
+
+router.get('/api/pathbooks/:id', async (request, env) => {
+  try {
+    const id = request.params.id;
+    const row = await env.AIHANGOUT_DB.prepare(
+      'SELECT * FROM pathbooks WHERE pathbook_id = ? OR id = ?'
+    ).bind(id, Number(id) || -1).first();
+    if (!row || row.status === 'dangerous') {
+      return jsonResponse({ success: false, error: 'Pathbook not found' }, { status: 404 });
+    }
+    return jsonResponse({ success: true, pathbook: publicPathbook(row) });
+  } catch (error) {
+    console.error('[Pathbooks/get] Error:', error);
+    return jsonResponse({ success: false, error: 'Failed to fetch pathbook' }, { status: 500 });
+  }
+});
+
+router.post('/api/pathbooks', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    }
+
+    const body = safeJsonParse(await request.text());
+    const title = sanitizeContent(body.title || '').trim();
+    const errorSignature = sanitizeContent(body.error_signature || body.error || '').trim();
+    const triggerYaml = sanitizeContent(body.trigger_yaml || '').trim();
+    const remediationYaml = sanitizeContent(body.remediation_yaml || '').trim();
+    if (!title || !errorSignature || !triggerYaml || !remediationYaml) {
+      return jsonResponse({
+        success: false,
+        error: 'title, error_signature, trigger_yaml, and remediation_yaml are required'
+      }, { status: 400 });
+    }
+
+    const pathbookId = sanitizeContent(body.pathbook_id || `PBP-${crypto.randomUUID().slice(0, 8).toUpperCase()}`);
+    const trustTier = user.is_admin && body.trust_tier ? sanitizeContent(body.trust_tier) : 'draft';
+    const status = user.is_admin && body.status ? sanitizeContent(body.status) : 'draft';
+    const fingerprint = sanitizeContent(body.error_fingerprint || await fingerprintText(errorSignature));
+    const provenance = JSON.stringify({
+      contributed_by: user.username,
+      contributed_at: new Date().toISOString(),
+      source: body.provenance || null
+    });
+
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO pathbooks (
+        pathbook_id, protocol_version, title, summary, status, trust_tier,
+        ecosystem, runtime, package_name, error_fingerprint, error_signature,
+        trigger_yaml, remediation_yaml, verify_yaml, failed_attempts_yaml,
+        provenance, signature, source_type, source_url, confidence,
+        token_savings_estimate, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      pathbookId,
+      sanitizeContent(body.protocol_version || 'pbp-0.1'),
+      title,
+      sanitizeContent(body.summary || ''),
+      status,
+      trustTier,
+      sanitizeContent(body.ecosystem || ''),
+      sanitizeContent(body.runtime || ''),
+      sanitizeContent(body.package_name || ''),
+      fingerprint,
+      errorSignature,
+      triggerYaml,
+      remediationYaml,
+      sanitizeContent(body.verify_yaml || ''),
+      sanitizeContent(body.failed_attempts_yaml || ''),
+      provenance,
+      sanitizeContent(body.signature || ''),
+      sanitizeContent(body.source_type || 'community'),
+      sanitizeContent(body.source_url || ''),
+      user.is_admin ? Number(body.confidence || 0.2) : 0.2,
+      clampNumber(body.token_savings_estimate, 0, 1000000, 0),
+      user.id || null
+    ).run();
+
+    const created = await env.AIHANGOUT_DB.prepare(
+      'SELECT * FROM pathbooks WHERE pathbook_id = ?'
+    ).bind(pathbookId).first();
+
+    return jsonResponse({ success: true, pathbook: publicPathbook(created) }, { status: 201 });
+  } catch (error) {
+    console.error('[Pathbooks/create] Error:', error);
+    const duplicate = String(error.message || '').includes('UNIQUE');
+    return jsonResponse({
+      success: false,
+      error: duplicate ? 'Pathbook ID already exists' : 'Failed to create pathbook'
+    }, { status: duplicate ? 409 : 500 });
   }
 });
 

@@ -70,6 +70,9 @@ export default function Navbar() {
             <Link to="/problem-bank" className={navLinkClass('/problem-bank')}>
               Problem Bank
             </Link>
+            <Link to="/pathbooks" className={navLinkClass('/pathbooks')}>
+              Pathbooks
+            </Link>
             <Link to="/bug-report" className={navLinkClass('/bug-report')}>
               Report Bug
             </Link>
@@ -163,6 +166,9 @@ export default function Navbar() {
             </Link>
             <Link to="/problem-bank" onClick={() => setMobileMenuOpen(false)} className={`block px-3 py-2 rounded-lg ${isActive('/problem-bank') ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}>
               Problem Bank
+            </Link>
+            <Link to="/pathbooks" onClick={() => setMobileMenuOpen(false)} className={`block px-3 py-2 rounded-lg ${isActive('/pathbooks') ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}>
+              Pathbooks
             </Link>
             <Link to="/bug-report" onClick={() => setMobileMenuOpen(false)} className={`block px-3 py-2 rounded-lg ${isActive('/bug-report') ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}>
               Report Bug

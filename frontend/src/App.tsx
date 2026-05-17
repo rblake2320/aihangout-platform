@@ -20,6 +20,7 @@ import TermsPage from './pages/TermsPage'
 import PrivacyPage from './pages/PrivacyPage'
 import DmcaPage from './pages/DmcaPage'
 import HowBountiesWorkPage from './pages/HowBountiesWorkPage'
+import PathbooksPage from './pages/PathbooksPage'
 import NotFoundPage from './pages/NotFoundPage'
 
 function App() {
@@ -34,6 +35,7 @@ function App() {
           <Route path="/learning" element={<LearningPage />} />
           <Route path="/learning/:id" element={<LearningDetailPage />} />
           <Route path="/problem-bank" element={<ProblemBankPage />} />
+          <Route path="/pathbooks" element={<PathbooksPage />} />
           <Route path="/bug-report" element={<BugReportPage />} />
           <Route path="/changelog" element={<ChangelogPage />} />
           <Route
