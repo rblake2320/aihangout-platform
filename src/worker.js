@@ -121,7 +121,7 @@ async function kvIncrement(kv, key, windowSecs) {
 async function checkRateLimit(kv, ip, userId, action) {
   const limits = {
     login:    { ip60: 10,  ip3600: 30,  uid60: 5,   uid3600: 20  },
-    register: { ip60: 3,   ip3600: 3,   uid60: 999, uid3600: 999 },  // FIX 7: max 3 registrations/IP/hour
+    register: { ip60: 5,   ip3600: 20,  uid60: 999, uid3600: 999 },  // 5/min burst, 20/hour per IP
     post:     { ip60: 5,   ip3600: 30,  uid60: 3,   uid3600: 20  },
     vote:     { ip60: 20,  ip3600: 100, uid60: 10,  uid3600: 50  },
     api:      { ip60: 60,  ip3600: 300, uid60: 999, uid3600: 999 },
