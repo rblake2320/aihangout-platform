@@ -10,8 +10,13 @@ import { EncryptJWT, jwtDecrypt } from 'jose';
 const router = Router();
 
 // COMPREHENSIVE SECURITY HEADERS - Production-grade security enhancement
+// Origins allowed for cross-origin API access. The per-request Access-Control-Allow-Origin
+// is applied dynamically in the top-level fetch() handler (see export default). corsHeaders
+// below carries the static single-origin default used everywhere else.
+const ALLOWED_ORIGINS = new Set(['https://aihangout.ai', 'https://www.aihangout.ai']);
+
 const corsHeaders = {
-  // CORS Configuration (Previously fixed)
+  // CORS Configuration
   'Access-Control-Allow-Origin': 'https://aihangout.ai',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, Options',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Agent-Type',
@@ -27,7 +32,7 @@ const corsHeaders = {
   // Content Security Policy - Balanced security with functionality
   'Content-Security-Policy': [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://unpkg.com",
+    "script-src 'self' https://cdnjs.cloudflare.com",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
     "font-src 'self' https://fonts.gstatic.com",
     "img-src 'self' data: https: blob:",
@@ -50,15 +55,32 @@ function safeJsonParse(text) {
   });
 }
 
+// ── SECURITY: SSE field sanitizer (CVE-2026-29085) ──
+// Strips \r and \n from values placed into SSE event:/id:/data: fields.
+// Prevents response splitting: a \n in an SSE field ends the field and can inject new SSE lines.
+// Also used to sanitize user-supplied clientId before using it as a KV key.
+function sseFieldSafe(value, maxLen = 128) {
+  if (!value || typeof value !== 'string') return '';
+  return value.replace(/[\r\n]/g, '').slice(0, maxLen);
+}
+
 // ── SECURITY: Unicode danger strip (FIX 4 — pen test 2026-03-24) ──
 function stripDangerousUnicode(text) {
   if (!text || typeof text !== 'string') return text;
   return text
-    .replace(/\u202E/g, '')   // RTL override
+    // Bidirectional overrides and isolates
+    .replace(/[\u202A-\u202E]/g, '')   // LRE, RLE, PDF, LRO, RLO
+    .replace(/[\u2066-\u2069]/g, '')   // LRI, RLI, FSI, PDI
+    .replace(/[\u200E\u200F]/g, '')    // LRM, RLM
+    // Invisible/zero-width characters
     .replace(/\u200B/g, '')   // zero-width space
     .replace(/\u200C/g, '')   // zero-width non-joiner
     .replace(/\u200D/g, '')   // zero-width joiner
     .replace(/\uFEFF/g, '')   // BOM / zero-width no-break space
+    .replace(/\u00AD/g, '')   // soft hyphen (invisible in rendering)
+    // Unicode Tags block (U+E0000\u2013U+E007F) \u2014 used for invisible ASCII injection
+    .replace(/[\uDB40][\uDC00-\uDC7F]/g, '')
+    // Line/paragraph separators \u2192 space
     .replace(/\u2028/g, ' ')  // line separator
     .replace(/\u2029/g, ' '); // paragraph separator
 }
@@ -71,9 +93,10 @@ function sanitizeHtml(text) {
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
     .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
     .replace(/javascript:/gi, '')
+    .replace(/vbscript:/gi, '')
     .replace(/<[^>]*\s+on\w+\s*=/gi, (match) => match.replace(/\s+on\w+\s*=[^>]*/gi, ''))
     .replace(/<[^>]+>/g, '')
-    .replace(/data:text\/html/gi, '');
+    .replace(/data:[^,\s"']*/gi, ''); // block all data: URI schemes (text/html, text/javascript, image/svg+xml, etc.)
 }
 
 // ── SECURITY: LLM control token stripper (FIX 2 — pen test 2026-03-24) ──
@@ -105,7 +128,8 @@ function sanitizeLLMTokens(text) {
 // Apply to ALL user-submitted text fields before any DB insert.
 function sanitizeContent(text) {
   if (!text || typeof text !== 'string') return text;
-  return sanitizeHtml(sanitizeLLMTokens(stripDangerousUnicode(text)));
+  const normalized = text.normalize('NFKC'); // decompose homoglyphs before string-match sanitization
+  return sanitizeHtml(sanitizeLLMTokens(stripDangerousUnicode(normalized)));
 }
 
 // ── SECURITY: KV-based rate limiter (NVIDIA fraud-pattern velocity windows) ──
@@ -115,7 +139,13 @@ async function kvIncrement(kv, key, windowSecs) {
     const count = raw ? parseInt(raw) + 1 : 1;
     await kv.put(key, String(count), { expirationTtl: windowSecs });
     return count;
-  } catch { return 0; }
+  } catch (err) {
+    // Fail OPEN (return 0 = under limit) to preserve availability during a KV outage,
+    // but never silently: a KV failure disables rate limiting, so surface it loudly
+    // for alerting/monitoring instead of masking it.
+    console.error(`[rate-limit] KV failure on key=${key}: ${err?.message || err} — failing open`);
+    return 0;
+  }
 }
 
 async function checkRateLimit(kv, ip, userId, action) {
@@ -146,6 +176,14 @@ function rateLimitResponse(info) {
   return new Response(JSON.stringify({
     success: false, error: 'Too many requests. Please try again later.',
   }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': '60' } });
+}
+
+// Central error response helper — never leaks internal error.message to clients
+function errResponse(publicMsg, internalError, status = 500, headers = {}) {
+  if (internalError) console.error(publicMsg, internalError?.message || internalError);
+  return new Response(JSON.stringify({ success: false, error: publicMsg }), {
+    status, headers: { ...corsHeaders, 'Content-Type': 'application/json', ...headers }
+  });
 }
 
 // New account behavioral gate (NVIDIA fraud signal: new account + high activity)
@@ -675,9 +713,16 @@ async function initDatabase(env) {
         token_hash TEXT NOT NULL UNIQUE,
         created_at TEXT DEFAULT (datetime('now')),
         expires_at TEXT NOT NULL,
-        last_used_at TEXT
+        last_used_at TEXT,
+        revoked_at TEXT
       )
     `).run();
+    // Upgrade path for tables created before the revoked_at column existed.
+    // ALTER fails if the column is already present — that's expected, so swallow it.
+    await env.AIHANGOUT_DB
+      .prepare('ALTER TABLE service_tokens ADD COLUMN revoked_at TEXT')
+      .run()
+      .catch(() => {});
   } catch (e) {
     // Non-critical — table may already exist
   }
@@ -725,83 +770,64 @@ async function initDatabase(env) {
 }
 
 // SECURE PASSWORD HASHING - CRITICAL SECURITY FIX (2026-02-02)
-async function hashPassword(password) {
-  // Generate random salt for each password
-  const salt = crypto.getRandomValues(new Uint8Array(16));
+// PBKDF2-SHA256. Iteration count raised to OWASP-2023 guidance (600k). Stored hashes are
+// versioned as `pbkdf2$<iterations>$<saltHex>$<hashHex>` so the cost can be raised again
+// without locking anyone out. Legacy hashes in the old `<saltHex>:<hashHex>` format are
+// still verified at their original 100k cost (see verifyPassword) and are transparently
+// upgraded on the user's next successful login.
+const PBKDF2_ITERATIONS = 600000;
+const LEGACY_PBKDF2_ITERATIONS = 100000;
 
-  // Use PBKDF2 with 100,000 iterations for strong security
+// Derive 256 bits of PBKDF2-SHA256 and return as hex. Uses deriveBits(256), which yields
+// the identical bytes the legacy code obtained via deriveKey(AES-256-GCM)+exportKey.
+async function derivePbkdf2Hex(password, salt, iterations) {
   const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(password),
-    { name: 'PBKDF2' },
-    false,
-    ['deriveBits', 'deriveKey']
+    'raw', new TextEncoder().encode(password), { name: 'PBKDF2' }, false, ['deriveBits']
   );
-
-  const derivedKey = await crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: salt,
-      iterations: 100000,
-      hash: 'SHA-256'
-    },
-    key,
-    { name: 'AES-GCM', length: 256 },
-    true,
-    ['encrypt', 'decrypt']
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, key, 256
   );
+  return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
-  const exportedKey = await crypto.subtle.exportKey('raw', derivedKey);
-  const hash = Array.from(new Uint8Array(exportedKey))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
-  const saltHex = Array.from(salt)
-    .map(b => b.toString(16).padStart(2, '0')).join('');
+async function hashPassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await derivePbkdf2Hex(password, salt, PBKDF2_ITERATIONS);
+  const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `pbkdf2$${PBKDF2_ITERATIONS}$${saltHex}$${hash}`;
+}
 
-  // Store salt:hash format for verification
-  return `${saltHex}:${hash}`;
+// True when a stored hash uses the legacy (100k, colon-delimited) format and should be
+// re-hashed to the current cost after a successful verify.
+function isLegacyPasswordHash(storedHash) {
+  return typeof storedHash === 'string' && !storedHash.startsWith('pbkdf2$');
 }
 
 async function verifyPassword(password, storedHash) {
   try {
-    const [saltHex, hash] = storedHash.split(':');
-    if (!saltHex || !hash) {
-      // Legacy accounts must reset their password
-      return false;
+    if (typeof storedHash !== 'string' || !storedHash) return false;
+
+    let iterations, saltHex, hash;
+    if (storedHash.startsWith('pbkdf2$')) {
+      const parts = storedHash.split('$'); // ['pbkdf2', iterations, saltHex, hashHex]
+      if (parts.length !== 4) return false;
+      iterations = parseInt(parts[1], 10);
+      saltHex = parts[2];
+      hash = parts[3];
+      if (!Number.isInteger(iterations) || iterations < 1 || !saltHex || !hash) return false;
+    } else {
+      // Legacy format `saltHex:hash` — verified at the original 100k cost.
+      [saltHex, hash] = storedHash.split(':');
+      if (!saltHex || !hash) return false; // legacy accounts w/o a valid hash must reset
+      iterations = LEGACY_PBKDF2_ITERATIONS;
     }
 
-    const salt = new Uint8Array(
-      saltHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
-    );
+    const salt = new Uint8Array(saltHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+    const computedHex = await derivePbkdf2Hex(password, salt, iterations);
 
-    const key = await crypto.subtle.importKey(
-      'raw',
-      new TextEncoder().encode(password),
-      { name: 'PBKDF2' },
-      false,
-      ['deriveBits', 'deriveKey']
-    );
-
-    const derivedKey = await crypto.subtle.deriveKey(
-      {
-        name: 'PBKDF2',
-        salt: salt,
-        iterations: 100000,
-        hash: 'SHA-256'
-      },
-      key,
-      { name: 'AES-GCM', length: 256 },
-      true,
-      ['encrypt', 'decrypt']
-    );
-
-    const exportedKey = await crypto.subtle.exportKey('raw', derivedKey);
-
-    // Constant-time comparison — prevents timing side-channel attacks.
-    // Compare raw byte arrays directly instead of hex strings.
-    const storedBytes = new Uint8Array(
-      hash.match(/.{1,2}/g).map(b => parseInt(b, 16))
-    );
-    const computedBytes = new Uint8Array(exportedKey);
+    // Constant-time comparison on raw bytes — prevents timing side-channel attacks.
+    const storedBytes = new Uint8Array(hash.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+    const computedBytes = new Uint8Array(computedHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
     if (storedBytes.length !== computedBytes.length) return false;
     let diff = 0;
     for (let i = 0; i < storedBytes.length; i++) diff |= storedBytes[i] ^ computedBytes[i];
@@ -811,6 +837,10 @@ async function verifyPassword(password, storedHash) {
     return false;
   }
 }
+
+// Fixed dummy hash (current cost) used to equalize login timing when an email is unknown,
+// so the response time cannot distinguish registered from unregistered accounts.
+const DUMMY_PASSWORD_HASH = `pbkdf2$${PBKDF2_ITERATIONS}$00000000000000000000000000000000$${'0'.repeat(64)}`;
 
 
 // JWT utilities - Derive a proper 256-bit CryptoKey for A256GCM from any secret length.
@@ -846,9 +876,17 @@ async function createJWT(payload, env) {
 async function verifyJWT(token, env) {
   try {
     const secret = await getJWTKey(env);
-    const { payload } = await jwtDecrypt(token, secret);
+    const { payload } = await jwtDecrypt(token, secret, {
+      keyManagementAlgorithms: ['dir'],
+      contentEncryptionAlgorithms: ['A256GCM'],
+    });
     return payload;
-  } catch {
+  } catch (err) {
+    // Log unexpected errors (not normal expiry/invalid token) for security alerting
+    const code = err?.code || '';
+    if (code !== 'ERR_JWT_EXPIRED' && code !== 'ERR_JWE_DECRYPTION_FAILED' && code !== 'ERR_JWT_INVALID') {
+      console.error('[auth] unexpected JWT verify error', code);
+    }
     return null;
   }
 }
@@ -885,10 +923,12 @@ async function authenticate(request, env) {
   try {
     const h = await hashToken(token);
     const svc = await env.AIHANGOUT_DB
-      .prepare('SELECT id, name, expires_at FROM service_tokens WHERE token_hash = ?')
+      .prepare('SELECT id, name, expires_at, revoked_at FROM service_tokens WHERE token_hash = ?')
       .bind(h)
       .first();
     if (svc) {
+      // Reject revoked tokens
+      if (svc.revoked_at) return null;
       // Check expiry
       if (new Date(svc.expires_at) < new Date()) return null;
       // Fire-and-forget last_used_at update (non-blocking)
@@ -1148,6 +1188,10 @@ router.post('/api/auth/register', async (request, env) => {
     const { username, email, password, aiAgentType = 'human' } = await request.json();
 
     if (!username || username.length > 50) return new Response(JSON.stringify({ success: false, error: 'Username must be 1-50 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    // Restrict usernames to a safe character set. This is the one user field that is echoed
+    // into stored notification text and AI-facing surfaces, so it must not carry HTML, quotes,
+    // whitespace tricks, or LLM control tokens (<|im_start|>, [INST], etc.).
+    if (!/^[A-Za-z0-9_.-]+$/.test(username)) return new Response(JSON.stringify({ success: false, error: 'Username may only contain letters, numbers, and _ . -' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     if (!email || email.length > 254) return new Response(JSON.stringify({ success: false, error: 'Invalid email' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     if (!password || password.length < 8 || password.length > 128) return new Response(JSON.stringify({ success: false, error: 'Password must be 8-128 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
@@ -1200,13 +1244,7 @@ router.post('/api/auth/register', async (request, env) => {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });
       }
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Registration failed: ' + errMsg
-      }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
+      return errResponse('Registration failed. Please try again.', dbError);
     }
 
     const userId = result.meta.last_row_id;
@@ -1250,15 +1288,7 @@ router.post('/api/auth/register', async (request, env) => {
     });
 
   } catch (error) {
-    console.error('Registration error:', error);
-    console.error('Error stack:', error.stack);
-    return new Response(JSON.stringify({
-      success: false,
-      error: 'Registration failed: ' + (error.message || 'Unknown error')
-    }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    return errResponse('Registration failed. Please check your details and try again.', error);
   }
 });
 
@@ -1286,6 +1316,9 @@ router.post('/api/auth/login', async (request, env) => {
       .first();
 
     if (!user) {
+      // Timing-equalization: perform the same PBKDF2 work as a real verification so the
+      // response time cannot be used to distinguish registered from unregistered emails.
+      await verifyPassword(password, DUMMY_PASSWORD_HASH);
       return new Response(JSON.stringify({
         success: false,
         error: 'Invalid credentials'
@@ -1297,6 +1330,19 @@ router.post('/api/auth/login', async (request, env) => {
 
     // SECURE PASSWORD VERIFICATION - Use PBKDF2 with salt verification (2026-02-02)
     const isPasswordValid = await verifyPassword(password, user.password_hash);
+
+    // Transparently upgrade legacy (100k) hashes to the current cost on successful login.
+    if (isPasswordValid && isLegacyPasswordHash(user.password_hash)) {
+      try {
+        const upgraded = await hashPassword(password);
+        await env.AIHANGOUT_DB
+          .prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+          .bind(upgraded, user.id)
+          .run();
+      } catch (rehashErr) {
+        console.error('Password rehash-on-login failed (non-critical):', rehashErr?.message || rehashErr);
+      }
+    }
 
     if (!isPasswordValid) {
       return new Response(JSON.stringify({
@@ -1352,14 +1398,7 @@ router.post('/api/auth/login', async (request, env) => {
     });
 
   } catch (error) {
-    console.error('Login error:', error);
-    return new Response(JSON.stringify({
-      success: false,
-      error: 'Login failed: ' + (error.message || 'Please check your credentials and try again.')
-    }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    return errResponse('Login failed. Please check your credentials and try again.', error);
   }
 });
 
@@ -1471,9 +1510,25 @@ router.get('/api/problems', async (request, env) => {
       return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
     };
     const sanitizedProblems = (problems.results || []).map(p => ({
-      ...p,
+      id: p.id,
+      title: p.title,
       description: p.description ? p.description.replace(bountyPattern, '').trim() : p.description,
       category: normalizeCategory(p.category),
+      difficulty: p.difficulty,
+      status: p.status,
+      upvotes: p.upvotes,
+      is_public: p.is_public,
+      user_id: p.user_id,
+      created_at: p.created_at,
+      tags: p.tags,
+      source_url: p.source_url,
+      industry: p.industry,
+      estimated_value: p.estimated_value,
+      impact_level: p.impact_level,
+      affected_users: p.affected_users,
+      username: p.username,
+      ai_agent_type: p.ai_agent_type,
+      solution_count: p.solution_count,
     }));
 
     return new Response(JSON.stringify({
@@ -1722,9 +1777,18 @@ router.post('/api/problems', async (request, env) => {
     const spofIndicatorsJson = spofIndicators ? JSON.stringify(spofIndicators) : null;
     const tagsJson = tags ? JSON.stringify(Array.isArray(tags) ? tags : [tags]) : null;
 
-    // RLS: only admins can set bounty amounts
+    // RLS: only admins can set bounty, financials, and platform-level metadata
     const effectiveBounty = user.is_admin ? (bounty_amount || 0) : 0;
     const effectiveEstimated = user.is_admin ? (estimated_value || 0) : 0;
+
+    // Prevent mass assignment: non-admins cannot set privileged fields
+    const VALID_IMPACT_LEVELS = ['low', 'medium', 'high', 'critical'];
+    const effectiveImpactLevel = user.is_admin && VALID_IMPACT_LEVELS.includes(impact_level) ? impact_level : 'medium';
+    const effectiveAffectedUsers = user.is_admin ? Math.max(0, parseInt(affected_users) || 100) : 100;
+    const VALID_TIME_TO_SOLVE = ['<1 day', '1-2 days', '2-5 days', '1-2 weeks', '2-4 weeks', '>1 month'];
+    const effectiveTimeToSolve = user.is_admin && VALID_TIME_TO_SOLVE.includes(time_to_solve) ? time_to_solve : '2-5 days';
+    const effectiveIndustry = user.is_admin ? (industry || 'Technology').slice(0, 100) : 'Technology';
+    const effectiveIsHarvested = user.is_admin ? (is_harvested === true) : false;
 
     // Agent enforcement: detect X-Agent-Type header. If present, override solver_type to "AI"
     // and set status to "pending_review" regardless of what the client sent.
@@ -1775,9 +1839,9 @@ router.post('/api/problems', async (request, env) => {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(user.id, safeTitle.trim(), safeDescription.trim(), normalizedCategory.trim(), difficulty,
             aiContextJson, spofIndicatorsJson,
-            effectiveBounty, effectiveEstimated, impact_level, affected_users,
-            time_to_solve, industry, tagsJson, source_url || null,
-            external_id || crypto.randomUUID(), is_harvested ? 1 : 0, is_public ? 1 : 0,
+            effectiveBounty, effectiveEstimated, effectiveImpactLevel, effectiveAffectedUsers,
+            effectiveTimeToSolve, effectiveIndustry, tagsJson, source_url || null,
+            external_id || crypto.randomUUID(), effectiveIsHarvested ? 1 : 0, is_public ? 1 : 0,
             problemModerationFlag || null,
             effectiveSolverType, agentName || null, effectiveStatus, problemContentFlags)
       .run();
@@ -2123,45 +2187,50 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
 // Accepts { vote: 1 } (upvote) or { vote: -1 } (downvote), delegates to /api/vote logic
 router.post('/api/problems/:id/vote', async (request, env, ctx) => {
   try {
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     const user = await authenticate(request, env);
     if (!user) {
       return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'vote');
+    if (rl.limited) return rateLimitResponse(rl);
+
     const targetId = request.params.id;
     const body = await request.json().catch(() => ({}));
     const voteType = body.vote === -1 ? 'down' : 'up';
 
+    // Capture prior vote before deleting (for reputation dedup)
+    const priorVote = await env.AIHANGOUT_DB
+      .prepare('SELECT vote_type FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
+      .bind(user.id, 'problem', targetId).first();
+
     await env.AIHANGOUT_DB
       .prepare('DELETE FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
-      .bind(user.id, 'problem', targetId)
-      .run();
+      .bind(user.id, 'problem', targetId).run();
     await env.AIHANGOUT_DB
       .prepare('INSERT INTO votes (user_id, target_type, target_id, vote_type) VALUES (?, ?, ?, ?)')
-      .bind(user.id, 'problem', targetId, voteType)
-      .run();
+      .bind(user.id, 'problem', targetId, voteType).run();
 
     const voteCount = await env.AIHANGOUT_DB
       .prepare('SELECT COUNT(*) as count FROM votes WHERE target_type = ? AND target_id = ? AND vote_type = ?')
-      .bind('problem', targetId, 'up')
-      .first();
+      .bind('problem', targetId, 'up').first();
 
     await env.AIHANGOUT_DB
       .prepare('UPDATE problems SET upvotes = ? WHERE id = ?')
-      .bind(voteCount.count, targetId)
-      .run();
+      .bind(voteCount.count, targetId).run();
 
     const ownerRow = await env.AIHANGOUT_DB
       .prepare('SELECT user_id FROM problems WHERE id = ?')
       .bind(targetId).first();
-    if (ownerRow && voteType === 'up') {
-      // Award +1 reputation to problem owner for receiving an upvote
+
+    // Only award reputation when transitioning to upvote (not on repeated upvotes)
+    const wasUpvote = priorVote?.vote_type === 'up';
+    if (ownerRow && voteType === 'up' && !wasUpvote) {
       await env.AIHANGOUT_DB
         .prepare('UPDATE users SET reputation = reputation + 1 WHERE id = ?')
-        .bind(ownerRow.user_id)
-        .run();
+        .bind(ownerRow.user_id).run();
       ctx.waitUntil(createNotification(env, {
         userId: ownerRow.user_id,
         actorId: user.id,
@@ -2176,10 +2245,7 @@ router.post('/api/problems/:id/vote', async (request, env, ctx) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (error) {
-    return new Response(JSON.stringify({ success: false, error: error.message }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    return errResponse('Vote failed', error, 400);
   }
 });
 
@@ -2535,10 +2601,17 @@ async function notifyAIArmy(env, data) {
   }
 }
 
-// AI Learning Data Export for Sentinel Model
+// AI Learning Data Export for Sentinel Model — admin or service token only
 router.get('/api/ai/learning-data', async (request, env) => {
   try {
-    // This endpoint provides training data for the Sentinel Model
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const user = await authenticate(request, env);
+    if (!user || !user.is_admin) {
+      return errResponse('Unauthorized', null, 401);
+    }
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'api');
+    if (rl.limited) return rateLimitResponse(rl);
+
     const data = await env.AIHANGOUT_DB
       .prepare(`
         SELECT
@@ -2564,13 +2637,7 @@ router.get('/api/ai/learning-data', async (request, env) => {
     });
 
   } catch (error) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message
-    }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    return errResponse('Failed to retrieve learning data', error);
   }
 });
 
@@ -3520,6 +3587,10 @@ async function analyzeFeedbackForLearning(env, feedback) {
 // Register external AI agent with platform capabilities
 router.post('/api/ai-hub/register', async (request, env) => {
   try {
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'register');
+    if (rl.limited) return rateLimitResponse(rl);
+
     const {
       agentName,
       agentType, // 'gpt', 'claude', 'local-llm', 'custom'
@@ -3530,27 +3601,34 @@ router.post('/api/ai-hub/register', async (request, env) => {
       specializations = []
     } = await request.json();
 
-    // Generate unique integration token
-    const integrationToken = generateIntegrationToken(agentName, agentType);
+    if (!agentName || typeof agentName !== 'string' || agentName.length > 100) {
+      return errResponse('agentName is required (max 100 chars)', null, 400);
+    }
 
-    // Store AI agent configuration
+    // Generate CSPRNG integration token — raw token returned once, hash stored
+    const { rawToken, tokenHash } = await generateIntegrationToken();
+
+    // Store AI agent configuration (no raw token stored — only hash)
     const agentConfig = {
       agentName,
       agentType,
-      capabilities, // ['text-generation', 'code-analysis', 'problem-solving', etc.]
+      capabilities,
       modelVersion,
       baseUrl,
-      specializations, // ['backend', 'frontend', 'ai-models', etc.]
+      specializations,
       registeredAt: new Date().toISOString(),
       status: 'active',
-      integrationToken,
       lastActivity: new Date().toISOString(),
       contributionScore: 0
     };
 
-    // Store in KV for fast access during API calls
+    // Primary lookup key by token hash (O(1) auth lookups)
+    const hashKey = `ai_agent_token_${tokenHash}`;
+    await env.AIHANGOUT_KV.put(hashKey, JSON.stringify(agentConfig));
+
+    // Secondary key by agent name (for management/listing)
     const agentKey = `ai_agent_${agentName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`;
-    await env.AIHANGOUT_KV.put(agentKey, JSON.stringify(agentConfig), {
+    await env.AIHANGOUT_KV.put(agentKey, JSON.stringify({ ...agentConfig, tokenHashKey: hashKey }), {
       metadata: {
         agentType,
         capabilities: capabilities.join(','),
@@ -3577,10 +3655,10 @@ router.post('/api/ai-hub/register', async (request, env) => {
       success: true,
       message: 'AI agent registered successfully',
       agentId: agentName,
-      integrationToken,
+      integrationToken: rawToken, // returned once — store securely, never shown again
       capabilities: await getRecommendedCapabilities(agentType),
       nextSteps: [
-        'Use integration token for authenticated requests',
+        'Store your integration token securely — it will not be shown again',
         'Call /api/ai-hub/contribute to participate in problem solving',
         'Subscribe to /api/ai-hub/events for collaboration opportunities'
       ]
@@ -3589,14 +3667,7 @@ router.post('/api/ai-hub/register', async (request, env) => {
     });
 
   } catch (error) {
-    console.error('AI agent registration error:', error);
-    return new Response(JSON.stringify({
-      success: false,
-      error: 'Failed to register AI agent'
-    }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    return errResponse('Failed to register AI agent', error);
   }
 });
 
@@ -3832,29 +3903,22 @@ router.get('/api/ai-hub/ecosystem', async (request, env) => {
 });
 
 // Universal AI Hub Helper Functions
-function generateIntegrationToken(agentName, agentType) {
-  const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).substr(2, 8);
-  const prefix = `${agentType}_${agentName.replace(/[^a-zA-Z0-9]/g, '')}`.substr(0, 20);
-  return `${prefix}_${timestamp}_${random}`.toLowerCase();
+
+// Generates a 256-bit CSPRNG token (64 hex chars). Returns { rawToken, tokenHash }.
+async function generateIntegrationToken() {
+  const rawBytes = globalThis.crypto.getRandomValues(new Uint8Array(32));
+  const rawToken = Array.from(rawBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  const tokenHash = await hashToken(rawToken);
+  return { rawToken, tokenHash };
 }
 
 async function getRegisteredAgent(env, integrationToken) {
   try {
-    // Search through KV store for matching token
-    const list = await env.AIHANGOUT_KV.list({ prefix: 'ai_agent_' });
-
-    for (const key of list.keys) {
-      const agentData = await env.AIHANGOUT_KV.get(key.name);
-      if (agentData) {
-        const agent = JSON.parse(agentData);
-        if (agent.integrationToken === integrationToken) {
-          return agent;
-        }
-      }
-    }
-
-    return null;
+    // O(1) lookup by hash key — avoids full KV scan timing oracle
+    const tokenHash = await hashToken(integrationToken);
+    const agentData = await env.AIHANGOUT_KV.get(`ai_agent_token_${tokenHash}`);
+    if (!agentData) return null;
+    return JSON.parse(agentData);
   } catch (error) {
     console.error('Agent lookup error:', error);
     return null;
@@ -7468,18 +7532,24 @@ router.get('/api/search/comprehensive', async (request, env) => {
 // Edit posted problems and solutions
 router.put('/api/content/edit/:content_type/:content_id', async (request, env) => {
   try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+
     const { content_type, content_id } = request.params;
     const { updated_content, edit_reason, preserve_versions } = await request.json();
 
     if (!['problem', 'solution'].includes(content_type)) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Invalid content type. Must be "problem" or "solution"'
-      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      return errResponse('Invalid content type. Must be "problem" or "solution"', null, 400);
     }
 
-    // Validate content ownership or permissions
-    const contentValidation = await validateContentEditPermissions(env, content_type, content_id);
+    // Real ownership check: caller must own the content or be admin
+    const table = content_type === 'problem' ? 'problems' : 'solutions';
+    const ownerRow = await env.AIHANGOUT_DB
+      .prepare(`SELECT user_id FROM ${table} WHERE id = ?`).bind(content_id).first();
+    if (!ownerRow) return errResponse('Content not found', null, 404);
+    if (ownerRow.user_id !== user.id && !user.is_admin) return errResponse('Insufficient permissions', null, 403);
+
+    const contentValidation = { can_edit: true, editor_info: { user_id: user.id, is_admin: !!user.is_admin } };
 
     if (!contentValidation.can_edit) {
       return new Response(JSON.stringify({
@@ -7557,11 +7627,24 @@ router.put('/api/content/edit/:content_type/:content_id', async (request, env) =
 // Delete posted problems and solutions with safety checks
 router.delete('/api/content/delete/:content_type/:content_id', async (request, env) => {
   try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+
     const { content_type, content_id } = request.params;
     const { delete_reason, force_delete, preserve_backup } = await request.json();
 
-    // Validate deletion permissions and safety
-    const deletionValidation = await validateContentDeletionSafety(env, content_type, content_id);
+    if (!['problem', 'solution'].includes(content_type)) {
+      return errResponse('Invalid content type', null, 400);
+    }
+
+    // Real ownership check before any deletion
+    const table = content_type === 'problem' ? 'problems' : 'solutions';
+    const ownerRow = await env.AIHANGOUT_DB
+      .prepare(`SELECT user_id FROM ${table} WHERE id = ?`).bind(content_id).first();
+    if (!ownerRow) return errResponse('Content not found', null, 404);
+    if (ownerRow.user_id !== user.id && !user.is_admin) return errResponse('Insufficient permissions', null, 403);
+
+    const deletionValidation = { can_delete: true, safety_concerns: null, alternatives: null };
 
     if (!deletionValidation.can_delete) {
       return new Response(JSON.stringify({
@@ -9099,19 +9182,12 @@ router.get('/api/learning/:id', async (request, env) => {
   }
 });
 
-// Create new learning content
+// Create new learning content — admin only (prevents training data poisoning)
 router.post('/api/learning', async (request, env) => {
   try {
     const user = await authenticate(request, env);
-    if (!user) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Authentication required'
-      }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
-    }
+    if (!user) return errResponse('Authentication required', null, 401);
+    if (!user.is_admin) return errResponse('Admin access required', null, 403);
 
     const {
       title,
@@ -9138,6 +9214,13 @@ router.post('/api/learning', async (request, env) => {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
+    }
+
+    // Boundary validation — cap lengths even though this route is admin-gated.
+    if (typeof title !== 'string' || title.length > 300 ||
+        typeof content !== 'string' || content.length > 100000 ||
+        (summary && (typeof summary !== 'string' || summary.length > 2000))) {
+      return errResponse('title, content, or summary exceeds maximum length', null, 400);
     }
 
     const is_nvidia_content = author_company?.toLowerCase().includes('nvidia') || false;
@@ -9246,7 +9329,7 @@ router.post('/api/chat/message', async (request, env) => {
 
     const { channelId, message } = await request.json();
 
-    if (!message || !message.trim()) {
+    if (!message || typeof message !== 'string' || !message.trim()) {
       return new Response(JSON.stringify({
         success: false,
         error: 'Message cannot be empty'
@@ -9254,6 +9337,11 @@ router.post('/api/chat/message', async (request, env) => {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
+    }
+
+    // Boundary validation — cap message length to prevent DB bloat / abuse.
+    if (message.length > 4000) {
+      return errResponse('Message must be at most 4000 characters', null, 400);
     }
 
     // Insert the message
@@ -9314,7 +9402,7 @@ router.get('/api/chat/events/:channelId', async (request, env) => {
   try {
     const { channelId } = request.params;
     const url = new URL(request.url);
-    const clientId = url.searchParams.get('clientId') || `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const clientId = sseFieldSafe(url.searchParams.get('clientId') || `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
 
     // Create SSE response with proper headers
     const stream = new ReadableStream({
@@ -9535,7 +9623,7 @@ router.get('/api/chat/users/online', async (request, env) => {
       online_count: result.online_count || 0,
       humans_online: result.humans_online || 0,
       ai_agents_online: result.ai_agents_online || 0,
-      recent_users: recentUsers || []
+      recent_users: (recentUsers && recentUsers.results) ? recentUsers.results : []
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -9945,6 +10033,16 @@ router.post('/api/ai-collaboration/join-session', async (request, env) => {
 // AI-to-AI Collaboration Contribution (Flywheel Extension)
 router.post('/api/ai-collaboration/contribute', async (request, env) => {
   try {
+    // Require an authenticated account (human, ai_agent, or service token). Previously this
+    // write was fully anonymous — anyone could insert unbounded rows into the DB.
+    const authUser = await authenticate(request, env);
+    if (!authUser) return errResponse('Authentication required', null, 401);
+
+    // Rate-limit contributions per account to prevent flooding.
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, authUser.id, 'post');
+    if (rl.limited) return rateLimitResponse(rl);
+
     const { session_token, agent_name, contribution_type, content, builds_on_agent, consensus_vote } = await request.json();
 
     if (!session_token || !agent_name || !content) {
@@ -9955,6 +10053,17 @@ router.post('/api/ai-collaboration/contribute', async (request, env) => {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
+    }
+
+    // Boundary validation — cap lengths to prevent DB bloat / spam / training-data poisoning.
+    if (typeof content !== 'string' || content.length > 20000) {
+      return errResponse('content must be a string of at most 20000 characters', null, 400);
+    }
+    if (String(session_token).length > 500 || String(agent_name).length > 100 ||
+        (contribution_type && String(contribution_type).length > 50) ||
+        (builds_on_agent && String(builds_on_agent).length > 100) ||
+        (consensus_vote && String(consensus_vote).length > 20)) {
+      return errResponse('one or more fields exceed their maximum length', null, 400);
     }
 
     // Create contributions table if needed
@@ -10765,19 +10874,10 @@ async function scrapeStackOverflow(categories, max_per_site = 10, quality_thresh
 
   } catch (error) {
     console.error(`Stack Overflow scraping error: ${error.message}`);
-    // Return mock data on error to maintain functionality
-    return Array.from({ length: Math.min(max_per_site, 5) }, (_, i) => ({
-      external_id: `so_fallback_${Date.now()}_${i}`,
-      title: `JavaScript Problem ${i + 1} (Fallback)`,
-      description: `This is a fallback problem when Stack Overflow API is unavailable...`,
-      url: `https://stackoverflow.com/questions/fallback${i}`,
-      author: `fallback_user_${i}`,
-      tags: ['javascript', 'fallback'],
-      category: 'programming',
-      difficulty: 'medium',
-      quality_score: 0.7,
-      created_at: new Date().toISOString()
-    }));
+    // Fail closed. Never fabricate problems — returning fake rows here would let an API
+    // outage seed the live platform with synthetic "(Fallback)" problems (they are inserted
+    // unconditionally by the harvest pipeline, including the unattended daily cron).
+    return [];
   }
 }
 
@@ -10840,19 +10940,8 @@ async function scrapeGitHubIssues(categories, max_per_site = 8, quality_threshol
 
   } catch (error) {
     console.error(`GitHub scraping error: ${error.message}`);
-    // Return mock data on error to maintain functionality
-    return Array.from({ length: Math.min(max_per_site, 3) }, (_, i) => ({
-      external_id: `gh_fallback_${Date.now()}_${i}`,
-      title: `GitHub Issue ${i + 1} (Fallback)`,
-      description: `This is a fallback issue when GitHub API is unavailable...`,
-      url: `https://github.com/fallback-repo/issues/${i}`,
-      author: `fallback_user_${i}`,
-      tags: ['bug', 'fallback'],
-      category: 'development',
-      difficulty: 'medium',
-      quality_score: 0.7,
-      created_at: new Date().toISOString()
-    }));
+    // Fail closed. Never fabricate problems — see scrapeStackOverflow above.
+    return [];
   }
 }
 
@@ -11126,14 +11215,15 @@ async function scrapeCustomRSS(categories, max_per_site, quality_threshold) {
   return []; // Future implementation
 }
 
-// Cross-posting function (mock implementation)
+// Cross-posting to external sources (Stack Overflow answers, GitHub issue comments, Reddit
+// comments) is NOT implemented — real integration requires per-platform OAuth and write APIs.
+// We report this honestly rather than fabricating a successful post.
 async function crossPostSolution(source_site, original_url, solution_data) {
-  // Mock cross-posting - replace with actual API integrations
   return {
-    success: true,
-    posted_at: new Date().toISOString(),
-    response_url: `${original_url}#aihangout_solution`,
-    attribution: solution_data.agent_attribution
+    success: false,
+    status: 'not_implemented',
+    error: `Cross-posting to ${source_site} is not implemented`,
+    attribution: solution_data?.agent_attribution || null
   };
 }
 
@@ -11441,31 +11531,11 @@ async function postSolutionToSource(env, problem, solution, agent) {
   };
 
   try {
-    switch (problem.source_site) {
-      case 'stackoverflow':
-        // Stack Overflow posting would require OAuth and answer posting API
-        postingResult.success = true; // Mock success for now
-        postingResult.posted_url = `${problem.url}#answer_by_aihangout`;
-        postingResult.attribution = `Solution provided by AI Agent "${agent.username}" via AIHangout.ai`;
-        break;
-
-      case 'github_issues':
-        // GitHub Issues commenting would require GitHub API
-        postingResult.success = true; // Mock success for now
-        postingResult.posted_url = `${problem.url}#issuecomment-aihangout`;
-        postingResult.attribution = `Solution provided by AI Agent "${agent.username}" via AIHangout.ai`;
-        break;
-
-      case 'reddit_programming':
-        // Reddit commenting would require Reddit API
-        postingResult.success = true; // Mock success for now
-        postingResult.posted_url = `${problem.url}#comment_by_aihangout`;
-        postingResult.attribution = `Solution by AI Agent "${agent.username}" via AIHangout.ai`;
-        break;
-
-      default:
-        postingResult.error = `Posting not implemented for ${problem.source_site}`;
-    }
+    // Real cross-posting requires per-platform OAuth + write APIs (Stack Overflow answers,
+    // GitHub issue comments, Reddit comments) and is not implemented. Report honestly and
+    // log an accurate (unsuccessful) attempt instead of fabricating success in analytics.
+    postingResult.success = false;
+    postingResult.error = `Posting not implemented for ${problem.source_site}`;
 
     // Log the cross-posting attempt
     await env.AIHANGOUT_DB.prepare(`
@@ -12710,7 +12780,7 @@ function detectSearchPattern(query) {
 router.get('/api/problems/events', async (request, env) => {
   try {
     const url = new URL(request.url);
-    const clientId = url.searchParams.get('clientId') || `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const clientId = sseFieldSafe(url.searchParams.get('clientId') || `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
 
     // Create SSE response with proper headers
     const stream = new ReadableStream({
@@ -14465,10 +14535,64 @@ router.post('/api/admin/service-token', async (request, env) => {
     });
 
   } catch (error) {
-    console.error('[Admin service-token] Error:', error);
-    return new Response(JSON.stringify({ success: false, error: error.message }), {
-      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    return errResponse('Failed to issue service token.', error);
+  }
+});
+
+// List service tokens (metadata only — never the token itself). Admin, non-service.
+router.get('/api/admin/service-tokens', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+    if (!user.is_admin) return errResponse('Admin access required', null, 403);
+
+    const rows = await env.AIHANGOUT_DB
+      .prepare('SELECT id, name, created_at, expires_at, last_used_at, revoked_at FROM service_tokens ORDER BY created_at DESC')
+      .all();
+
+    const now = new Date();
+    const tokens = (rows.results || []).map(t => ({
+      ...t,
+      status: t.revoked_at ? 'revoked' : (new Date(t.expires_at) < now ? 'expired' : 'active')
+    }));
+    return new Response(JSON.stringify({ success: true, tokens }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
+  } catch (error) {
+    return errResponse('Failed to list service tokens.', error);
+  }
+});
+
+// Revoke a service token by id (or name). Admin, non-service. Idempotent.
+router.post('/api/admin/service-token/revoke', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+    if (!user.is_admin) return errResponse('Admin access required', null, 403);
+    // A service token must not be able to revoke tokens — require a real admin session.
+    if (user._is_service_token) return errResponse('Service tokens cannot revoke service tokens', null, 403);
+
+    const body = await request.json().catch(() => ({}));
+    const id = Number.isInteger(body.id) ? body.id : null;
+    const name = typeof body.name === 'string' ? body.name.trim().slice(0, 64) : '';
+    if (id === null && !name) return errResponse('id or name is required', null, 400);
+
+    const result = id !== null
+      ? await env.AIHANGOUT_DB
+          .prepare("UPDATE service_tokens SET revoked_at = datetime('now') WHERE id = ? AND revoked_at IS NULL")
+          .bind(id).run()
+      : await env.AIHANGOUT_DB
+          .prepare("UPDATE service_tokens SET revoked_at = datetime('now') WHERE name = ? AND revoked_at IS NULL")
+          .bind(name).run();
+
+    const changed = result?.meta?.changes || 0;
+    return new Response(JSON.stringify({
+      success: true,
+      revoked: changed,
+      note: changed === 0 ? 'No matching active token (already revoked or not found).' : 'Token revoked.'
+    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  } catch (error) {
+    return errResponse('Failed to revoke service token.', error);
   }
 });
 
@@ -14965,17 +15089,52 @@ router.get('*', async (request, env) => {
       }
       if (!asset || asset.status === 404) {
         const indexResp = await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin)));
+        const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+        const html = await indexResp.text();
+        const patchedHtml = html.replace(/<script\b/gi, `<script nonce="${nonce}"`);
         const headers = new Headers(indexResp.headers);
-        // Apply security headers to the HTML document (not just API responses)
+        headers.set('Content-Type', 'text/html; charset=utf-8');
         headers.set('X-Frame-Options', 'DENY');
         headers.set('X-Content-Type-Options', 'nosniff');
-        headers.set('X-XSS-Protection', '1; mode=block');
         headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
         headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
         headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-        headers.set('Content-Security-Policy', corsHeaders['Content-Security-Policy']);
+        headers.set('Content-Security-Policy', [
+          "default-src 'self'",
+          `script-src 'self' 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
+          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
+          "font-src 'self' https://fonts.gstatic.com",
+          "img-src 'self' data: https: blob:",
+          "connect-src 'self' https://aihangout.ai wss://aihangout.ai",
+          "object-src 'none'",
+          "frame-ancestors 'none'",
+          "base-uri 'self'",
+          "form-action 'self'"
+        ].join('; '));
         headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
-        return new Response(indexResp.body, { status: indexResp.status, headers });
+        return new Response(patchedHtml, { status: 200, headers });
+      }
+      // For HTML assets (e.g. direct hit on /), inject nonce-based CSP
+      if (asset.headers.get('content-type')?.includes('text/html')) {
+        const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+        const html = await asset.text();
+        const patchedHtml = html.replace(/<script\b/gi, `<script nonce="${nonce}"`);
+        const headers = new Headers(asset.headers);
+        headers.set('Content-Type', 'text/html; charset=utf-8');
+        headers.set('Content-Security-Policy', [
+          "default-src 'self'",
+          `script-src 'self' 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
+          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
+          "font-src 'self' https://fonts.gstatic.com",
+          "img-src 'self' data: https: blob:",
+          "connect-src 'self' https://aihangout.ai wss://aihangout.ai",
+          "object-src 'none'",
+          "frame-ancestors 'none'",
+          "base-uri 'self'",
+          "form-action 'self'"
+        ].join('; '));
+        headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
+        return new Response(patchedHtml, { status: 200, headers });
       }
       const headers = new Headers(asset.headers);
       headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
@@ -14985,8 +15144,27 @@ router.get('*', async (request, env) => {
     const asset = await env.ASSETS.fetch(request);
 
     if (asset.status === 404) {
-      // Return index.html for SPA routing
-      return await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin)));
+      // Return index.html for SPA routing — with nonce-based CSP
+      const indexResp = await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin)));
+      const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+      const html = await indexResp.text();
+      const patchedHtml = html.replace(/<script\b/gi, `<script nonce="${nonce}"`);
+      const h = new Headers(indexResp.headers);
+      h.set('Content-Type', 'text/html; charset=utf-8');
+      h.set('Content-Security-Policy', [
+        "default-src 'self'",
+        `script-src 'self' 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
+        "font-src 'self' https://fonts.gstatic.com",
+        "img-src 'self' data: https: blob:",
+        "connect-src 'self' https://aihangout.ai wss://aihangout.ai",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'"
+      ].join('; '));
+      h.set('Cache-Control', 'public, max-age=0, must-revalidate');
+      return new Response(patchedHtml, { status: 200, headers: h });
     }
 
     // Add cache control headers to prevent stale JavaScript issues
@@ -15034,6 +15212,33 @@ export default {
     const startTime = Date.now();
     const url = new URL(request.url);
     const response = await router.handle(request, env, ctx);
+
+    // Apply dynamic CORS to support both apex and www origins
+    const origin = request.headers.get('Origin') || '';
+    if (ALLOWED_ORIGINS.has(origin) && response) {
+      const newHeaders = new Headers(response.headers);
+      newHeaders.set('Access-Control-Allow-Origin', origin);
+      newHeaders.set('Vary', 'Origin');
+      const patched = new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders,
+      });
+
+      // Log API requests non-blocking
+      if (url.pathname.startsWith('/api/') && !url.pathname.includes('/events/batch')) {
+        ctx.waitUntil(logRequestToD1(env, {
+          method: request.method,
+          path: url.pathname,
+          status: patched.status || 0,
+          duration_ms: Date.now() - startTime,
+          user_agent: request.headers.get('User-Agent'),
+          ip_address: request.headers.get('CF-Connecting-IP'),
+          timestamp: new Date().toISOString()
+        }));
+      }
+      return patched;
+    }
 
     // Log API requests non-blocking (skip batch endpoint to avoid noise)
     if (url.pathname.startsWith('/api/') && !url.pathname.includes('/events/batch')) {

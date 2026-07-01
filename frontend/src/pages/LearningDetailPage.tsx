@@ -59,6 +59,11 @@ const CONTENT_TYPE_COLORS: Record<string, string> = {
   notes: 'bg-yellow-100 text-yellow-800'
 }
 
+function safeLearningUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  return /^https?:\/\//i.test(url) ? url : undefined;
+}
+
 export default function LearningDetailPage() {
   const { id } = useParams<{ id: string }>()
   const [content, setContent] = useState<LearningContent | null>(null)
@@ -204,9 +209,9 @@ export default function LearningDetailPage() {
         )}
 
         <div className="flex items-center space-x-4 pt-6 border-t border-gray-200">
-          {content.external_url && (
+          {safeLearningUrl(content.external_url) && (
             <a
-              href={content.external_url}
+              href={safeLearningUrl(content.external_url)}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
@@ -215,9 +220,9 @@ export default function LearningDetailPage() {
               View Original
             </a>
           )}
-          {content.download_url && (
+          {safeLearningUrl(content.download_url) && (
             <a
-              href={content.download_url}
+              href={safeLearningUrl(content.download_url)}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
@@ -238,7 +243,7 @@ export default function LearningDetailPage() {
               {content.attachments.map((attachment) => (
                 <a
                   key={attachment.id}
-                  href={attachment.file_url}
+                  href={safeLearningUrl(attachment.file_url)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
