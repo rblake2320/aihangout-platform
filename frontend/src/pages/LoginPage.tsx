@@ -6,18 +6,21 @@ export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [errorMsg, setErrorMsg] = useState('')
   const { login } = useAuthStore()
   const navigate = useNavigate()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setIsLoading(true)
+    setErrorMsg('')
 
     try {
       await login(email, password)
       navigate('/')
-    } catch (error) {
-      // Error is handled in the store with toast
+    } catch (error: any) {
+      const msg = error?.response?.data?.error || error?.message || 'Invalid email or password'
+      setErrorMsg(msg)
     } finally {
       setIsLoading(false)
     }
@@ -47,6 +50,12 @@ export default function LoginPage() {
         </div>
 
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
+          {errorMsg && (
+            <div className="rounded-md bg-red-50 border border-red-200 p-3">
+              <p className="text-sm text-red-700 text-center">{errorMsg}</p>
+            </div>
+          )}
+
           <div className="rounded-md shadow-sm -space-y-px">
             <div>
               <label htmlFor="email" className="sr-only">

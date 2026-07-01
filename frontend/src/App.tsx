@@ -1,4 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
+import { Toaster } from 'react-hot-toast'
 import { useAuthStore } from './stores/authStore'
 import Navbar from './components/Navbar'
 import Chat from './components/Chat'
@@ -74,6 +75,9 @@ function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
+
+      {/* Toast notifications — required for auth errors, success messages */}
+      <Toaster position="top-center" toastOptions={{ duration: 4000 }} />
 
       {/* Global Chat Component */}
       <Chat />

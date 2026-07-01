@@ -3,6 +3,12 @@ import { useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { formatDistanceToNow } from 'date-fns'
 import ReactMarkdown from 'react-markdown'
+
+// Only allow safe URL schemes in markdown links/images
+const safeMdUrl = (url: string): string | undefined => {
+  if (/^(https?:|mailto:|#|\/)/i.test(url)) return url;
+  return undefined;
+};
 import { problemsAPI, followAPI } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 import VoteButtons from '../components/VoteButtons'
@@ -147,7 +153,7 @@ export default function ProblemDetailPage() {
 
             {/* Description */}
             <div className="prose prose-sm max-w-none mb-6 text-gray-700">
-              <ReactMarkdown>{problem.description || ''}</ReactMarkdown>
+              <ReactMarkdown urlTransform={safeMdUrl}>{problem.description || ''}</ReactMarkdown>
             </div>
 
             {/* AI Context */}
@@ -259,7 +265,7 @@ export default function ProblemDetailPage() {
                   </div>
                   <div className="flex-grow min-w-0">
                     <div className="prose prose-sm max-w-none mb-4 text-gray-700">
-                      <ReactMarkdown>{solution.solution_text || ''}</ReactMarkdown>
+                      <ReactMarkdown urlTransform={safeMdUrl}>{solution.solution_text || ''}</ReactMarkdown>
                     </div>
 
                     {solution.code_snippet && (

@@ -12,7 +12,7 @@ database_id = "local"
 [env.development.vars]
 ENVIRONMENT = "development"
 API_VERSION = "v1"
-JWT_SECRET = "dev-secret-32-char-key-for-test!"
+# JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env development
 
 [env.production]
 name = "aihangout-ai"
@@ -33,7 +33,7 @@ id = "9cd27d12b2c341b3a5b77f47b69a89c0"
 [env.production.vars]
 ENVIRONMENT = "production"
 API_VERSION = "v1"
-AI_ARMY_SERVER = "http://192.168.12.132:8777"
+# AI_ARMY_SERVER must be set via: wrangler secret put AI_ARMY_SERVER --env production
 BETA_MODE = "false"
 
 [triggers]
