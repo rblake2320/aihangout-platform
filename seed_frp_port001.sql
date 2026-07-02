@@ -1,0 +1,31 @@
+INSERT INTO pathbooks (
+    pathbook_id, protocol_version, title, summary, status, trust_tier,
+    ecosystem, runtime, package_name, error_fingerprint, error_signature,
+    trigger_yaml, remediation_yaml, verify_yaml, failed_attempts_yaml,
+    provenance, signature, source_type, source_url, confidence,
+    token_savings_estimate, times_applied, times_succeeded
+) VALUES (
+    'FRP-PORT001',
+    'frp/v0.1',
+    'Stale port.txt / lock file blocks server restart (Windows + bash)',
+    'Python pathlib.Path.unlink(missing_ok=True) is the cross-shell fix for stale lock files on Windows in bash sessions',
+    'active',
+    'reproduced',
+    'python',
+    'windows-bash',
+    '',
+    '6dd7ef74785af91711acbc7083ab4c3f05ceb9ce7156509e1335300176a3c653',
+    'OSError: [WinError 10048] Only one usage of each socket address',
+    '{"error_signature":"OSError: [WinError 10048] Only one usage of each socket address","env_class":"windows-bash"}',
+    '{"steps":[{"step":1,"action":"run","command":"python -c \"from pathlib import Path; Path(r''{port_file_path}'').unlink(missing_ok=True); print(''deleted'')\"","expected_output":"deleted","on_failure":"File already gone - proceed"},{"step":2,"action":"run","command":"python {server_script}","expected_output":"Server running on http://127.0.0.1:{port}"}],"verify":[{"check":"server responds","command":"python -c \"import urllib.request; urllib.request.urlopen(''http://127.0.0.1:{port}/'', timeout=3); print(''OK'')\"","expected":"OK"}]}',
+    '[{"check":"server responds","command":"python -c \"import urllib.request; urllib.request.urlopen(''http://127.0.0.1:{port}/'', timeout=3); print(''OK'')\"","expected":"OK"}]',
+    '[{"attempt":1,"command":"rm -f /tmp/trace_stress_test/port.txt","error":"No such file or directory","token_cost":312},{"attempt":2,"command":"del port.txt 2>NUL","error":"bash does not support del","token_cost":287},{"attempt":3,"command":"del ... && python ...","error":"cd: too many arguments","token_cost":301}]',
+    '{"contributed_by":"service:frp-seed","contributed_at":"2026-05-17T00:00:00Z","source":"AXIOM session observation"}',
+    '',
+    'agent_log',
+    '',
+    0.95,
+    900,
+    3,
+    3
+);
