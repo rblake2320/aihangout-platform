@@ -1443,8 +1443,17 @@ router.post('/api/auth/login', async (request, env) => {
 });
 
 // Problems API
-router.get('/api/problems', async (request, env) => {
+router.get('/api/problems', async (request, env, ctx) => {
   try {
+    const canUsePublicCache = !request.headers.get('Authorization');
+    if (canUsePublicCache) {
+      const cached = await caches.default.match(request);
+      if (cached) {
+        const headers = new Headers(cached.headers);
+        headers.set('X-AIHangout-Cache', 'HIT');
+        return new Response(cached.body, { status: cached.status, headers });
+      }
+    }
     const url = new URL(request.url);
     const category = url.searchParams.get('category');
     const status = url.searchParams.get('status');
@@ -1598,7 +1607,7 @@ router.get('/api/problems', async (request, env) => {
       verified_solution_count: Number(p.verified_solution_count || 0),
     }));
 
-    return new Response(JSON.stringify({
+    const response = new Response(JSON.stringify({
       success: true,
       problems: sanitizedProblems,
       total,
@@ -1607,8 +1616,18 @@ router.get('/api/problems', async (request, env) => {
       hasNext: page < totalPages,
       hasPrev: page > 1
     }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json',
+        ...(canUsePublicCache
+          ? { 'Cache-Control': 'public, max-age=15, stale-while-revalidate=30', 'X-AIHangout-Cache': 'MISS' }
+          : { 'Cache-Control': 'private, no-store' })
+      }
     });
+    if (canUsePublicCache && ctx?.waitUntil) {
+      ctx.waitUntil(caches.default.put(request, response.clone()));
+    }
+    return response;
 
   } catch (error) {
     return new Response(JSON.stringify({
@@ -9561,7 +9580,7 @@ router.get('/api/chat/messages/:channelId', async (request, env) => {
       success: true,
       messages: publicMessages
     }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' }
     });
 
   } catch (error) {
@@ -9774,31 +9793,6 @@ async function broadcastToSSE(env, channelId, eventData) {
 // Enhanced online users count with analytics
 router.get('/api/chat/users/online', async (request, env) => {
   try {
-    // Initialize database schema first
-    await initDatabase(env);
-
-    // Ensure required tables exist
-    await env.AIHANGOUT_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS enhanced_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        session_token VARCHAR(500) NOT NULL,
-        user_type VARCHAR(20) DEFAULT 'human',
-        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-        activity_score FLOAT DEFAULT 0,
-        last_action VARCHAR(100) DEFAULT 'page_visit',
-        page_count INTEGER DEFAULT 1,
-        user_agent TEXT,
-        ip_address VARCHAR(45),
-        UNIQUE(user_id, session_token)
-      )
-    `).run();
-
-    // Clean up old sessions (older than 10 minutes - more generous timeout)
-    await env.AIHANGOUT_DB
-      .prepare(`DELETE FROM enhanced_sessions WHERE last_seen < datetime('now', '-10 minutes')`)
-      .run();
-
     // Get current online count from enhanced sessions (10 minute window)
     let result = await env.AIHANGOUT_DB
       .prepare(`
@@ -9852,48 +9846,6 @@ router.get('/api/chat/users/online', async (request, env) => {
       `)
       .all();
 
-    // Update real-time metrics
-    await env.AIHANGOUT_DB
-      .prepare(`
-        UPDATE realtime_metrics
-        SET metric_value = ?, updated_at = datetime('now')
-        WHERE metric_name = ?
-      `)
-      .bind(result.online_count || 0, 'users_online_now')
-      .run();
-
-    await env.AIHANGOUT_DB
-      .prepare(`
-        UPDATE realtime_metrics
-        SET metric_value = ?, updated_at = datetime('now')
-        WHERE metric_name = ?
-      `)
-      .bind(result.ai_agents_online || 0, 'ai_agents_online')
-      .run();
-
-    await env.AIHANGOUT_DB
-      .prepare(`
-        UPDATE realtime_metrics
-        SET metric_value = ?, updated_at = datetime('now')
-        WHERE metric_name = ?
-      `)
-      .bind(result.humans_online || 0, 'humans_online')
-      .run();
-
-    // Log analytics event
-    const sessionId = request.headers.get('Authorization') || 'anonymous';
-    await logAnalyticsEvent(env, {
-      event_type: 'api_call',
-      user_type: 'system',
-      session_id: sessionId,
-      page_url: '/api/chat/users/online',
-      event_data: JSON.stringify({
-        online_count: result.online_count,
-        humans_online: result.humans_online,
-        ai_agents_online: result.ai_agents_online
-      })
-    });
-
     return new Response(JSON.stringify({
       success: true,
       online_count: result.online_count || 0,
@@ -9920,9 +9872,6 @@ router.get('/api/chat/users/online', async (request, env) => {
 // Enhanced session heartbeat with analytics
 router.post('/api/sessions/heartbeat', async (request, env) => {
   try {
-    // Initialize database schema first
-    await initDatabase(env);
-
     const authResult = await authenticate(request, env);
     if (!authResult) {
       return new Response(JSON.stringify({
@@ -12549,8 +12498,6 @@ router.post('/api/intelligence/harvest', async (request, env) => {
 // Bookmark management endpoints
 router.post('/api/bookmarks', async (request, env, ctx) => {
   try {
-    await initDatabase(env);
-
     const authResult = await authenticate(request, env);
     if (!authResult) {
       return Response.json({ success: false, error: 'Authentication required' }, {
@@ -12606,8 +12553,6 @@ router.post('/api/bookmarks', async (request, env, ctx) => {
 
 router.delete('/api/bookmarks/:contentType/:contentId', async (request, env, ctx) => {
   try {
-    await initDatabase(env);
-
     const authResult = await authenticate(request, env);
     if (!authResult) {
       return Response.json({ success: false, error: 'Authentication required' }, {
@@ -12651,8 +12596,6 @@ router.delete('/api/bookmarks/:contentType/:contentId', async (request, env, ctx
 
 router.get('/api/bookmarks', async (request, env) => {
   try {
-    await initDatabase(env);
-
     const authResult = await authenticate(request, env);
     if (!authResult) {
       return Response.json({ success: false, error: 'Authentication required' }, {
@@ -13103,8 +13046,6 @@ async function broadcastToProblemsSSE(env, eventData) {
 // NEW ONLINE COUNTER - BUILT FROM SCRATCH
 router.post('/api/live/heartbeat', async (request, env) => {
   try {
-    await initDatabase(env);
-
     const user = await authenticate(request, env);
     if (!user) {
       return Response.json({ success: false, error: 'Not logged in' }, {
@@ -13133,26 +13074,11 @@ router.post('/api/live/heartbeat', async (request, env) => {
 // Guest heartbeat for anonymous visitors (no auth required)
 router.post('/api/sessions/guest-heartbeat', async (request, env) => {
   try {
-    await initDatabase(env);
-
     const sessionData = await request.json().catch(() => ({}));
     const sessionId = sessionData.sessionId || `guest_${Date.now()}_${Math.random().toString(36).substring(2)}`;
     const ipAddress = request.headers.get('CF-Connecting-IP') ||
                      request.headers.get('X-Forwarded-For') ||
                      'unknown';
-
-    // Create guest_sessions table if it doesn't exist
-    await env.AIHANGOUT_DB.prepare(`
-      CREATE TABLE IF NOT EXISTS guest_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT UNIQUE,
-        ip_address TEXT,
-        user_agent TEXT,
-        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-        page_url TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `).run();
 
     // Update or insert guest session
     await env.AIHANGOUT_DB.prepare(`
@@ -13190,8 +13116,6 @@ router.post('/api/sessions/guest-heartbeat', async (request, env) => {
 
 router.get('/api/live/count', async (request, env) => {
   try {
-    await initDatabase(env);
-
     // DEPLOYMENT TEST - Check if new deployment is live
     const url = new URL(request.url);
     if (url.searchParams.get('test') === 'deployment') {
@@ -13202,11 +13126,6 @@ router.get('/api/live/count', async (request, env) => {
         version: "v2026-02-04-00:45"
       }, { headers: corsHeaders });
     }
-
-    // Clean up old guest sessions (older than 10 minutes)
-    await env.AIHANGOUT_DB.prepare(`
-      DELETE FROM guest_sessions WHERE last_seen < datetime('now', '-10 minutes')
-    `).run();
 
     // Get authenticated users from live_users (5 minute window)
     const authUsers = await env.AIHANGOUT_DB.prepare(`
@@ -13505,7 +13424,6 @@ router.post('/api/users/:id/follow', async (request, env, ctx) => {
 // Get followers for a user
 router.get('/api/users/:id/followers', async (request, env) => {
   try {
-    await initDatabase(env);
     const targetId = parseInt(request.params.id);
     if (isNaN(targetId)) {
       return new Response(JSON.stringify({ success: false, error: 'Invalid user ID' }), {
@@ -13563,7 +13481,6 @@ router.get('/api/users/:id/is-following', async (request, env) => {
 // Get users that a user is following
 router.get('/api/users/:id/following', async (request, env) => {
   try {
-    await initDatabase(env);
     const targetId = parseInt(request.params.id);
     if (isNaN(targetId)) {
       return new Response(JSON.stringify({ success: false, error: 'Invalid user ID' }), {
@@ -13837,7 +13754,6 @@ router.post('/api/bookmarks/check', async (request, env) => {
 // Get all platform versions
 router.get('/api/versions', async (request, env) => {
   try {
-    await initDatabase(env);
     const result = await env.AIHANGOUT_DB
       .prepare('SELECT * FROM platform_versions ORDER BY created_at DESC')
       .all();
@@ -13858,7 +13774,6 @@ router.get('/api/versions', async (request, env) => {
 // Get current (latest) version
 router.get('/api/versions/current', async (request, env) => {
   try {
-    await initDatabase(env);
     const version = await env.AIHANGOUT_DB
       .prepare('SELECT * FROM platform_versions ORDER BY created_at DESC LIMIT 1')
       .first();
@@ -14073,8 +13988,6 @@ router.get('/api/problem-bank/featured', async (request, env) => {
 // Bug Reports API
 router.post('/api/bug-reports', async (request, env) => {
   try {
-    await initDatabase(env);
-
     // Resolve submitter identity from auth token — never trust body-supplied userId/username
     const authResult = await authenticate(request, env);
     const reportUserId = authResult?.id || null;
@@ -14158,8 +14071,6 @@ router.get('/api/bug-reports', async (request, env) => {
       });
     }
 
-    await initDatabase(env);
-
     const url = new URL(request.url);
     const status = url.searchParams.get('status');
     const priority = url.searchParams.get('priority');
@@ -14216,8 +14127,6 @@ router.get('/api/bug-reports/:id', async (request, env) => {
       });
     }
 
-    await initDatabase(env);
-
     const { id } = request.params;
 
     const result = await env.AIHANGOUT_DB.prepare(
@@ -14253,8 +14162,6 @@ router.get('/api/bug-reports/:id', async (request, env) => {
 
 router.patch('/api/bug-reports/:id/status', async (request, env) => {
   try {
-    await initDatabase(env);
-
     const user = await authenticate(request, env);
     if (!user || !user.is_admin) {
       return new Response(JSON.stringify({ success: false, error: 'Admin required' }), {
@@ -17407,7 +17314,14 @@ export default {
 
     let response;
     try {
-      await initDatabase(env);
+      // Production and staging schemas are managed exclusively by tracked D1
+      // migrations. Running dozens of CREATE TABLE/INDEX statements before
+      // every request creates needless primary-database work and schema-lock
+      // contention under sustained load (even /api/health used to do this).
+      // Keep bootstrap initialization only for local development.
+      if (env.ENVIRONMENT === 'development') {
+        await initDatabase(env);
+      }
       const groundedResponse = request.method === 'GET'
         ? await handleGroundedCapability(request, env, url)
         : null;
@@ -17421,17 +17335,25 @@ export default {
       response = jsonResponse({ success: false, error: 'API endpoint not found' }, { status: 404 });
     }
 
-    // Never expose internal exception details from optional/experimental APIs.
-    // A 503 truthfully signals a degraded capability while keeping the core app usable.
+    // Never expose internal exception details. This is an error sanitizer, not
+    // a circuit breaker: preserve that distinction for operators and clients.
     if (url.pathname.startsWith('/api/') && response?.status >= 500) {
       console.error(`[API] ${request.method} ${url.pathname} returned ${response.status}`);
+      const optionalCapability = [
+        '/api/predictions/', '/api/personas/', '/api/innovation/',
+        '/api/intelligence/', '/api/matching/'
+      ].some(prefix => url.pathname.startsWith(prefix));
       response = jsonResponse({
         success: false,
-        error: 'This capability is temporarily unavailable',
-        capability_status: 'degraded'
+        error: optionalCapability
+          ? 'This capability is temporarily unavailable'
+          : 'The service is temporarily unavailable',
+        ...(optionalCapability
+          ? { capability_status: 'degraded' }
+          : { service_status: 'degraded' })
       }, {
         status: 503,
-        headers: { 'Retry-After': '300' }
+        headers: { 'Retry-After': optionalCapability ? '300' : '5' }
       });
     }
 
@@ -17448,7 +17370,11 @@ export default {
       });
 
       // Log API requests non-blocking
-      if (url.pathname.startsWith('/api/') && !url.pathname.includes('/events/batch')) {
+      if (
+        env.ENVIRONMENT === 'development' &&
+        url.pathname.startsWith('/api/') &&
+        !url.pathname.includes('/events/batch')
+      ) {
         ctx.waitUntil(logRequestToD1(env, {
           method: request.method,
           path: url.pathname,
@@ -17463,7 +17389,11 @@ export default {
     }
 
     // Log API requests non-blocking (skip batch endpoint to avoid noise)
-    if (url.pathname.startsWith('/api/') && !url.pathname.includes('/events/batch')) {
+    if (
+      env.ENVIRONMENT === 'development' &&
+      url.pathname.startsWith('/api/') &&
+      !url.pathname.includes('/events/batch')
+    ) {
       ctx.waitUntil(logRequestToD1(env, {
         method: request.method,
         path: url.pathname,
@@ -17487,10 +17417,18 @@ export default {
 
 async function runDailyHarvest(env) {
   try {
-    await initDatabase(env);
     // Clean notifications older than 90 days
     await env.AIHANGOUT_DB.prepare(
       "DELETE FROM notifications WHERE created_at < datetime('now', '-90 days')"
+    ).run();
+    // Expired presence rows do not affect counts because reads use time-window
+    // predicates. Reclaim them here rather than turning high-volume GET
+    // requests into writes against D1's single primary.
+    await env.AIHANGOUT_DB.prepare(
+      "DELETE FROM enhanced_sessions WHERE last_seen < datetime('now', '-1 day')"
+    ).run();
+    await env.AIHANGOUT_DB.prepare(
+      "DELETE FROM guest_sessions WHERE last_seen < datetime('now', '-1 day')"
     ).run();
     const allSites = ['stackoverflow', 'github_issues', 'reddit_programming', 'dev_to', 'hackernews', 'arxiv'];
     const result = await initializeMultiSiteHarvesting(env, {
