@@ -94,7 +94,9 @@ export default function SettingsPage() {
 
       <div className="bg-white rounded-lg border border-gray-200 p-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-2">Notification Preferences</h2>
-        <p className="text-sm text-gray-500 mb-4">Choose which in-app notifications you receive.</p>
+        <p className="text-sm text-gray-500 mb-4">
+          Choose which in-app notifications you receive. Changes save automatically.
+        </p>
         <div className="divide-y divide-gray-100">
           <Toggle
             label="New followers"

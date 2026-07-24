@@ -15,6 +15,7 @@ const PRODUCTION_URL = 'https://aihangout.ai';
 const REQUIRED_CHECKS = [
     'Backend API responding',
     'Problems endpoint returns newest-first',
+    'Multi-term search and signup route work',
     'Online counter endpoint works',
     'Frontend assets deployed',
     'Frontend contains sorting fix',
@@ -91,6 +92,23 @@ async function verifyDeployment() {
             passedChecks++;
         } else {
             console.log('❌ Online counter API: Failed');
+        }
+
+        const searchResponse = await makeHttpRequest(
+            `${PRODUCTION_URL}/api/problems?search=${encodeURIComponent('PyTorch GPU')}&limit=20`
+        );
+        const searchData = searchResponse.statusCode === 200 ? JSON.parse(searchResponse.data) : {};
+        const searchMatched = (searchData.problems || []).some(problem => {
+            const text = `${problem.title || ''} ${problem.description || ''}`.toLowerCase();
+            return text.includes('pytorch') && text.includes('gpu');
+        });
+        const signupResponse = await makeHttpRequest(`${PRODUCTION_URL}/signup`);
+        if (searchMatched && signupResponse.statusCode === 200 &&
+            signupResponse.data.includes('<div id="root">')) {
+            console.log('✅ New-user routes/search: multi-term match and /signup shell verified');
+            passedChecks++;
+        } else {
+            console.log(`❌ New-user routes/search: search=${searchMatched}, signup=${signupResponse.statusCode}`);
         }
 
         // 2. Test frontend deployment

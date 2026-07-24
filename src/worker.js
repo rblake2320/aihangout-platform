@@ -1440,7 +1440,7 @@ router.get('/api/problems', async (request, env) => {
   try {
     const url = new URL(request.url);
     const category = url.searchParams.get('category');
-    const status = url.searchParams.get('status') || 'open';
+    const status = url.searchParams.get('status');
     const search = url.searchParams.get('search');
     const solutionStatus = url.searchParams.get('solutionStatus');
     const authorType = url.searchParams.get('authorType');
@@ -1456,8 +1456,12 @@ router.get('/api/problems', async (request, env) => {
     // Build WHERE conditions for both COUNT and main query
     // RLS: only show public problems OR problems owned by the caller
     // Moderation: exclude pending_review and flagged items from public feed
-    let whereClause = ' WHERE p.status = ? AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?) AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6 OR p.user_id = ?)';
-    const whereParams = [status, callerId, callerId];
+    let whereClause = status
+      ? ' WHERE p.status = ?'
+      : " WHERE p.status IN ('open', 'approved')";
+    const whereParams = status ? [status] : [];
+    whereClause += ' AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?) AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6 OR p.user_id = ?)';
+    whereParams.push(callerId, callerId);
 
     if (username) {
       whereClause += ' AND u.username = ?';
@@ -1468,9 +1472,15 @@ router.get('/api/problems', async (request, env) => {
       whereParams.push(category);
     }
     if (search) {
-      whereClause += ' AND (p.title LIKE ? OR p.description LIKE ?)';
-      const searchPattern = `%${search}%`;
-      whereParams.push(searchPattern, searchPattern);
+      const searchTerms = String(search).trim().split(/\s+/)
+        .map(term => term.replace(/[%_]/g, '').slice(0, 60))
+        .filter(term => term.length > 1)
+        .slice(0, 8);
+      for (const term of searchTerms) {
+        whereClause += ' AND (p.title LIKE ? OR p.description LIKE ? OR p.category LIKE ?)';
+        const searchPattern = `%${term}%`;
+        whereParams.push(searchPattern, searchPattern, searchPattern);
+      }
     }
     if (solutionStatus) {
       if (solutionStatus === 'unsolved') {
@@ -9400,6 +9410,12 @@ router.post('/api/learning', async (request, env) => {
 // LIVE CHAT API ENDPOINTS
 // ========================
 
+function isDangerousChatPayload(message) {
+  return /\b(?:drop|truncate)\s+table\b/i.test(message) ||
+    /\bunion\s+(?:all\s+)?select\b/i.test(message) ||
+    /(?:;|--)\s*(?:delete\s+from|insert\s+into|update\s+\w+\s+set)\b/i.test(message);
+}
+
 // Get chat messages for a channel
 router.get('/api/chat/messages/:channelId', async (request, env) => {
   try {
@@ -9425,9 +9441,16 @@ router.get('/api/chat/messages/:channelId', async (request, env) => {
       .bind(channelId, limit, offset)
       .all();
 
+    const publicMessages = (messages.results || []).map(row => ({
+      ...row,
+      message: isDangerousChatPayload(row.message)
+        ? '[Message hidden by automated moderation]'
+        : row.message
+    }));
+
     return new Response(JSON.stringify({
       success: true,
-      messages: messages.results || []
+      messages: publicMessages
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -9458,6 +9481,9 @@ router.post('/api/chat/message', async (request, env) => {
     }
 
     const { channelId, message } = await request.json();
+    const resolvedChannelId = Number.isInteger(Number(channelId)) && Number(channelId) > 0
+      ? Number(channelId)
+      : 1;
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       return new Response(JSON.stringify({
@@ -9474,13 +9500,23 @@ router.post('/api/chat/message', async (request, env) => {
       return errResponse('Message must be at most 4000 characters', null, 400);
     }
 
+    if (isDangerousChatPayload(message)) {
+      console.warn(`[Chat/moderation] Rejected destructive SQL payload from user ${authResult.id}`);
+      return errResponse('Message blocked by automated moderation', null, 400);
+    }
+
+    const channel = await env.AIHANGOUT_DB.prepare(
+      'SELECT id FROM chat_channels WHERE id = ?'
+    ).bind(resolvedChannelId).first();
+    if (!channel) return errResponse('Chat channel not found', null, 404);
+
     // Insert the message
     const result = await env.AIHANGOUT_DB
       .prepare(`
         INSERT INTO chat_messages (channel_id, user_id, message, message_type)
         VALUES (?, ?, ?, 'text')
       `)
-      .bind(channelId || 1, authResult.id, sanitizeContent(message.trim()))
+      .bind(resolvedChannelId, authResult.id, sanitizeContent(message.trim()))
       .run();
 
     // Get the full message with user details for broadcasting
@@ -9501,7 +9537,7 @@ router.post('/api/chat/message', async (request, env) => {
 
     // Broadcast to SSE connections (if any exist)
     try {
-      await broadcastToSSE(env, channelId || 1, {
+      await broadcastToSSE(env, resolvedChannelId, {
         type: 'new_message',
         data: fullMessage
       });
@@ -9517,6 +9553,7 @@ router.post('/api/chat/message', async (request, env) => {
     });
 
   } catch (error) {
+    console.error('[Chat/message] Error:', error);
     return new Response(JSON.stringify({
       success: false,
       error: error.message

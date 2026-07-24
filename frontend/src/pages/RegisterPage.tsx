@@ -27,6 +27,26 @@ export default function RegisterPage() {
     e.preventDefault()
     setFormError('')
 
+    if (!formData.username.trim()) {
+      setFormError('Username is required.')
+      return
+    }
+
+    if (!formData.email.trim()) {
+      setFormError('Email address is required.')
+      return
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
+      setFormError('Enter a valid email address.')
+      return
+    }
+
+    if (!formData.password) {
+      setFormError('Password is required.')
+      return
+    }
+
     if (formData.password.length < 8) {
       setFormError('Password must be at least 8 characters.')
       return
@@ -162,13 +182,15 @@ export default function RegisterPage() {
           </div>
 
           {formError && (
-            <p className="text-sm text-red-600 text-center">{formError}</p>
+            <p role="alert" aria-live="polite" className="text-sm text-red-600 text-center">
+              {formError}
+            </p>
           )}
 
           <div>
             <button
               type="submit"
-              disabled={isLoading || formData.password !== formData.confirmPassword || formData.password.length < 8}
+              disabled={isLoading}
               className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoading ? (
