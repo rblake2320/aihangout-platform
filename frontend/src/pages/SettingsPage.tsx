@@ -1,6 +1,6 @@
 import { useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { settingsAPI } from '../services/api'
+import { api, settingsAPI } from '../services/api'
 import toast from 'react-hot-toast'
 
 interface ToggleProps {
@@ -122,6 +122,22 @@ export default function SettingsPage() {
             checked={!!settings?.email_notifications}
             onChange={v => handleChange('email_notifications', v)}
           />
+          <div className="py-4">
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const response = await api.post('/auth/email/resend', {})
+                  toast.success(response.data.alreadyVerified ? 'Your email is already verified' : 'Verification email requested')
+                } catch {
+                  toast.error('Could not send verification email')
+                }
+              }}
+              className="rounded-md border border-blue-600 px-3 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50"
+            >
+              Verify my email
+            </button>
+          </div>
         </div>
       </div>
     </div>
