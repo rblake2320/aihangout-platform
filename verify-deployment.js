@@ -16,6 +16,7 @@ const REQUIRED_CHECKS = [
     'Backend API responding',
     'Problems endpoint returns newest-first',
     'Multi-term search and signup route work',
+    'API contract boundaries return standard errors',
     'Online counter endpoint works',
     'Frontend assets deployed',
     'Frontend contains sorting fix',
@@ -33,6 +34,19 @@ async function makeHttpRequest(url) {
             res.on('data', chunk => data += chunk);
             res.on('end', () => resolve({ statusCode: res.statusCode, data }));
         }).on('error', reject);
+    });
+}
+
+async function makeApiRequest(url, { method = 'GET', headers = {}, body = '' } = {}) {
+    return new Promise((resolve, reject) => {
+        const request = https.request(url, { method, headers }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => resolve({ statusCode: res.statusCode, data }));
+        });
+        request.on('error', reject);
+        if (body) request.write(body);
+        request.end();
     });
 }
 
@@ -109,6 +123,31 @@ async function verifyDeployment() {
             passedChecks++;
         } else {
             console.log(`❌ New-user routes/search: search=${searchMatched}, signup=${signupResponse.statusCode}`);
+        }
+
+        const contractResults = await Promise.all([
+            makeHttpRequest(`${PRODUCTION_URL}/api/problems?limit=-5`),
+            makeHttpRequest(`${PRODUCTION_URL}/api/problems?limit=10000`),
+            makeApiRequest(`${PRODUCTION_URL}/api/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'email=test%40example.com&password=invalid'
+            }),
+            makeApiRequest(`${PRODUCTION_URL}/api/chat/messages`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ channelId: 1, message: 'contract probe' })
+            })
+        ]);
+        const expectedContracts = [400, 400, 415, 404];
+        const contractOk = contractResults.every(
+            (result, index) => result.statusCode === expectedContracts[index]
+        );
+        if (contractOk) {
+            console.log('✅ API contracts: pagination, media type, and unknown route errors verified');
+            passedChecks++;
+        } else {
+            console.log(`❌ API contracts: expected ${expectedContracts.join(',')}, got ${contractResults.map(r => r.statusCode).join(',')}`);
         }
 
         // 2. Test frontend deployment

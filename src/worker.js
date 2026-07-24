@@ -1447,7 +1447,10 @@ router.get('/api/problems', async (request, env) => {
     const sortBy = url.searchParams.get('sortBy') || 'new'; // 🆕 DEFAULT TO NEWEST FIRST
     const username = url.searchParams.get('username');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
-    const offset = parseInt(url.searchParams.get('offset') || '0');
+    const requestedPage = parseInt(url.searchParams.get('page') || '1');
+    const offset = url.searchParams.has('page')
+      ? (requestedPage - 1) * limit
+      : parseInt(url.searchParams.get('offset') || '0');
 
     // RLS: determine caller identity (optional auth)
     const callerUser = await authenticate(request, env).catch(() => null);
@@ -1594,6 +1597,88 @@ router.get('/api/problems', async (request, env) => {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
+  }
+});
+
+// Conventional problem mutation routes used by the web app and API clients.
+router.put('/api/problems/:id', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+    const id = Number(request.params.id);
+    if (!Number.isInteger(id) || id < 1) return errResponse('Invalid problem ID', null, 400);
+
+    const problem = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, user_id, status FROM problems WHERE id = ?'
+    ).bind(id).first();
+    if (!problem || problem.status === 'deleted') return errResponse('Problem not found', null, 404);
+    if (problem.user_id !== user.id && !user.is_admin) return errResponse('Insufficient permissions', null, 403);
+
+    const body = await request.json();
+    const updates = [];
+    const values = [];
+    if (body.title !== undefined) {
+      const title = sanitizeContent(String(body.title)).trim();
+      if (!title || title.length > 200) return errResponse('Title must be between 1 and 200 characters', null, 400);
+      updates.push('title = ?'); values.push(title);
+    }
+    if (body.description !== undefined) {
+      const description = sanitizeContent(String(body.description)).trim();
+      if (!description || description.length > 10000) return errResponse('Description must be between 1 and 10,000 characters', null, 400);
+      updates.push('description = ?'); values.push(description);
+    }
+    if (body.category !== undefined) {
+      const category = sanitizeContent(String(body.category)).trim();
+      if (!category || category.length > 100) return errResponse('Invalid category', null, 400);
+      updates.push('category = ?'); values.push(category);
+    }
+    if (body.difficulty !== undefined) {
+      if (!['easy', 'medium', 'hard'].includes(body.difficulty)) return errResponse('Invalid difficulty', null, 400);
+      updates.push('difficulty = ?'); values.push(body.difficulty);
+    }
+    if (body.is_public !== undefined) {
+      updates.push('is_public = ?'); values.push(body.is_public ? 1 : 0);
+    }
+    if (!updates.length) return errResponse('No editable fields supplied', null, 400);
+
+    await env.AIHANGOUT_DB.prepare(
+      `UPDATE problems SET ${updates.join(', ')} WHERE id = ?`
+    ).bind(...values, id).run();
+    const updated = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, title, description, category, difficulty, is_public, status FROM problems WHERE id = ?'
+    ).bind(id).first();
+    return jsonResponse({ success: true, problem: updated });
+  } catch (error) {
+    return errResponse('Failed to update problem', error, 500);
+  }
+});
+
+router.delete('/api/problems/:id', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+    const id = Number(request.params.id);
+    if (!Number.isInteger(id) || id < 1) return errResponse('Invalid problem ID', null, 400);
+
+    const problem = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, user_id, status FROM problems WHERE id = ?'
+    ).bind(id).first();
+    if (!problem || problem.status === 'deleted') return errResponse('Problem not found', null, 404);
+    if (problem.user_id !== user.id && !user.is_admin) return errResponse('Insufficient permissions', null, 403);
+
+    // Soft deletion preserves referential integrity and the operator audit trail
+    // while immediately removing the content from all public queries.
+    await env.AIHANGOUT_DB.prepare(
+      "UPDATE problems SET status = 'deleted', is_public = FALSE WHERE id = ?"
+    ).bind(id).run();
+    return jsonResponse({
+      success: true,
+      deleted: true,
+      deletion_mode: 'soft_delete',
+      problem_id: id
+    });
+  } catch (error) {
+    return errResponse('Failed to delete problem', error, 500);
   }
 });
 
@@ -9497,7 +9582,7 @@ router.post('/api/chat/message', async (request, env) => {
 
     // Boundary validation — cap message length to prevent DB bloat / abuse.
     if (message.length > 4000) {
-      return errResponse('Message must be at most 4000 characters', null, 400);
+      return errResponse('Message must be at most 4000 characters', null, 413);
     }
 
     if (isDangerousChatPayload(message)) {
@@ -15728,14 +15813,59 @@ async function handleGroundedCapability(request, env, url) {
 
 export default {
   async fetch(request, env, ctx) {
-    await initDatabase(env);
-
     const startTime = Date.now();
     const url = new URL(request.url);
-    const groundedResponse = request.method === 'GET'
-      ? await handleGroundedCapability(request, env, url)
-      : null;
-    let response = groundedResponse || await router.handle(request, env, ctx);
+
+    if (url.pathname.startsWith('/api/')) {
+      for (const [name, minimum] of [['limit', 1], ['page', 1], ['offset', 0]]) {
+        if (!url.searchParams.has(name)) continue;
+        const raw = url.searchParams.get(name);
+        const value = Number(raw);
+        if (!/^\d+$/.test(raw || '') || !Number.isSafeInteger(value) || value < minimum) {
+          return jsonResponse({
+            success: false,
+            error: `${name} must be an integer ${minimum === 0 ? 'greater than or equal to 0' : 'greater than 0'}`
+          }, { status: 400 });
+        }
+      }
+      if (url.searchParams.has('limit') && Number(url.searchParams.get('limit')) > 200) {
+        return jsonResponse({ success: false, error: 'limit cannot exceed 200' }, { status: 400 });
+      }
+
+      if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
+        const contentType = request.headers.get('Content-Type') || '';
+        if (!contentType.toLowerCase().startsWith('application/json')) {
+          return jsonResponse({
+            success: false,
+            error: 'Content-Type must be application/json'
+          }, { status: 415 });
+        }
+      }
+
+      if (/^\/api\/content\/(?:edit|delete)\//.test(url.pathname)) {
+        return jsonResponse({
+          success: false,
+          error: 'Legacy content mutation endpoint retired',
+          replacement: 'Use PUT or DELETE /api/problems/:id'
+        }, { status: 410 });
+      }
+    }
+
+    let response;
+    try {
+      await initDatabase(env);
+      const groundedResponse = request.method === 'GET'
+        ? await handleGroundedCapability(request, env, url)
+        : null;
+      response = groundedResponse || await router.handle(request, env, ctx);
+    } catch (error) {
+      console.error(`[API] Unhandled ${request.method} ${url.pathname}:`, error?.message || error);
+      response = errResponse('Internal server error', null, 500);
+    }
+
+    if (!response) {
+      response = jsonResponse({ success: false, error: 'API endpoint not found' }, { status: 404 });
+    }
 
     // Never expose internal exception details from optional/experimental APIs.
     // A 503 truthfully signals a degraded capability while keeping the core app usable.
