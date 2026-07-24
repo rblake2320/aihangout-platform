@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { UserPlusIcon, UserMinusIcon } from '@heroicons/react/24/outline'
 import { followAPI } from '../services/api'
@@ -15,34 +15,36 @@ export default function FollowButton({ userId, initialFollowing, onCountChange, 
   const [following, setFollowing] = useState(initialFollowing)
   const queryClient = useQueryClient()
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const pendingRef = useRef<boolean | null>(null)
+  const previousRef = useRef(initialFollowing)
 
   const toggleMutation = useMutation({
     mutationFn: () => followAPI.toggle(userId),
     onSuccess: (res) => {
       const newFollowing = res.data?.following ?? !following
       setFollowing(newFollowing)
-      onCountChange?.(newFollowing ? 1 : -1)
+      if (newFollowing !== previousRef.current) {
+        onCountChange?.(newFollowing ? 1 : -1)
+      }
+      previousRef.current = newFollowing
       queryClient.invalidateQueries({ queryKey: ['followers', userId] })
+      queryClient.invalidateQueries({ queryKey: ['is-following', userId] })
       toast.success(newFollowing ? 'Following' : 'Unfollowed')
-      pendingRef.current = null
     },
     onError: () => {
-      // Revert optimistic state
-      const reverted = !following
-      setFollowing(reverted)
-      onCountChange?.(reverted ? 1 : -1)
+      setFollowing(previousRef.current)
       toast.error('Failed to update follow status')
-      pendingRef.current = null
     },
   })
 
+  useEffect(() => {
+    if (!toggleMutation.isPending) {
+      setFollowing(initialFollowing)
+      previousRef.current = initialFollowing
+    }
+  }, [initialFollowing, toggleMutation.isPending])
+
   const handleClick = () => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    const optimisticNext = pendingRef.current !== null ? !pendingRef.current : !following
-    pendingRef.current = optimisticNext
-    setFollowing(optimisticNext)
-    onCountChange?.(optimisticNext ? 1 : -1)
     debounceRef.current = setTimeout(() => {
       toggleMutation.mutate()
     }, 300)

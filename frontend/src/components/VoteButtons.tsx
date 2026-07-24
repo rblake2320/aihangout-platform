@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ChevronUpIcon, ChevronDownIcon } from '@heroicons/react/24/outline'
 import { votingAPI } from '../services/api'
@@ -27,11 +27,17 @@ export default function VoteButtons({
   const [currentVote, setCurrentVote] = useState<'up' | 'down' | null>(userVote)
   const [voteCount, setVoteCount] = useState(upvotes)
 
+  useEffect(() => {
+    setCurrentVote(userVote)
+    setVoteCount(upvotes)
+  }, [userVote, upvotes, targetId])
+
   const voteMutation = useMutation({
     mutationFn: ({ voteType }: { voteType: 'up' | 'down' }) =>
       votingAPI.vote(targetType, targetId, voteType),
-    onSuccess: (response) => {
+    onSuccess: (response, variables) => {
       setVoteCount(response.data.upvotes)
+      setCurrentVote(variables.voteType)
       // Invalidate and refetch relevant queries
       queryClient.invalidateQueries({ queryKey: ['problems'] })
       queryClient.invalidateQueries({ queryKey: ['problem', targetId] })
@@ -49,25 +55,6 @@ export default function VoteButtons({
     if (!isAuthenticated) {
       toast.error('Please login to vote')
       return
-    }
-
-    // Optimistic update
-    const newVote = currentVote === voteType ? null : voteType
-    setCurrentVote(newVote)
-
-    // Optimistic vote count update
-    if (currentVote === 'up' && voteType === 'down') {
-      setVoteCount(voteCount - 2) // Remove upvote and add downvote
-    } else if (currentVote === 'down' && voteType === 'up') {
-      setVoteCount(voteCount + 2) // Remove downvote and add upvote
-    } else if (currentVote === null && voteType === 'up') {
-      setVoteCount(voteCount + 1) // Add upvote
-    } else if (currentVote === null && voteType === 'down') {
-      setVoteCount(voteCount - 1) // Add downvote
-    } else if (currentVote === 'up' && voteType === 'up') {
-      setVoteCount(voteCount - 1) // Remove upvote
-    } else if (currentVote === 'down' && voteType === 'down') {
-      setVoteCount(voteCount + 1) // Remove downvote
     }
 
     voteMutation.mutate({ voteType })

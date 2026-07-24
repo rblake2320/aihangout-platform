@@ -5,6 +5,7 @@ import { BellIcon, XMarkIcon } from '@heroicons/react/24/outline'
 import { BellAlertIcon } from '@heroicons/react/24/solid'
 import { notificationsAPI } from '../services/api'
 import { formatDistanceToNow } from 'date-fns'
+import { parseApiDate } from '../utils/date'
 
 export default function NotificationBell() {
   const [open, setOpen] = useState(false)
@@ -123,7 +124,7 @@ export default function NotificationBell() {
                   >
                     <p className="text-sm text-gray-800 line-clamp-2">{n.message}</p>
                     <p className="text-xs text-gray-400 mt-1">
-                      {formatDistanceToNow(new Date(n.created_at), { addSuffix: true })}
+                      {formatDistanceToNow(parseApiDate(n.created_at), { addSuffix: true })}
                     </p>
                   </Link>
                   <button

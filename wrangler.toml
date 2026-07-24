@@ -14,6 +14,25 @@ ENVIRONMENT = "development"
 API_VERSION = "v1"
 # JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env development
 
+[env.staging]
+name = "aihangout-staging"
+
+[[env.staging.d1_databases]]
+binding = "AIHANGOUT_DB"
+database_name = "aihangout-staging"
+database_id = "0783889d-3191-46ec-b47a-9aa74147b64a"
+
+[[env.staging.kv_namespaces]]
+binding = "AIHANGOUT_KV"
+id = "c8a1217f6f2a43028e6b8051fd2ab9d7"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+API_VERSION = "v1"
+BETA_MODE = "true"
+# JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env staging
+# AI_ARMY_SERVER must be set via: wrangler secret put AI_ARMY_SERVER --env staging
+
 [env.production]
 name = "aihangout-ai"
 routes = [

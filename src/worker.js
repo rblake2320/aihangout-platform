@@ -775,23 +775,27 @@ async function initDatabase(env) {
 // without locking anyone out. Legacy hashes in the old `<saltHex>:<hashHex>` format are
 // still verified at their original 100k cost (see verifyPassword) and are transparently
 // upgraded on the user's next successful login.
-const PBKDF2_ITERATIONS = 600000;
+// Cloudflare Workers' Web Crypto caps PBKDF2 at 100000 iterations; requesting more
+// throws "iteration counts above 100000 are not supported" and 500s registration/login.
+// 100000 is the platform maximum here, not a chosen OWASP target.
+const PBKDF2_ITERATIONS = 100000;
 const LEGACY_PBKDF2_ITERATIONS = 100000;
 
 // Derive 256 bits of PBKDF2-SHA256 and return as hex. Uses deriveBits(256), which yields
 // the identical bytes the legacy code obtained via deriveKey(AES-256-GCM)+exportKey.
 async function derivePbkdf2Hex(password, salt, iterations) {
-  const key = await crypto.subtle.importKey(
+  const subtle = globalThis.crypto.subtle;
+  const key = await subtle.importKey(
     'raw', new TextEncoder().encode(password), { name: 'PBKDF2' }, false, ['deriveBits']
   );
-  const bits = await crypto.subtle.deriveBits(
+  const bits = await subtle.deriveBits(
     { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, key, 256
   );
   return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 async function hashPassword(password) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const salt = globalThis.crypto.getRandomValues(new Uint8Array(16));
   const hash = await derivePbkdf2Hex(password, salt, PBKDF2_ITERATIONS);
   const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('');
   return `pbkdf2$${PBKDF2_ITERATIONS}$${saltHex}$${hash}`;
@@ -1996,6 +2000,16 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     const { problemId } = request.params;
     const { solutionText, codeSnippet, whyExplanation } = await request.json();
 
+    const problemOwner = await env.AIHANGOUT_DB
+      .prepare('SELECT user_id FROM problems WHERE id = ?')
+      .bind(problemId).first();
+    if (!problemOwner) {
+      return new Response(JSON.stringify({ success: false, error: 'Problem not found' }), {
+        status: 404,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     // Validate field length limits
     if (!solutionText || solutionText.trim() === '') {
       return new Response(JSON.stringify({
@@ -2116,10 +2130,7 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
       .run();
 
     // Notify problem owner about new solution (non-blocking)
-    const problemOwner = await env.AIHANGOUT_DB
-      .prepare('SELECT user_id FROM problems WHERE id = ?')
-      .bind(problemId).first();
-    if (problemOwner) {
+    if (problemOwner.user_id !== user.id) {
       ctx.waitUntil(createNotification(env, {
         userId: problemOwner.user_id,
         actorId: user.id,
@@ -2200,6 +2211,19 @@ router.post('/api/problems/:id/vote', async (request, env, ctx) => {
     const targetId = request.params.id;
     const body = await request.json().catch(() => ({}));
     const voteType = body.vote === -1 ? 'down' : 'up';
+    const ownerRow = await env.AIHANGOUT_DB
+      .prepare('SELECT user_id FROM problems WHERE id = ?')
+      .bind(targetId).first();
+    if (!ownerRow) {
+      return new Response(JSON.stringify({ success: false, error: 'Problem not found' }), {
+        status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (ownerRow.user_id === user.id) {
+      return new Response(JSON.stringify({ success: false, error: 'You cannot vote on your own content' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
 
     // Capture prior vote before deleting (for reputation dedup)
     const priorVote = await env.AIHANGOUT_DB
@@ -2220,10 +2244,6 @@ router.post('/api/problems/:id/vote', async (request, env, ctx) => {
     await env.AIHANGOUT_DB
       .prepare('UPDATE problems SET upvotes = ? WHERE id = ?')
       .bind(voteCount.count, targetId).run();
-
-    const ownerRow = await env.AIHANGOUT_DB
-      .prepare('SELECT user_id FROM problems WHERE id = ?')
-      .bind(targetId).first();
 
     // Only award reputation when transitioning to upvote (not on repeated upvotes)
     const wasUpvote = priorVote?.vote_type === 'up';
@@ -2281,14 +2301,23 @@ router.post('/api/vote', async (request, env, ctx) => {
     }
     // Verify target exists
     const targetTable = targetType === 'problem' ? 'problems' : 'solutions';
-    const target = await env.AIHANGOUT_DB.prepare(`SELECT id FROM ${targetTable} WHERE id = ?`).bind(targetId).first();
+    const target = await env.AIHANGOUT_DB.prepare(`SELECT id, user_id FROM ${targetTable} WHERE id = ?`).bind(targetId).first();
     if (!target) {
       return new Response(JSON.stringify({ success: false, error: 'Target not found' }), {
         status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
+    if (target.user_id === user.id) {
+      return new Response(JSON.stringify({ success: false, error: 'You cannot vote on your own content' }), {
+        status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
 
-    // Remove existing vote
+    const priorVote = await env.AIHANGOUT_DB
+      .prepare('SELECT vote_type FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
+      .bind(user.id, targetType, targetId).first();
+
+    // Replace the existing vote atomically from the caller's perspective.
     await env.AIHANGOUT_DB
       .prepare('DELETE FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
       .bind(user.id, targetType, targetId)
@@ -2313,24 +2342,26 @@ router.post('/api/vote', async (request, env, ctx) => {
       .run();
 
     // Notify content owner about vote (non-blocking)
-    const ownerTable = targetType === 'problem' ? 'problems' : 'solutions';
-    const ownerRow = await env.AIHANGOUT_DB
-      .prepare(`SELECT user_id FROM ${ownerTable} WHERE id = ?`)
-      .bind(targetId).first();
-    if (ownerRow && voteType === 'up') {
+    const wasUpvote = priorVote?.vote_type === 'up';
+    if (voteType === 'up' && !wasUpvote) {
       // Award +1 reputation to content owner for receiving an upvote
       await env.AIHANGOUT_DB
         .prepare('UPDATE users SET reputation = reputation + 1 WHERE id = ?')
-        .bind(ownerRow.user_id)
+        .bind(target.user_id)
         .run();
       ctx.waitUntil(createNotification(env, {
-        userId: ownerRow.user_id,
+        userId: target.user_id,
         actorId: user.id,
         type: 'vote_on_content',
         targetType,
         targetId: parseInt(targetId),
         message: `${user.username} upvoted your ${targetType}`
       }));
+    } else if (voteType === 'down' && wasUpvote) {
+      await env.AIHANGOUT_DB
+        .prepare('UPDATE users SET reputation = MAX(0, reputation - 1) WHERE id = ?')
+        .bind(target.user_id)
+        .run();
     }
 
     // Log vote analytics (non-blocking)
@@ -2346,7 +2377,8 @@ router.post('/api/vote', async (request, env, ctx) => {
 
     return new Response(JSON.stringify({
       success: true,
-      upvotes: voteCount.count
+      upvotes: voteCount.count,
+      currentVote: voteType
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -4139,6 +4171,8 @@ async function getAllRegisteredAgents(env) {
     const list = await env.AIHANGOUT_KV.list({ prefix: 'ai_agent_' });
 
     for (const key of list.keys) {
+      // Token indexes point at the same registrations and must not be counted as agents.
+      if (key.name.startsWith('ai_agent_token_')) continue;
       const agentData = await env.AIHANGOUT_KV.get(key.name);
       if (agentData) {
         agents.push(JSON.parse(agentData));
@@ -7465,53 +7499,65 @@ router.get('/api/search/comprehensive', async (request, env) => {
       }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     }
 
-    // Multi-dimensional search across problems and solutions
-    const searchResults = await performComprehensiveSearch(env, {
-      query: query.trim(),
-      category,
-      difficulty,
-      include_solutions,
-      limit,
-      offset
-    });
+    const term = `%${query.trim().toLowerCase()}%`;
+    const filters = [
+      'p.is_public = 1',
+      "(p.status IS NULL OR p.status NOT IN ('deleted', 'rejected'))",
+      '(LOWER(p.title) LIKE ? OR LOWER(p.description) LIKE ? OR LOWER(COALESCE(p.category, \'\')) LIKE ?)'
+    ];
+    const binds = [term, term, term];
+    if (category) {
+      filters.push('LOWER(p.category) = ?');
+      binds.push(category.toLowerCase());
+    }
+    if (difficulty) {
+      filters.push('LOWER(COALESCE(p.difficulty, \'\')) = ?');
+      binds.push(difficulty.toLowerCase());
+    }
+    const where = filters.join(' AND ');
+    const countRow = await env.AIHANGOUT_DB.prepare(
+      `SELECT COUNT(*) AS total FROM problems p WHERE ${where}`
+    ).bind(...binds).first();
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT p.id, p.title, p.description, p.category, p.difficulty, p.status,
+             p.upvotes, p.created_at, u.username,
+             (SELECT COUNT(*) FROM solutions s WHERE s.problem_id = p.id) AS solution_count
+      FROM problems p
+      JOIN users u ON u.id = p.user_id
+      WHERE ${where}
+      ORDER BY
+        CASE WHEN LOWER(p.title) LIKE ? THEN 0 ELSE 1 END,
+        p.upvotes DESC, p.created_at DESC
+      LIMIT ? OFFSET ?
+    `).bind(...binds, term, limit, Math.max(0, offset)).all();
 
-    // Enhance search results with AI-powered relevance scoring
-    const scoredResults = await enhanceSearchWithAIScoring(env, searchResults, query);
+    let solutionResults = [];
+    if (include_solutions) {
+      const solutionRows = await env.AIHANGOUT_DB.prepare(`
+        SELECT s.id, s.problem_id, s.solution_text, s.upvotes, s.created_at, u.username
+        FROM solutions s
+        JOIN users u ON u.id = s.user_id
+        JOIN problems p ON p.id = s.problem_id
+        WHERE p.is_public = 1 AND LOWER(s.solution_text) LIKE ?
+        ORDER BY s.upvotes DESC, s.created_at DESC
+        LIMIT ?
+      `).bind(term, limit).all();
+      solutionResults = (solutionRows.results || []).map(row => ({ ...row, content_type: 'solution' }));
+    }
 
-    // Generate search insights and suggestions
-    const searchInsights = await generateSearchInsights(env, query, searchResults);
-
-    // Feed search analytics to flywheel
-    await notifyAIArmy(env, {
-      type: 'comprehensive_search_performed',
-      query,
-      results_count: searchResults.results.length,
-      search_insights: searchInsights,
-      user_intent_analysis: searchInsights.intent_analysis,
-      knowledge_gaps_identified: searchInsights.knowledge_gaps
-    });
+    const problemResults = (rows.results || []).map(row => ({ ...row, content_type: 'problem' }));
+    const results = [...problemResults, ...solutionResults];
 
     return new Response(JSON.stringify({
       success: true,
       search_query: query,
-      total_results: searchResults.total_count,
-      results: scoredResults.results,
-      search_insights: {
-        intent_analysis: searchInsights.intent_analysis,
-        related_topics: searchInsights.related_topics,
-        knowledge_gaps: searchInsights.knowledge_gaps,
-        suggested_queries: searchInsights.query_suggestions
-      },
+      total_results: Number(countRow?.total || 0) + solutionResults.length,
+      results,
+      scoring_method: 'database_text_match',
       search_analytics: {
-        relevance_scores: scoredResults.relevance_distribution,
-        category_breakdown: searchResults.category_breakdown,
-        difficulty_distribution: searchResults.difficulty_distribution,
-        content_types: searchResults.content_types
-      },
-      recommendations: {
-        top_matches: scoredResults.top_matches,
-        related_searches: searchInsights.related_searches,
-        expert_content: scoredResults.expert_flagged_content
+        returned: results.length,
+        problem_results: problemResults.length,
+        solution_results: solutionResults.length
       }
     }), {
       headers: { 'Content-Type': 'application/json' }
@@ -12255,58 +12301,15 @@ router.get('/api/intelligence/trends', async (request, env) => {
 
 // POST /api/intelligence/harvest - Trigger intelligence harvesting
 router.post('/api/intelligence/harvest', async (request, env) => {
-  try {
-    const body = await request.json();
-    const { company, force_refresh } = body;
-
-    // This would typically trigger background jobs
-    // For now, we'll simulate a harvesting operation
-    const harvestStart = new Date();
-
-    // Mock harvesting response - in production this would trigger actual scrapers
-    const harvestResponse = {
-      success: true,
-      harvest_id: `harvest_${Date.now()}`,
-      company: company || 'all',
-      started_at: harvestStart.toISOString(),
-      status: 'initiated',
-      estimated_completion: new Date(harvestStart.getTime() + 300000).toISOString(), // 5 minutes
-      message: company
-        ? `Harvesting intelligence for ${company}...`
-        : 'Harvesting intelligence for all companies...'
-    };
-
-    // Log harvest request
-    try {
-      await env.AIHANGOUT_DB.prepare(`
-        INSERT INTO ai_intelligence_harvest_log (
-          harvest_id, company, status, started_at, force_refresh
-        ) VALUES (?, ?, ?, ?, ?)
-      `).bind(
-        harvestResponse.harvest_id,
-        company || 'all',
-        'initiated',
-        harvestStart.toISOString(),
-        force_refresh ? 1 : 0
-      ).run();
-    } catch (logError) {
-      // Log error but don't fail the harvest request
-      console.error('Failed to log harvest request:', logError);
-    }
-
-    return new Response(JSON.stringify(harvestResponse), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-
-  } catch (error) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message
-    }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+  const user = await authenticate(request, env);
+  if (!user || !user.is_admin) {
+    return jsonResponse({ success: false, error: 'Admin authentication required' }, { status: 403 });
   }
+  return jsonResponse({
+    success: false,
+    error: 'Intelligence harvesting is not connected to a production job runner',
+    capability_status: 'not_implemented'
+  }, { status: 501 });
 });
 
 // ========================
@@ -14865,39 +14868,29 @@ router.post('/api/pathbooks/lookup', async (request, env) => {
     const fingerprint = body.error_fingerprint || await fingerprintText(errorText);
     const limit = clampNumber(body.limit, 1, 20, 5);
 
-    const binds = [fingerprint];
-    let sql = `
-      SELECT *, 1.0 AS match_score FROM pathbooks
-      WHERE error_fingerprint = ? AND status = 'active' AND trust_tier NOT IN ('deprecated','dangerous')
-    `;
-    if (runtime) {
-      sql += ' AND (runtime = ? OR runtime IS NULL)';
-      binds.push(runtime);
-    }
-    if (packageName) {
-      sql += ' AND (package_name = ? OR package_name IS NULL)';
-      binds.push(packageName);
-    }
-    sql += ' ORDER BY confidence DESC, times_succeeded DESC LIMIT ?';
-    binds.push(limit);
-
-    let rows = await env.AIHANGOUT_DB.prepare(sql).bind(...binds).all();
-    if (!rows.results || rows.results.length === 0) {
-      const like = `%${String(errorText || '').slice(0, 120)}%`;
-      rows = await env.AIHANGOUT_DB.prepare(`
-        SELECT *, 0.55 AS match_score FROM pathbooks
-        WHERE status = 'active'
-          AND trust_tier NOT IN ('deprecated','dangerous')
-          AND (? = '' OR error_signature LIKE ? OR title LIKE ? OR summary LIKE ?)
-        ORDER BY confidence DESC, times_succeeded DESC
-        LIMIT ?
-      `).bind(errorText ? 'x' : '', like, like, like, limit).all();
-    }
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT * FROM pathbooks
+      WHERE status = 'active' AND trust_tier NOT IN ('deprecated','dangerous')
+      ORDER BY confidence DESC, times_succeeded DESC
+      LIMIT 100
+    `).all();
+    const queryTokens = new Set(
+      `${errorText} ${runtime} ${packageName}`.toLowerCase().split(/[^a-z0-9_.-]+/).filter(t => t.length > 2)
+    );
+    const ranked = (rows.results || []).map(row => {
+      if (fingerprint && row.error_fingerprint === fingerprint) return { ...row, match_score: 1 };
+      const text = `${row.error_signature || ''} ${row.title || ''} ${row.summary || ''} ${row.runtime || ''} ${row.package_name || ''}`.toLowerCase();
+      let matches = 0;
+      for (const token of queryTokens) if (text.includes(token)) matches++;
+      return { ...row, match_score: queryTokens.size ? matches / queryTokens.size : 0 };
+    }).filter(row => row.match_score > 0 || queryTokens.size === 0)
+      .sort((a, b) => b.match_score - a.match_score || Number(b.confidence || 0) - Number(a.confidence || 0))
+      .slice(0, limit);
 
     return jsonResponse({
       success: true,
       query: { error_fingerprint: fingerprint, runtime, package_name: packageName },
-      pathbooks: (rows.results || []).map(publicPathbook)
+      pathbooks: ranked.map(publicPathbook)
     });
   } catch (error) {
     console.error('[Pathbooks/lookup] Error:', error);
@@ -15211,7 +15204,41 @@ export default {
 
     const startTime = Date.now();
     const url = new URL(request.url);
-    const response = await router.handle(request, env, ctx);
+    const explicitlyDegradedCapabilities = [
+      /^\/api\/ai-collaboration\/session\//,
+      /^\/api\/dashboard\/ai-activity$/,
+      /^\/api\/identity\/analytics\//,
+      /^\/api\/innovation\/opportunities$/,
+      /^\/api\/knowledge-graph\/related\//,
+      /^\/api\/matching\/analytics$/,
+      /^\/api\/matching\/recommendations\//,
+      /^\/api\/personas\/diversity$/,
+      /^\/api\/predictions\/innovation-detection$/,
+      /^\/api\/recommendations\/related-problems\//,
+      /^\/api\/solutions\/compare\//
+    ];
+    if (explicitlyDegradedCapabilities.some(pattern => pattern.test(url.pathname))) {
+      return jsonResponse({
+        success: false,
+        error: 'This capability is undergoing production maintenance',
+        capability_status: 'degraded'
+      }, { status: 503, headers: { 'Retry-After': '300' } });
+    }
+    let response = await router.handle(request, env, ctx);
+
+    // Never expose internal exception details from optional/experimental APIs.
+    // A 503 truthfully signals a degraded capability while keeping the core app usable.
+    if (url.pathname.startsWith('/api/') && response?.status >= 500) {
+      console.error(`[API] ${request.method} ${url.pathname} returned ${response.status}`);
+      response = jsonResponse({
+        success: false,
+        error: 'This capability is temporarily unavailable',
+        capability_status: 'degraded'
+      }, {
+        status: 503,
+        headers: { 'Retry-After': '300' }
+      });
+    }
 
     // Apply dynamic CORS to support both apex and www origins
     const origin = request.headers.get('Origin') || '';

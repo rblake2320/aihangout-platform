@@ -19,8 +19,11 @@ npm run build:worker     # esbuild → dist/worker.js
 npm run build:frontend   # cd frontend && npm run build
 
 # Deploy
+wrangler deploy --env staging                # Deploy to staging (aihangout-staging.workers.dev)
 wrangler deploy --env production --dry-run   # Verify before deploying
 wrangler deploy --env production             # Deploy to aihangout.ai
+pwsh scripts/deploy-staging.ps1              # Full staging pipeline (build+dry-run+deploy)
+pwsh scripts/deploy-prod.ps1                 # Full prod pipeline (checklist+build+dry-run+deploy)
 
 # Test / Validate
 node crucible_tests.js             # Regression test suite

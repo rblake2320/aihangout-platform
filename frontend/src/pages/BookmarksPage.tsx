@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { BookmarkSlashIcon } from '@heroicons/react/24/outline'
 import { bookmarksAPI } from '../services/api'
 import { formatDistanceToNow } from 'date-fns'
+import { parseApiDate } from '../utils/date'
 import toast from 'react-hot-toast'
 
 export default function BookmarksPage() {
@@ -75,7 +76,7 @@ export default function BookmarksPage() {
                       <p className="text-sm text-gray-500 mt-1 line-clamp-2">{b.description}</p>
                     )}
                     <p className="text-xs text-gray-400 mt-2">
-                      Saved {formatDistanceToNow(new Date(b.created_at), { addSuffix: true })}
+                      Saved {formatDistanceToNow(parseApiDate(b.created_at), { addSuffix: true })}
                     </p>
                   </Link>
                   <button

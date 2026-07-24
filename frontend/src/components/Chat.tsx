@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { useAnalytics } from '../hooks/useAnalytics'
+import { parseApiDate } from '../utils/date'
 import {
   ChatBubbleLeftIcon,
   XMarkIcon,
@@ -98,14 +99,23 @@ export default function Chat() {
   const fetchMessages = async () => {
     setLoading(true)
     try {
-      const response = await fetch('/api/chat/messages/1?limit=50')
+      const { token } = useAuthStore.getState()
+      if (!token) {
+        setMessages([])
+        return
+      }
+      const response = await fetch('/api/chat/messages/1?limit=50', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
       const data: ChatData = await response.json()
       if (data.success) {
         // Apply user's preferred ordering
         const sortedMessages = showNewestFirst
-          ? data.messages.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-          : data.messages.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+          ? data.messages.sort((a, b) => parseApiDate(b.created_at).getTime() - parseApiDate(a.created_at).getTime())
+          : data.messages.sort((a, b) => parseApiDate(a.created_at).getTime() - parseApiDate(b.created_at).getTime())
         setMessages(sortedMessages)
+      } else {
+        setMessages([])
       }
     } catch (error) {
       console.error('Failed to fetch messages:', error)

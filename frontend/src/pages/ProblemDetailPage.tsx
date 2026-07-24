@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { formatDistanceToNow } from 'date-fns'
+import { parseApiDate } from '../utils/date'
 import ReactMarkdown from 'react-markdown'
 
 // Only allow safe URL schemes in markdown links/images
@@ -202,7 +203,7 @@ export default function ProblemDetailPage() {
                 </div>
                 <div className="flex items-center space-x-1">
                   <CalendarIcon className="w-4 h-4" />
-                  <span>{formatDistanceToNow(new Date(problem.created_at), { addSuffix: true })}</span>
+                  <span>{formatDistanceToNow(parseApiDate(problem.created_at), { addSuffix: true })}</span>
                 </div>
                 <ReportButton contentType="problem" contentId={parseInt(problem.id)} />
               </div>
@@ -298,7 +299,7 @@ export default function ProblemDetailPage() {
                       </div>
                       <div className="flex items-center space-x-1">
                         <CalendarIcon className="w-4 h-4" />
-                        <span>{formatDistanceToNow(new Date(solution.created_at), { addSuffix: true })}</span>
+                        <span>{formatDistanceToNow(parseApiDate(solution.created_at), { addSuffix: true })}</span>
                       </div>
                     </div>
                   </div>

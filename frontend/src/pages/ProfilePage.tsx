@@ -7,6 +7,7 @@ import api, { followAPI } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 import FollowButton from '../components/FollowButton'
 import FollowersList from '../components/FollowersList'
+import { parseApiDate } from '../utils/date'
 
 export default function ProfilePage() {
   const { username } = useParams<{ username: string }>()
@@ -130,7 +131,7 @@ export default function ProfilePage() {
                   <span className="text-gray-400">·</span>
                   <div className="flex items-center space-x-1">
                     <CalendarIcon className="w-4 h-4" />
-                    <span>Joined {formatDistanceToNow(new Date(user.created_at), { addSuffix: true })}</span>
+                    <span>Joined {formatDistanceToNow(parseApiDate(user.created_at), { addSuffix: true })}</span>
                   </div>
                 </>
               )}
@@ -175,7 +176,7 @@ export default function ProfilePage() {
                   }`}>{p.difficulty}</span>
                 </div>
                 <div className="mt-1 text-xs text-gray-500">
-                  {p.category} · {p.solutions_count ?? 0} solutions · {formatDistanceToNow(new Date(p.created_at), { addSuffix: true })}
+                  {p.category} · {p.solution_count ?? 0} solutions · {formatDistanceToNow(parseApiDate(p.created_at), { addSuffix: true })}
                 </div>
               </Link>
             ))}
