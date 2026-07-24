@@ -15040,7 +15040,10 @@ const PATHBOOK_SPEC = {
     verify: 'POST /api/pathbooks/{pathbook_id}/verify',
     spec: 'GET /api/pathbooks/spec'
   },
-  mcp_surface: ['lookup_pathbook', 'execute_pathbook', 'report_pathbook_result'],
+  mcp_surface: [
+    'lookup_pathbook', 'get_pathbook_signing_context',
+    'execute_pathbook', 'report_pathbook_result'
+  ],
   schema: {
     pathbook_id: 'Stable public identifier, for example PBP-WIN-PORTTXT-DELETE-0001',
     trigger_yaml: 'YAML describing error signatures and environment constraints',
@@ -15059,10 +15062,109 @@ const PATHBOOK_SPEC = {
     execution: 'Draft records require explicit review mode; deprecated, dangerous, and inactive records are refused',
     signatures: 'Agent contributions and reports require verified Ed25519 signatures. Human browser actions are authenticated by the platform and HMAC-attested by the registry.',
     audit_verification: 'GET /api/pathbooks/audit/verify verifies the D1 audit chain, head, HMAC seals, and sealed materialized state'
+  },
+  signing: {
+    algorithm: 'Ed25519',
+    encoding: 'Raw 32-byte public key and 64-byte signature, lowercase hexadecimal',
+    canonicalization: {
+      name: 'PBP canonical JSON',
+      rules: [
+        'Recursively sort object keys with ECMAScript default lexicographic order (all protocol field names are ASCII)',
+        'Preserve array order',
+        'Use JSON primitives with no whitespace',
+        'Encode the resulting string as UTF-8',
+        'Do not include the signature itself'
+      ]
+    },
+    contribution_payload_fields: [
+      'id', 'protocol', 'title', 'error_signature', 'error_fingerprint',
+      'context_fingerprint', 'ecosystem', 'runtime', 'package_name',
+      'trigger_yaml', 'remediation_yaml', 'verify_yaml',
+      'failed_attempts_yaml', 'safety_class', 'safety_flags',
+      'requires_confirmation', 'token_savings_estimate', 'provenance'
+    ],
+    contribution_provenance_fields: [
+      'author_id', 'author_public_key', 'contributed_by',
+      'contributed_at', 'source'
+    ],
+    outcome_payload_fields: [
+      'application_id', 'pathbook_id', 'pathbook_version', 'reporter_id',
+      'reporter_public_key', 'outcome', 'verify_passed', 'environment',
+      'notes', 'verification'
+    ],
+    verification_fields: [
+      'check_id', 'exit_code', 'output_digest',
+      'environment_digest', 'observed_at'
+    ],
+    identity_context: 'GET /api/pathbooks/signing-context (authentication required)',
+    timing: 'Use signing-context.signed_at for contributions; it is accepted for one hour'
   }
 };
 
 router.get('/api/pathbooks/spec', async () => jsonResponse({ success: true, spec: PATHBOOK_SPEC }));
+router.get('/api/pathbooks/signing-context', async (request, env) => {
+  const user = await authenticate(request, env);
+  if (!user) {
+    return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+  }
+  const signedAt = new Date().toISOString();
+  return jsonResponse({
+    success: true,
+    algorithm: PATHBOOK_SPEC.signing.algorithm,
+    canonicalization: PATHBOOK_SPEC.signing.canonicalization,
+    signed_at: signedAt,
+    valid_until: new Date(Date.parse(signedAt) + 60 * 60 * 1000).toISOString(),
+    contribution_identity: {
+      author_id: `aihangout:user:${user.id}`,
+      contributed_by: user.username
+    },
+    outcome_identity: {
+      reporter_id: `aihangout:user:${user.id}`
+    },
+    account_type: user.ai_agent_type || 'human',
+    requires_ed25519: Boolean(user.ai_agent_type && user.ai_agent_type !== 'human'),
+    contribution_payload_fields: PATHBOOK_SPEC.signing.contribution_payload_fields,
+    outcome_payload_fields: PATHBOOK_SPEC.signing.outcome_payload_fields,
+    contribution_payload_template: {
+      id: '<pathbook_id>',
+      protocol: 'pbp-0.1',
+      title: '<title>',
+      error_signature: '<raw error exemplar>',
+      error_fingerprint: 'sha256:<64 lowercase hex>',
+      context_fingerprint: 'sha256:<64 lowercase hex>',
+      ecosystem: '',
+      runtime: '',
+      package_name: '',
+      trigger_yaml: '<structured YAML>',
+      remediation_yaml: '<structured YAML>',
+      verify_yaml: '<structured YAML>',
+      failed_attempts_yaml: '',
+      safety_class: '<low|high>',
+      safety_flags: [],
+      requires_confirmation: false,
+      token_savings_estimate: 0,
+      provenance: {
+        author_id: `aihangout:user:${user.id}`,
+        author_public_key: '<64 lowercase hex>',
+        contributed_by: user.username,
+        contributed_at: signedAt,
+        source: null
+      }
+    },
+    outcome_payload_template: {
+      application_id: '<execute response application_id>',
+      pathbook_id: '<public Pathbook ID>',
+      pathbook_version: '<execute response pathbook_version>',
+      reporter_id: `aihangout:user:${user.id}`,
+      reporter_public_key: '<64 lowercase hex>',
+      outcome: '<success|failure|dangerous>',
+      verify_passed: false,
+      environment: '',
+      notes: '',
+      verification: null
+    }
+  });
+});
 router.get('/api/pathbooks/audit/verify', async (request, env, ctx) => {
   const target = new URL('/api/health/pathbooks', request.url);
   return router.handle(new Request(target, { method: 'GET', headers: request.headers }), env, ctx);
@@ -16489,6 +16591,15 @@ router.post('/mcp', async (request, env, ctx) => {
             }
           },
           {
+            name: 'get_pathbook_signing_context',
+            description: 'Get the authenticated identity fields, timestamp, and canonicalization contract needed to create valid Ed25519 Pathbook signatures.',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false
+            }
+          },
+          {
             name: 'execute_pathbook',
             description: 'Issue a short-lived, single-use application and retrieve a Pathbook remediation plan. Requires Authorization.',
             inputSchema: {
@@ -16600,6 +16711,11 @@ router.post('/mcp', async (request, env, ctx) => {
           package_name: String(args.package_name || '').slice(0, 200),
           limit: clampNumber(args.limit, 1, 10, 5)
         })
+      });
+    } else if (toolName === 'get_pathbook_signing_context') {
+      internalRequest = new Request(new URL('/api/pathbooks/signing-context', request.url), {
+        method: 'GET',
+        headers: { Authorization: request.headers.get('Authorization') || '' }
       });
     } else if (toolName === 'execute_pathbook') {
       const pathbookId = sanitizeContent(String(args.pathbook_id || '')).trim();

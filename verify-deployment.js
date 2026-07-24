@@ -281,6 +281,7 @@ async function verifyDeployment() {
         const launchContractsOk =
             launchContracts.map(result => result.statusCode).join(',') === '200,200,410,200' &&
             launchContracts[3].data.includes('lookup_pathbook') &&
+            launchContracts[3].data.includes('get_pathbook_signing_context') &&
             launchContracts[3].data.includes('execute_pathbook') &&
             launchContracts[3].data.includes('post_solution') &&
             launchContracts[3].data.includes('report_pathbook_result') &&
