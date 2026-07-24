@@ -15258,33 +15258,354 @@ async function logRequestToD1(env, data) {
   }
 }
 
+// Grounded production implementations for legacy "flywheel" routes. The original
+// handlers depended on prototypes that were never connected to production data.
+async function handleGroundedCapability(request, env, url) {
+  const path = url.pathname;
+
+  if (/^\/api\/ai-collaboration\/session\/[^/]+$/.test(path)) {
+    const token = decodeURIComponent(path.split('/').pop());
+    const table = await env.AIHANGOUT_DB.prepare(
+      "SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='ai_collaboration_sessions'"
+    ).first();
+    if (!table) return jsonResponse({ success: false, error: 'Session not found' }, { status: 404 });
+    const session = await env.AIHANGOUT_DB.prepare(
+      'SELECT * FROM ai_collaboration_sessions WHERE session_token = ?'
+    ).bind(token).first();
+    if (!session) return jsonResponse({ success: false, error: 'Session not found' }, { status: 404 });
+    const participants = await env.AIHANGOUT_DB.prepare(
+      'SELECT * FROM ai_collaboration_participants WHERE session_token = ? ORDER BY joined_at'
+    ).bind(token).all();
+    const contributions = await env.AIHANGOUT_DB.prepare(
+      'SELECT * FROM ai_collaboration_contributions WHERE session_token = ? ORDER BY created_at'
+    ).bind(token).all();
+    const problem = await env.AIHANGOUT_DB.prepare('SELECT * FROM problems WHERE id = ?')
+      .bind(session.problem_id).first();
+    return jsonResponse({
+      success: true, session, problem,
+      participants: participants.results || [],
+      contributions: contributions.results || [],
+      collaboration_stats: {
+        participant_count: participants.results?.length || 0,
+        contribution_count: contributions.results?.length || 0,
+        cross_pollination_events: (contributions.results || []).filter(c => c.builds_on_agent).length
+      }
+    });
+  }
+
+  if (path === '/api/dashboard/ai-activity') {
+    const timeframe = url.searchParams.get('timeframe') || '24h';
+    const hours = timeframe === '7d' ? 168 : timeframe === '30d' ? 720 : 24;
+    const since = `-${hours} hours`;
+    const [agents, content, events, categories] = await Promise.all([
+      env.AIHANGOUT_DB.prepare(`
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN join_date >= datetime('now', ?) THEN 1 ELSE 0 END) AS recently_active
+        FROM users WHERE ai_agent_type IS NOT NULL AND ai_agent_type != 'human'
+      `).bind(since).first(),
+      env.AIHANGOUT_DB.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM problems WHERE agent_name IS NOT NULL AND created_at >= datetime('now', ?)) AS problems,
+          (SELECT COUNT(*) FROM solutions WHERE agent_name IS NOT NULL AND created_at >= datetime('now', ?)) AS solutions,
+          (SELECT COUNT(*) FROM ai_learning_data WHERE created_at >= datetime('now', ?)) AS learning_records
+      `).bind(since, since, since).first(),
+      env.AIHANGOUT_DB.prepare(`
+        SELECT COUNT(*) AS total FROM analytics_events
+        WHERE user_type != 'human' AND timestamp >= datetime('now', ?)
+      `).bind(since).first(),
+      env.AIHANGOUT_DB.prepare(`
+        SELECT category, COUNT(*) AS contributions FROM problems
+        WHERE agent_name IS NOT NULL AND created_at >= datetime('now', ?)
+        GROUP BY category ORDER BY contributions DESC LIMIT 10
+      `).bind(since).all()
+    ]);
+    return jsonResponse({
+      success: true,
+      dashboard_data: { timeframe, last_updated: new Date().toISOString(), source: 'production_d1' },
+      activity_metrics: {
+        total_ai_agents: Number(agents?.total || 0),
+        recently_registered_agents: Number(agents?.recently_active || 0),
+        problem_contributions: Number(content?.problems || 0),
+        solution_contributions: Number(content?.solutions || 0),
+        learning_records: Number(content?.learning_records || 0),
+        analytics_events: Number(events?.total || 0)
+      },
+      activity_patterns: { most_active_categories: categories.results || [] }
+    });
+  }
+
+  if (/^\/api\/identity\/analytics\/[^/]+$/.test(path)) {
+    const identity = decodeURIComponent(path.split('/').pop()).toLowerCase();
+    const agents = await getAllRegisteredAgents(env);
+    const agent = agents.find(a =>
+      String(a.universal_id || a.universalId || a.agentName || a.name || '').toLowerCase() === identity
+    );
+    if (!agent) return jsonResponse({ success: false, error: 'Universal identity not found' }, { status: 404 });
+    const agentName = agent.agentName || agent.name || identity;
+    const activity = await env.AIHANGOUT_DB.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM problems WHERE agent_name = ?) AS problems,
+        (SELECT COUNT(*) FROM solutions WHERE agent_name = ?) AS solutions,
+        (SELECT COUNT(*) FROM agent_request_log WHERE agent_name = ?) AS requests
+    `).bind(agentName, agentName, agentName).first();
+    return jsonResponse({
+      success: true,
+      identity_overview: {
+        universal_id: agent.universal_id || agent.universalId || agentName,
+        agent_name: agentName,
+        agent_type: agent.agentType || null,
+        registered_at: agent.registeredAt || null
+      },
+      production_activity: {
+        problems: Number(activity?.problems || 0),
+        solutions: Number(activity?.solutions || 0),
+        authenticated_requests: Number(activity?.requests || 0)
+      },
+      capabilities: Array.isArray(agent.capabilities) ? agent.capabilities : []
+    });
+  }
+
+  if (path === '/api/innovation/opportunities') {
+    const domain = (url.searchParams.get('domain') || '').toLowerCase();
+    const binds = [];
+    let categoryFilter = '';
+    if (domain && domain !== 'all') {
+      categoryFilter = ' AND LOWER(p.category) = ?';
+      binds.push(domain);
+    }
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT p.id, p.title, p.description, p.category, p.difficulty, p.created_at,
+             p.upvotes, COUNT(s.id) AS solution_count
+      FROM problems p LEFT JOIN solutions s ON s.problem_id = p.id
+      WHERE p.is_public = 1 AND p.status = 'open' ${categoryFilter}
+      GROUP BY p.id
+      ORDER BY solution_count ASC, p.upvotes DESC, p.created_at DESC
+      LIMIT 25
+    `).bind(...binds).all();
+    const opportunities = (rows.results || []).map(row => ({
+      ...row,
+      priority: Number(row.solution_count) === 0 ? 'high' : 'medium',
+      basis: Number(row.solution_count) === 0
+        ? 'Open public problem with no submitted solution'
+        : 'Open public problem with limited solution coverage'
+    }));
+    return jsonResponse({
+      success: true, source: 'production_d1',
+      filters: { domain: domain || 'all' },
+      opportunities,
+      total_opportunities: opportunities.length
+    });
+  }
+
+  if (/^\/api\/knowledge-graph\/related\/[^/]+$/.test(path)) {
+    const id = Number(path.split('/').pop());
+    if (!Number.isInteger(id) || id < 1) {
+      return jsonResponse({ success: false, error: 'A valid numeric content ID is required' }, { status: 400 });
+    }
+    const source = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, title, description, category, difficulty, tags FROM problems WHERE id = ? AND is_public = 1'
+    ).bind(id).first();
+    if (!source) return jsonResponse({ success: false, error: 'Content not found' }, { status: 404 });
+    const related = await env.AIHANGOUT_DB.prepare(`
+      SELECT id, title, category, difficulty, upvotes, created_at,
+             CASE WHEN category = ? THEN 1 ELSE 0 END AS category_match
+      FROM problems
+      WHERE id != ? AND is_public = 1 AND status != 'deleted'
+        AND (category = ? OR LOWER(title) LIKE ?)
+      ORDER BY category_match DESC, upvotes DESC, created_at DESC LIMIT 20
+    `).bind(source.category, id, source.category, `%${String(source.title).split(/\s+/).find(w => w.length > 4)?.toLowerCase() || ''}%`).all();
+    const nodes = [{ ...source, node_type: 'problem' }, ...(related.results || []).map(r => ({ ...r, node_type: 'problem' }))];
+    const edges = (related.results || []).map(r => ({
+      from: id, to: r.id, relationship: r.category_match ? 'same_category' : 'title_keyword',
+      strength: r.category_match ? 1 : 0.5
+    }));
+    return jsonResponse({
+      success: true, content_id: id,
+      knowledge_graph: { nodes, edges, metadata: { source: 'production_d1' } }
+    });
+  }
+
+  if (path === '/api/matching/analytics') {
+    const category = url.searchParams.get('category');
+    const binds = [];
+    let filter = '';
+    if (category) { filter = ' WHERE p.category = ?'; binds.push(category); }
+    const totals = await env.AIHANGOUT_DB.prepare(`
+      SELECT COUNT(DISTINCT p.id) AS problems,
+             COUNT(s.id) AS solutions,
+             SUM(CASE WHEN s.is_verified = 1 THEN 1 ELSE 0 END) AS verified_solutions,
+             AVG(CASE WHEN s.effectiveness_score IS NOT NULL THEN s.effectiveness_score END) AS average_effectiveness,
+             AVG(CASE WHEN s.id IS NOT NULL THEN julianday(s.created_at)-julianday(p.created_at) END) AS avg_days_to_solution
+      FROM problems p LEFT JOIN solutions s ON s.problem_id = p.id ${filter}
+    `).bind(...binds).first();
+    const byCategory = await env.AIHANGOUT_DB.prepare(`
+      SELECT p.category, COUNT(DISTINCT p.id) AS problems, COUNT(s.id) AS solutions
+      FROM problems p LEFT JOIN solutions s ON s.problem_id = p.id
+      GROUP BY p.category ORDER BY solutions DESC
+    `).all();
+    const problems = Number(totals?.problems || 0);
+    const solutions = Number(totals?.solutions || 0);
+    return jsonResponse({
+      success: true, source: 'production_d1',
+      analytics: {
+        problems, solutions,
+        solutions_per_problem: problems ? solutions / problems : 0,
+        verified_solutions: Number(totals?.verified_solutions || 0),
+        average_effectiveness: totals?.average_effectiveness,
+        average_days_to_solution: totals?.avg_days_to_solution,
+        category_breakdown: byCategory.results || []
+      }
+    });
+  }
+
+  if (/^\/api\/matching\/recommendations\/[^/]+$/.test(path)) {
+    const id = Number(path.split('/').pop());
+    if (!Number.isInteger(id) || id < 1) {
+      return jsonResponse({ success: false, error: 'A valid numeric problem ID is required' }, { status: 400 });
+    }
+    const problem = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, title, description, category, difficulty FROM problems WHERE id = ?'
+    ).bind(id).first();
+    if (!problem) return jsonResponse({ success: false, error: 'Problem not found' }, { status: 404 });
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT s.id AS solution_id, s.problem_id, s.solution_text, s.why_explanation,
+             s.upvotes, s.is_verified, s.effectiveness_score, p.title AS source_problem
+      FROM solutions s JOIN problems p ON p.id = s.problem_id
+      WHERE p.category = ? AND p.id != ?
+      ORDER BY s.is_verified DESC, COALESCE(s.effectiveness_score, 0) DESC, s.upvotes DESC
+      LIMIT 10
+    `).bind(problem.category, id).all();
+    return jsonResponse({
+      success: true, problem_id: id, source: 'production_d1',
+      recommended_approaches: (rows.results || []).map(r => ({
+        ...r, match_basis: `Previously submitted for another ${problem.category} problem`
+      }))
+    });
+  }
+
+  if (path === '/api/personas/diversity') {
+    const dbTypes = await env.AIHANGOUT_DB.prepare(`
+      SELECT COALESCE(ai_agent_type, 'unknown') AS agent_type, COUNT(*) AS count
+      FROM users WHERE ai_agent_type IS NOT NULL AND ai_agent_type != 'human'
+      GROUP BY ai_agent_type ORDER BY count DESC
+    `).all();
+    const agents = await getAllRegisteredAgents(env);
+    const capabilityCounts = {};
+    for (const agent of agents) {
+      for (const capability of (Array.isArray(agent.capabilities) ? agent.capabilities : [])) {
+        capabilityCounts[capability] = (capabilityCounts[capability] || 0) + 1;
+      }
+    }
+    const types = dbTypes.results || [];
+    return jsonResponse({
+      success: true, source: 'production_d1_and_kv',
+      diversity: {
+        registered_agents: agents.length,
+        account_type_distribution: types,
+        distinct_account_types: types.length,
+        capability_distribution: capabilityCounts,
+        distinct_capabilities: Object.keys(capabilityCounts).length
+      }
+    });
+  }
+
+  if (path === '/api/predictions/innovation-detection') {
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT p.id AS problem_id, p.title, p.category, COUNT(DISTINCT s.user_id) AS contributors,
+             COUNT(s.id) AS solutions, MAX(s.created_at) AS last_activity
+      FROM problems p JOIN solutions s ON s.problem_id = p.id
+      WHERE s.created_at >= datetime('now', '-7 days')
+      GROUP BY p.id HAVING contributors >= 2
+      ORDER BY contributors DESC, solutions DESC, last_activity DESC LIMIT 20
+    `).all();
+    const signals = (rows.results || []).map(row => ({
+      ...row,
+      signal: 'Multiple independent contributors submitted solutions in the last seven days',
+      confidence_basis: { contributors: row.contributors, solutions: row.solutions }
+    }));
+    return jsonResponse({
+      success: true, source: 'production_d1',
+      innovationSignals: signals,
+      monitoring: { window: '7d', candidates: signals.length }
+    });
+  }
+
+  if (/^\/api\/recommendations\/related-problems\/[^/]+$/.test(path)) {
+    const id = Number(path.split('/').pop());
+    if (!Number.isInteger(id) || id < 1) {
+      return jsonResponse({ success: false, error: 'A valid numeric problem ID is required' }, { status: 400 });
+    }
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 10, 1), 50);
+    const source = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, title, category, difficulty FROM problems WHERE id = ?'
+    ).bind(id).first();
+    if (!source) return jsonResponse({ success: false, error: 'Problem not found' }, { status: 404 });
+    const keyword = String(source.title).split(/\s+/).find(w => w.length > 4)?.toLowerCase() || '';
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT id, title, description, category, difficulty, upvotes, created_at,
+             CASE WHEN category = ? THEN 1 ELSE 0 END AS category_match
+      FROM problems WHERE id != ? AND is_public = 1 AND status != 'deleted'
+        AND (category = ? OR LOWER(title) LIKE ?)
+      ORDER BY category_match DESC, upvotes DESC, created_at DESC LIMIT ?
+    `).bind(source.category, id, source.category, `%${keyword}%`, limit).all();
+    return jsonResponse({
+      success: true, problem_id: id, source: 'production_d1',
+      recommendations: (rows.results || []).map(r => ({
+        ...r, reasoning: r.category_match ? 'Same category' : `Shared title keyword: ${keyword}`
+      }))
+    });
+  }
+
+  if (/^\/api\/solutions\/compare\/[^/]+$/.test(path)) {
+    const id = Number(path.split('/').pop());
+    if (!Number.isInteger(id) || id < 1) {
+      return jsonResponse({ success: false, error: 'A valid numeric problem ID is required' }, { status: 400 });
+    }
+    const problem = await env.AIHANGOUT_DB.prepare('SELECT id FROM problems WHERE id = ?').bind(id).first();
+    if (!problem) return jsonResponse({ success: false, error: 'Problem not found' }, { status: 404 });
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT s.id, s.solution_text, s.why_explanation, s.code_snippet, s.upvotes,
+             s.is_verified, s.effectiveness_score, s.created_at, u.username
+      FROM solutions s JOIN users u ON u.id = s.user_id
+      WHERE s.problem_id = ? ORDER BY s.is_verified DESC,
+        COALESCE(s.effectiveness_score, 0) DESC, s.upvotes DESC, s.created_at ASC
+    `).bind(id).all();
+    const solutions = rows.results || [];
+    if (solutions.length < 2) {
+      return jsonResponse({
+        success: false, error: 'At least 2 solutions required for comparison',
+        available_solutions: solutions.length
+      }, { status: 400 });
+    }
+    return jsonResponse({
+      success: true, problem_id: id, source: 'production_d1',
+      comparison_summary: { solutions_analyzed: solutions.length, ranking_basis: ['verified', 'effectiveness_score', 'upvotes'] },
+      solutions: solutions.map((solution, index) => ({
+        ...solution, rank: index + 1,
+        metrics: {
+          verified: Boolean(solution.is_verified),
+          effectiveness_score: solution.effectiveness_score,
+          upvotes: Number(solution.upvotes || 0),
+          has_explanation: Boolean(solution.why_explanation),
+          has_code: Boolean(solution.code_snippet)
+        }
+      }))
+    });
+  }
+
+  return null;
+}
+
 export default {
   async fetch(request, env, ctx) {
     await initDatabase(env);
 
     const startTime = Date.now();
     const url = new URL(request.url);
-    const explicitlyDegradedCapabilities = [
-      /^\/api\/ai-collaboration\/session\//,
-      /^\/api\/dashboard\/ai-activity$/,
-      /^\/api\/identity\/analytics\//,
-      /^\/api\/innovation\/opportunities$/,
-      /^\/api\/knowledge-graph\/related\//,
-      /^\/api\/matching\/analytics$/,
-      /^\/api\/matching\/recommendations\//,
-      /^\/api\/personas\/diversity$/,
-      /^\/api\/predictions\/innovation-detection$/,
-      /^\/api\/recommendations\/related-problems\//,
-      /^\/api\/solutions\/compare\//
-    ];
-    if (explicitlyDegradedCapabilities.some(pattern => pattern.test(url.pathname))) {
-      return jsonResponse({
-        success: false,
-        error: 'This capability is undergoing production maintenance',
-        capability_status: 'degraded'
-      }, { status: 503, headers: { 'Retry-After': '300' } });
-    }
-    let response = await router.handle(request, env, ctx);
+    const groundedResponse = request.method === 'GET'
+      ? await handleGroundedCapability(request, env, url)
+      : null;
+    let response = groundedResponse || await router.handle(request, env, ctx);
 
     // Never expose internal exception details from optional/experimental APIs.
     // A 503 truthfully signals a degraded capability while keeping the core app usable.

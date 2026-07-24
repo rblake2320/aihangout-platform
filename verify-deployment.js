@@ -20,6 +20,7 @@ const REQUIRED_CHECKS = [
     'Frontend contains sorting fix',
     'Deployed JS matches local dist build',
     'Auth crypto healthy (/api/health/auth)',
+    'Grounded capability APIs return production-safe responses',
     'PBKDF2 iterations within Workers cap (local src)'
 ];
 
@@ -31,6 +32,19 @@ async function makeHttpRequest(url) {
             res.on('end', () => resolve({ statusCode: res.statusCode, data }));
         }).on('error', reject);
     });
+}
+
+async function makeExpectedHttpRequest(url, expectedStatus, attempts = 4) {
+    let response;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        response = await makeHttpRequest(url);
+        if (response.statusCode === expectedStatus) return response;
+        if (attempt < attempts) {
+            // Cloudflare route propagation can briefly serve the prior Worker version.
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+    }
+    return response;
 }
 
 async function verifyDeployment() {
@@ -123,6 +137,37 @@ async function verifyDeployment() {
             passedChecks++;
         } else {
             console.log(`❌ Auth crypto: DEGRADED — ${authHealth.data}`);
+        }
+
+        // Legacy flywheel routes once called nonexistent helpers and returned raw 500s.
+        // Verify their grounded replacements, including correct not-found semantics.
+        const capabilityChecks = [
+            ['/api/dashboard/ai-activity', 200],
+            ['/api/innovation/opportunities', 200],
+            ['/api/matching/analytics', 200],
+            ['/api/personas/diversity', 200],
+            ['/api/predictions/innovation-detection', 200],
+            ['/api/knowledge-graph/related/268', 200],
+            ['/api/matching/recommendations/268', 200],
+            ['/api/recommendations/related-problems/268', 200],
+            ['/api/solutions/compare/268', 200],
+            ['/api/knowledge-graph/related/not-a-number', 400],
+            ['/api/ai-collaboration/session/verification-does-not-exist', 404],
+            ['/api/identity/analytics/verification-does-not-exist', 404]
+        ];
+        const capabilityResults = await Promise.all(capabilityChecks.map(async ([route, expected]) => {
+            const result = await makeExpectedHttpRequest(`${PRODUCTION_URL}${route}`, expected);
+            return { route, expected, actual: result.statusCode };
+        }));
+        const badCapabilities = capabilityResults.filter(result => result.actual !== result.expected);
+        if (badCapabilities.length === 0) {
+            console.log(`✅ Grounded capability APIs: ${capabilityResults.length}/${capabilityResults.length} expected responses`);
+            passedChecks++;
+        } else {
+            console.log('❌ Grounded capability API failures:');
+            badCapabilities.forEach(result =>
+                console.log(`   ${result.route}: expected ${result.expected}, got ${result.actual}`)
+            );
         }
 
         // Local-source regression guard: Cloudflare Workers caps PBKDF2 at 100000
