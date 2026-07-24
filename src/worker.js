@@ -807,9 +807,38 @@ function isLegacyPasswordHash(storedHash) {
   return typeof storedHash === 'string' && !storedHash.startsWith('pbkdf2$');
 }
 
+// Constant-time comparison of two equal-purpose hex strings.
+function constantTimeHexEqual(aHex, bHex) {
+  if (typeof aHex !== 'string' || typeof bHex !== 'string' || aHex.length !== bHex.length) return false;
+  let diff = 0;
+  for (let i = 0; i < aHex.length; i++) diff |= aHex.charCodeAt(i) ^ bHex.charCodeAt(i);
+  return diff === 0;
+}
+
 async function verifyPassword(password, storedHash) {
   try {
     if (typeof storedHash !== 'string' || !storedHash) return false;
+
+    // Era-1 accounts (launch, Jan 2026): unsalted SHA-256 of password + 'salt_string',
+    // stored as 64 lowercase hex chars. 135 production accounts still carry this format;
+    // without this branch they can never log in. Upgraded to pbkdf2$ on next login by
+    // the rehash hook in the login route (isLegacyPasswordHash matches any non-pbkdf2$).
+    if (/^[0-9a-f]{64}$/.test(storedHash)) {
+      const buf = await globalThis.crypto.subtle.digest(
+        'SHA-256', new TextEncoder().encode(password + 'salt_string')
+      );
+      const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+      return constantTimeHexEqual(hex, storedHash);
+    }
+
+    // Era-2 accounts: bcrypt ($2a$/$2b$, 5 production accounts). bcryptjs is already a
+    // dependency; compareSync is CPU-bound but only runs for these few accounts, and
+    // each upgrades to pbkdf2$ on first successful login.
+    if (storedHash.startsWith('$2a$') || storedHash.startsWith('$2b$')) {
+      const bcryptMod = await import('bcryptjs');
+      const bcrypt = bcryptMod.default || bcryptMod;
+      return bcrypt.compareSync(password, storedHash);
+    }
 
     let iterations, saltHex, hash;
     if (storedHash.startsWith('pbkdf2$')) {
@@ -15036,6 +15065,37 @@ router.get('/api/health', async (request, env) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
+});
+
+// Auth-crypto health probe. Registration was silently broken for 22 days (2026-07)
+// because /api/health never exercised the password-hashing path — Workers' PBKDF2
+// iteration cap made hashPassword throw while everything else stayed green. This
+// endpoint runs the real hash+verify code in-process (no DB writes, no accounts)
+// so monitors catch that entire failure class within one poll interval.
+router.get('/api/health/auth', async (request, env) => {
+  const checks = {};
+  let ok = true;
+  try {
+    const probe = 'health-probe-' + Date.now();
+    const hashed = await hashPassword(probe);
+    checks.hash = hashed.startsWith('pbkdf2$') ? 'ok' : 'bad-format';
+    checks.verify = (await verifyPassword(probe, hashed)) ? 'ok' : 'mismatch';
+    checks.reject = (await verifyPassword('wrong-' + probe, hashed)) ? 'accepted-wrong' : 'ok';
+    // Era-1 (sha256) legacy path — fixed vector so locked-out-account regressions surface.
+    const eraBuf = await globalThis.crypto.subtle.digest(
+      'SHA-256', new TextEncoder().encode('probe' + 'salt_string')
+    );
+    const eraHex = Array.from(new Uint8Array(eraBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    checks.legacy_sha256 = (await verifyPassword('probe', eraHex)) ? 'ok' : 'broken';
+    ok = Object.values(checks).every(v => v === 'ok');
+  } catch (error) {
+    checks.exception = String(error?.message || error);
+    ok = false;
+  }
+  return new Response(JSON.stringify({ status: ok ? 'ok' : 'degraded', checks }), {
+    status: ok ? 200 : 503,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
 });
 
 // HEAD handler for SPA routes (/terms, /privacy, /dmca, etc.)

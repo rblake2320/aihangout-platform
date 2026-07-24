@@ -55,7 +55,6 @@ credentials.json
 automated-regression-test.js
 continuous-monitoring.js
 crucible_tests.js
-verify-deployment.js
 test_online_counter.js
 test_sessions_direct.js
 manual_heartbeat_test.html
@@ -70,4 +69,4 @@ code-review-reports/
 test-coverage-analysis/
 
 # Playwright
-.playwright-cli/
+.playwright-cli/backup-prod-*.sql
