@@ -71,6 +71,7 @@ async function verifyDeployment() {
     console.log('=====================================');
 
     let passedChecks = 0;
+    const deploymentProbe = `deploy_probe=${Date.now()}`;
 
     try {
         // 1. Test API endpoints
@@ -156,7 +157,10 @@ async function verifyDeployment() {
         // 2. Test frontend deployment
         console.log('\n🌐 Testing frontend deployment...');
 
-        const htmlResponse = await makeHttpRequest(PRODUCTION_URL);
+        // The HTML shell may still exist in an edge cache immediately after a
+        // Worker asset deployment. A unique query verifies the current origin
+        // manifest rather than accepting or rejecting a stale shell.
+        const htmlResponse = await makeHttpRequest(`${PRODUCTION_URL}/?${deploymentProbe}`);
         if (htmlResponse.statusCode === 200) {
             console.log('✅ Frontend: Loading');
             passedChecks++;
@@ -235,7 +239,9 @@ async function verifyDeployment() {
             console.log(`❌ Human verification/feed: health=${verificationData.status}, community=${communityClean}, digest=${digestClean}`);
         }
 
-        const pathbookHealth = await makeApiRequest(`${PRODUCTION_URL}/api/health/pathbooks`);
+        const pathbookHealth = await makeApiRequest(
+            `${PRODUCTION_URL}/api/health/pathbooks?${deploymentProbe}`
+        );
         const pathbookHealthData = pathbookHealth.statusCode === 200
             ? JSON.parse(pathbookHealth.data) : {};
         if (
