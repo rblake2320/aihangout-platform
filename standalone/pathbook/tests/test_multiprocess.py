@@ -55,4 +55,5 @@ def test_spawned_processes_preserve_state_and_ledger(tmp_path):
     results = [queue.get(timeout=5) for _ in workers]
     assert all(result == ("ok", True) for result in results)
     assert registry.get("PB-TEST001").times_applied == 4
-    assert registry.verify_ledger()["ok"]
+    verification = registry.verify_ledger()
+    assert verification["ok"], verification

@@ -14,6 +14,16 @@ from pathbook.api import build_router
 from pathbook.authoring import make_maintainer_action, make_outcome_report, make_record
 from pathbook.fingerprint import context_fingerprint, fingerprint
 from pathbook.schema import OutcomeReport
+from pathbook.store import _load_or_create_secret
+
+
+def test_registry_secret_is_binary_safe_on_windows(tmp_path, monkeypatch):
+    secret = b"\x01" * 15 + b"\n" + b"\x02" * 16
+    monkeypatch.setattr("pathbook.store.secrets.token_bytes", lambda size: secret)
+    secret_path = tmp_path / "registry.secret"
+    assert _load_or_create_secret(secret_path) == secret
+    assert secret_path.read_bytes() == secret
+    assert len(secret_path.read_bytes()) == 32
 
 
 def test_fabricated_application_cannot_promote(registry, contributed):

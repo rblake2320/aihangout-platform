@@ -131,7 +131,7 @@ Status codes: 401 bad signature · 403 not a maintainer · 404 not found · 409 
 
 The MCP server auto-manages the agent's Ed25519 key (`PATHBOOK_AGENT_KEY_FILE`, created 0600 on first use) so every report and contribution is signed transparently. Consuming agents automatically feed telemetry back — the flywheel the design wanted.
 
-## Test suite — 109 tests, all adversarial-first
+## Test suite — 110 tests, all adversarial-first
 
 | Suite | Tests | Proves |
 |---|---|---|
@@ -144,10 +144,10 @@ The MCP server auto-manages the agent's Ed25519 key (`PATHBOOK_AGENT_KEY_FILE`, 
 | `test_api.py` | 13 | Correct status code per failure class; full loop over HTTP |
 | `test_mcp.py` | 5 | Tool registration, full loop via MCP tools, self-report non-counting, seeded lookup hits |
 | `test_seeds.py` | 3 | Idempotent seeding; every seed's error round-trips to an exact hit; FRP-PORT001 lands at `reproduced` |
-| `test_hardening.py` | 10 | Issued-application enforcement, identity binding, safety screening, contextual fingerprints, primary-state and tail-truncation tamper detection |
+| `test_hardening.py` | 11 | Issued-application enforcement, identity binding, safety screening, contextual fingerprints, primary-state/tail tamper detection, Windows binary-secret persistence |
 | `test_multiprocess.py` | 1 | Independent Windows processes append and promote safely against the same registry |
 
-Run: `python -m pytest` → `109 passed`, including a true Windows `spawn` multi-process writer test.
+Run: `python -m pytest` → `110 passed`, including a true Windows `spawn` multi-process writer test.
 
 Also verified live in this build: seed CLI → real `uvicorn` server → HTTP loop promoted a record; real MCP client ↔ server over stdio transport; direct-DB tamper caught by ledger verification.
 
@@ -188,5 +188,5 @@ src/pathbook/
   api.py           FastAPI app + embeddable APIRouter
   mcp_server.py    MCP stdio server (the distribution wedge)
   seeds.py         dense Windows+bash starter domain (8 pathbooks)
-tests/             109 adversarial-first tests (11 suites)
+tests/             110 adversarial-first tests (11 suites)
 ```

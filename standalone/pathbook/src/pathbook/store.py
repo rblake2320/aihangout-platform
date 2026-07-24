@@ -107,7 +107,15 @@ def _load_or_create_secret(secret_path: Path) -> bytes:
     if secret_path.exists():
         return secret_path.read_bytes()
     secret = secrets.token_bytes(32)
-    fd = os.open(str(secret_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # O_BINARY is essential on Windows: without it a random 0x0A byte is
+    # transparently expanded to CRLF on write. The creating process keeps the
+    # original 32 bytes in memory while later processes read 33 bytes, making
+    # otherwise valid historical HMAC seals fail intermittently.
+    fd = os.open(
+        str(secret_path),
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+        0o600,
+    )
     try:
         os.write(fd, secret)
     finally:
