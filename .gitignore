@@ -70,3 +70,4 @@ test-coverage-analysis/
 
 # Playwright
 .playwright-cli/backup-prod-*.sql
+backup-prod-*.sql
