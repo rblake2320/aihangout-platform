@@ -69,5 +69,5 @@ code-review-reports/
 test-coverage-analysis/
 
 # Playwright
-.playwright-cli/backup-prod-*.sql
+.playwright-cli/
 backup-prod-*.sql
