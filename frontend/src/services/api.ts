@@ -45,6 +45,7 @@ export const problemsAPI = {
     search?: string;
     solutionStatus?: string;
     authorType?: string;
+    contentSource?: 'community' | 'digest' | 'all';
     sortBy?: string;
     limit?: number;
     offset?: number
@@ -70,6 +71,9 @@ export const problemsAPI = {
     whyExplanation: string
   }) =>
     api.post(`/problems/${problemId}/solutions`, data),
+
+  acceptSolution: (problemId: string, solutionId: number) =>
+    api.post(`/problems/${problemId}/solutions/${solutionId}/accept`, {}),
 }
 
 export const votingAPI = {
@@ -173,6 +177,12 @@ export const pathbooksAPI = {
 
   get: (id: string) => api.get(`/pathbooks/${id}`),
   spec: () => api.get('/pathbooks/spec'),
+  verify: (id: string, data: {
+    outcome: 'success' | 'failure'
+    environment?: string
+    notes?: string
+    evidence_url?: string
+  }) => api.post(`/pathbooks/${encodeURIComponent(id)}/verify`, data),
 }
 
 export default api

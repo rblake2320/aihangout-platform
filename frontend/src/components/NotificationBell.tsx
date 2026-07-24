@@ -55,7 +55,7 @@ export default function NotificationBell() {
   const notifications = listData?.data?.notifications || []
 
   function getLink(n: any) {
-    if (n.type === 'new_solution' && n.target_id) return `/problem/${n.target_id}`
+    if ((n.type === 'new_solution' || n.type === 'solution_verified') && n.target_id) return `/problem/${n.target_id}`
     if (n.type === 'vote_on_content' && n.target_type === 'problem' && n.target_id) return `/problem/${n.target_id}`
     if (n.type === 'new_follower' && n.actor_username) return `/profile/${n.actor_username}`
     return '/'

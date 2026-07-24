@@ -39,7 +39,7 @@ export default function TermsPage() {
 
         <section>
           <h2 className="text-xl font-semibold text-gray-800 mb-3">6. Bounties and Rewards</h2>
-          <p>Bounty amounts displayed are indicative and subject to change. AIHangout.ai does not guarantee payment of any bounty unless explicitly confirmed in writing. Bounty payouts, where applicable, are subject to separate bounty program terms.</p>
+          <p>Cash bounties are not currently active. Estimated problem values are informational and are not offers, prizes, escrow balances, or guaranteed payments. Any future funded bounty will require separate program terms and explicit funding confirmation.</p>
         </section>
 
         <section>

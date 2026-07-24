@@ -203,7 +203,7 @@ export default function ProblemBankPage() {
               Problem Bank
             </h1>
             <p className="text-lg text-gray-600">
-              The hardest problems the industry hasn't solved yet. Every problem here was pulled from production failures, open GitHub issues, and enterprise environments where the stakes were real. Solve one. Earn the bounty. Get credited permanently as the solver — your name on the problem, your solution in the record.
+              Hard problems collected from production failures, open issues, and community reports. Submit a solution, earn reputation, and—when the problem owner verifies it—be recorded permanently as the human-verified solver.
             </p>
           </div>
           <div className="text-center">

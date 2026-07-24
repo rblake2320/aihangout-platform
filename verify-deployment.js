@@ -23,6 +23,8 @@ const REQUIRED_CHECKS = [
     'Deployed JS matches local dist build',
     'Auth crypto healthy (/api/health/auth)',
     'Notification pipeline healthy (/api/health/notifications)',
+    'Human verification pipeline healthy and feed sources separated',
+    'Launch contracts and CSP are production-safe',
     'Grounded capability APIs return production-safe responses',
     'PBKDF2 iterations within Workers cap (local src)'
 ];
@@ -32,7 +34,7 @@ async function makeHttpRequest(url) {
         https.get(url, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
-            res.on('end', () => resolve({ statusCode: res.statusCode, data }));
+            res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, data }));
         }).on('error', reject);
     });
 }
@@ -42,7 +44,7 @@ async function makeApiRequest(url, { method = 'GET', headers = {}, body = '' } =
         const request = https.request(url, { method, headers }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
-            res.on('end', () => resolve({ statusCode: res.statusCode, data }));
+            res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, data }));
         });
         request.on('error', reject);
         if (body) request.write(body);
@@ -208,6 +210,64 @@ async function verifyDeployment() {
             console.log(`❌ Notification pipeline: DEGRADED — ${notificationHealth.data}`);
         }
 
+        const verificationHealth = await makeExpectedHttpRequest(
+            `${PRODUCTION_URL}/api/health/verification`, 200
+        );
+        const communityFeed = await makeHttpRequest(
+            `${PRODUCTION_URL}/api/problems?contentSource=community&limit=50`
+        );
+        const digestFeed = await makeHttpRequest(
+            `${PRODUCTION_URL}/api/problems?contentSource=digest&limit=50`
+        );
+        const verificationData = verificationHealth.statusCode === 200
+            ? JSON.parse(verificationHealth.data) : {};
+        const communityData = communityFeed.statusCode === 200 ? JSON.parse(communityFeed.data) : {};
+        const digestData = digestFeed.statusCode === 200 ? JSON.parse(digestFeed.data) : {};
+        const communityClean = (communityData.problems || []).every(problem =>
+            !problem.is_harvested && problem.username !== 'aihangout-curator'
+        );
+        const digestClean = (digestData.problems || []).every(problem => Boolean(problem.is_harvested));
+        if (verificationData.status === 'ok' && communityClean && digestClean) {
+            console.log('✅ Human verification/feed: schema healthy and Community/AI Digest sources separated');
+            passedChecks++;
+        } else {
+            console.log(`❌ Human verification/feed: health=${verificationData.status}, community=${communityClean}, digest=${digestClean}`);
+        }
+
+        const launchContracts = await Promise.all([
+            makeApiRequest(`${PRODUCTION_URL}/api/events/batch`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+                body: JSON.stringify({ events: [], session_id: 'deployment_probe' })
+            }),
+            makeApiRequest(`${PRODUCTION_URL}/api/auth/logout`, { method: 'POST' }),
+            makeApiRequest(`${PRODUCTION_URL}/api/identity/universal-passport`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+            }),
+            makeApiRequest(`${PRODUCTION_URL}/mcp`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+            })
+        ]);
+        const csp = htmlResponse.headers?.['content-security-policy'] || '';
+        const launchContractsOk =
+            launchContracts.map(result => result.statusCode).join(',') === '200,200,410,200' &&
+            launchContracts[3].data.includes('lookup_pathbook') &&
+            launchContracts[3].data.includes('post_solution') &&
+            launchContracts[3].data.includes('report_pathbook_result') &&
+            !htmlResponse.data.includes('fonts.googleapis.com') &&
+            csp.includes("font-src 'self'") &&
+            csp.includes('static.cloudflareinsights.com');
+        if (launchContractsOk) {
+            console.log('✅ Launch contracts/CSP: beacon, logout, retired prototype, and self-hosted font verified');
+            passedChecks++;
+        } else {
+            console.log(`❌ Launch contracts/CSP: statuses=${launchContracts.map(r => r.statusCode).join(',')}, CSP=${csp}`);
+        }
+
         // Legacy flywheel routes once called nonexistent helpers and returned raw 500s.
         // Verify their grounded replacements, including correct not-found semantics.
         const capabilityChecks = [
@@ -222,7 +282,7 @@ async function verifyDeployment() {
             ['/api/solutions/compare/268', 200],
             ['/api/knowledge-graph/related/not-a-number', 400],
             ['/api/ai-collaboration/session/verification-does-not-exist', 404],
-            ['/api/identity/analytics/verification-does-not-exist', 404]
+            ['/api/identity/analytics/verification-does-not-exist', 410]
         ];
         const capabilityResults = await Promise.all(capabilityChecks.map(async ([route, expected]) => {
             const result = await makeExpectedHttpRequest(`${PRODUCTION_URL}${route}`, expected);

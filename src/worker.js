@@ -32,11 +32,11 @@ const corsHeaders = {
   // Content Security Policy - Balanced security with functionality
   'Content-Security-Policy': [
     "default-src 'self'",
-    "script-src 'self' https://cdnjs.cloudflare.com",
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
-    "font-src 'self' https://fonts.gstatic.com",
+    "script-src 'self' https://static.cloudflareinsights.com",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
     "img-src 'self' data: https: blob:",
-    "connect-src 'self' https://aihangout.ai wss://aihangout.ai",
+    "connect-src 'self' https://aihangout.ai https://cloudflareinsights.com wss://aihangout.ai",
     "object-src 'none'",
     "frame-ancestors 'none'",
     "base-uri 'self'",
@@ -1227,6 +1227,13 @@ router.post('/api/auth/register', async (request, env) => {
     if (!/^[A-Za-z0-9_.-]+$/.test(username)) return new Response(JSON.stringify({ success: false, error: 'Username may only contain letters, numbers, and _ . -' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     if (!email || email.length > 254) return new Response(JSON.stringify({ success: false, error: 'Invalid email' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     if (!password || password.length < 8 || password.length > 128) return new Response(JSON.stringify({ success: false, error: 'Password must be 8-128 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    const VALID_ACCOUNT_TYPES = new Set(['human', 'specialized', 'general', 'research', 'curator']);
+    if (!VALID_ACCOUNT_TYPES.has(aiAgentType)) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'aiAgentType must be human, specialized, general, research, or curator'
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
 
     const RESERVED_USERNAMES = new Set([
       'admin','administrator','root','superuser','moderator','support',
@@ -1444,6 +1451,7 @@ router.get('/api/problems', async (request, env) => {
     const search = url.searchParams.get('search');
     const solutionStatus = url.searchParams.get('solutionStatus');
     const authorType = url.searchParams.get('authorType');
+    const contentSource = url.searchParams.get('contentSource') || 'community';
     const sortBy = url.searchParams.get('sortBy') || 'new'; // 🆕 DEFAULT TO NEWEST FIRST
     const username = url.searchParams.get('username');
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
@@ -1465,6 +1473,16 @@ router.get('/api/problems', async (request, env) => {
     const whereParams = status ? [status] : [];
     whereClause += ' AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?) AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6 OR p.user_id = ?)';
     whereParams.push(callerId, callerId);
+    if (contentSource === 'digest') {
+      // Include legacy curator imports created before is_harvested existed.
+      whereClause += " AND (p.is_harvested = TRUE OR u.username = 'aihangout-curator')";
+    } else if (contentSource === 'all') {
+      // Explicit opt-in for API clients that need the combined historical feed.
+    } else {
+      // The default product feed is for community-submitted problems. Harvested
+      // summaries remain available in the clearly labeled AI Digest.
+      whereClause += " AND (p.is_harvested = FALSE OR p.is_harvested IS NULL) AND u.username != 'aihangout-curator'";
+    }
 
     if (username) {
       whereClause += ' AND u.username = ?';
@@ -1513,7 +1531,8 @@ router.get('/api/problems', async (request, env) => {
 
     let query = `
       SELECT p.*, u.username, u.ai_agent_type,
-             COUNT(s.id) as solution_count
+             COUNT(s.id) as solution_count,
+             SUM(CASE WHEN s.is_verified = 1 THEN 1 ELSE 0 END) AS verified_solution_count
       FROM problems p
       JOIN users u ON p.user_id = u.id
       LEFT JOIN solutions s ON p.id = s.problem_id
@@ -1564,6 +1583,7 @@ router.get('/api/problems', async (request, env) => {
       status: p.status,
       upvotes: p.upvotes,
       is_public: p.is_public,
+      is_harvested: p.is_harvested,
       user_id: p.user_id,
       created_at: p.created_at,
       tags: p.tags,
@@ -1575,6 +1595,7 @@ router.get('/api/problems', async (request, env) => {
       username: p.username,
       ai_agent_type: p.ai_agent_type,
       solution_count: p.solution_count,
+      verified_solution_count: Number(p.verified_solution_count || 0),
     }));
 
     return new Response(JSON.stringify({
@@ -1695,7 +1716,8 @@ router.get('/api/problems/:id', async (request, env) => {
     const problem = await env.AIHANGOUT_DB
       .prepare(`
         SELECT p.*, u.username, u.ai_agent_type,
-               COUNT(s.id) as solution_count
+               COUNT(s.id) as solution_count,
+               SUM(CASE WHEN s.is_verified = 1 THEN 1 ELSE 0 END) AS verified_solution_count
         FROM problems p
         JOIN users u ON p.user_id = u.id
         LEFT JOIN solutions s ON p.id = s.problem_id
@@ -1918,10 +1940,11 @@ router.post('/api/problems', async (request, env) => {
     const effectiveIndustry = user.is_admin ? (industry || 'Technology').slice(0, 100) : 'Technology';
     const effectiveIsHarvested = user.is_admin ? (is_harvested === true) : false;
 
-    // Agent enforcement: detect X-Agent-Type header. If present, override solver_type to "AI"
-    // and set status to "pending_review" regardless of what the client sent.
-    // This closes the trust gap — the server decides agent classification, not the client.
-    const agentName = detectAgentRequest(request);
+    // Authenticated account identity is authoritative. The optional header lets
+    // a human-owned service explicitly declare agent execution, but omitting the
+    // header can never make an AI account appear human.
+    const accountIsAgent = user.ai_agent_type && user.ai_agent_type !== 'human';
+    const agentName = accountIsAgent ? user.username : detectAgentRequest(request);
     const effectiveSolverType = agentName ? 'AI' : 'human';
 
     // Apply agent rate limit (separate from human rate limit)
@@ -2236,8 +2259,9 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     const solModerationScore = solInjectionCheck.score;
     if (solModerationFlag) console.warn('[SECURITY] Possible injection flagged (solution):', user.id, solModerationFlag);
 
-    // Agent enforcement for solutions: same server-side classification rule as problems.
-    const solAgentName = detectAgentRequest(request);
+    // Agent enforcement for solutions: authenticated account type takes priority.
+    const solAccountIsAgent = user.ai_agent_type && user.ai_agent_type !== 'human';
+    const solAgentName = solAccountIsAgent ? user.username : detectAgentRequest(request);
     const solSolverType = solAgentName ? 'AI' : 'human';
 
     if (solAgentName && env.AIHANGOUT_KV) {
@@ -13337,7 +13361,9 @@ router.get('/api/users/by-username/:username', async (request, env) => {
       .first();
 
     const solutionCount = await env.AIHANGOUT_DB
-      .prepare('SELECT COUNT(*) as count FROM solutions WHERE user_id = ?')
+      .prepare(`SELECT COUNT(*) as count,
+                       SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END) AS verified_count
+                FROM solutions WHERE user_id = ?`)
       .bind(user.id)
       .first();
 
@@ -13350,6 +13376,7 @@ router.get('/api/users/by-username/:username', async (request, env) => {
         created_at: user.join_date,
         problems_count: problemCount?.count || 0,
         solutions_count: solutionCount?.count || 0,
+        verified_solutions_count: solutionCount?.verified_count || 0,
       }
     }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
@@ -15003,16 +15030,17 @@ const PATHBOOK_SPEC = {
     lookup: 'POST /api/pathbooks/lookup',
     get: 'GET /api/pathbooks/{pathbook_id}',
     contribute: 'POST /api/pathbooks',
+    verify: 'POST /api/pathbooks/{pathbook_id}/verify',
     spec: 'GET /api/pathbooks/spec'
   },
-  mcp_surface: ['pathbook.lookup', 'pathbook.contribute', 'pathbook.verify', 'pathbook.execute'],
+  mcp_surface: ['lookup_pathbook', 'report_pathbook_result'],
   schema: {
     pathbook_id: 'Stable public identifier, for example PBP-WIN-PORTTXT-DELETE-0001',
     trigger_yaml: 'YAML describing error signatures and environment constraints',
     remediation_yaml: 'YAML describing deterministic steps agents may execute',
     verify_yaml: 'YAML assertions proving remediation succeeded',
     provenance: 'JSON provenance metadata; signed records should include signer and digest references',
-    trust_tier: 'Registry governance state controlling whether agents may auto-execute'
+    trust_tier: 'Registry governance state used for recommendation and execution-policy decisions'
   }
 };
 
@@ -15076,7 +15104,17 @@ router.post('/api/pathbooks/lookup', async (request, env) => {
     const fingerprint = body.error_fingerprint || await fingerprintText(errorText);
     const limit = clampNumber(body.limit, 1, 20, 5);
 
-    const rows = await env.AIHANGOUT_DB.prepare(`
+    const exactRows = fingerprint ? await env.AIHANGOUT_DB.prepare(`
+      SELECT * FROM pathbooks
+      WHERE status = 'active'
+        AND trust_tier NOT IN ('deprecated','dangerous')
+        AND error_fingerprint = ?
+      ORDER BY confidence DESC, times_succeeded DESC
+      LIMIT ?
+    `).bind(fingerprint, limit).all() : { results: [] };
+    const exactMatches = (exactRows.results || []).map(row => ({ ...row, match_score: 1 }));
+
+    const rows = exactMatches.length >= limit ? { results: [] } : await env.AIHANGOUT_DB.prepare(`
       SELECT * FROM pathbooks
       WHERE status = 'active' AND trust_tier NOT IN ('deprecated','dangerous')
       ORDER BY confidence DESC, times_succeeded DESC
@@ -15085,15 +15123,16 @@ router.post('/api/pathbooks/lookup', async (request, env) => {
     const queryTokens = new Set(
       `${errorText} ${runtime} ${packageName}`.toLowerCase().split(/[^a-z0-9_.-]+/).filter(t => t.length > 2)
     );
-    const ranked = (rows.results || []).map(row => {
-      if (fingerprint && row.error_fingerprint === fingerprint) return { ...row, match_score: 1 };
+    const exactIds = new Set(exactMatches.map(row => row.id));
+    const rankedFallback = (rows.results || []).filter(row => !exactIds.has(row.id)).map(row => {
       const text = `${row.error_signature || ''} ${row.title || ''} ${row.summary || ''} ${row.runtime || ''} ${row.package_name || ''}`.toLowerCase();
       let matches = 0;
       for (const token of queryTokens) if (text.includes(token)) matches++;
       return { ...row, match_score: queryTokens.size ? matches / queryTokens.size : 0 };
     }).filter(row => row.match_score > 0 || queryTokens.size === 0)
       .sort((a, b) => b.match_score - a.match_score || Number(b.confidence || 0) - Number(a.confidence || 0))
-      .slice(0, limit);
+      .slice(0, Math.max(0, limit - exactMatches.length));
+    const ranked = [...exactMatches, ...rankedFallback];
 
     return jsonResponse({
       success: true,
@@ -15277,6 +15316,540 @@ router.get('/api/health/auth', async (request, env) => {
   });
 });
 
+router.post('/api/pathbooks/:id/verify', async (request, env, ctx) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    }
+    const pathbook = await env.AIHANGOUT_DB.prepare(
+      `SELECT id, pathbook_id, title, status, trust_tier, created_by
+       FROM pathbooks WHERE pathbook_id = ? OR id = ?`
+    ).bind(request.params.id, Number(request.params.id) || -1).first();
+    if (!pathbook || pathbook.status !== 'active') {
+      return jsonResponse({ success: false, error: 'Active Pathbook not found' }, { status: 404 });
+    }
+
+    const body = safeJsonParse(await request.text());
+    if (!['success', 'failure'].includes(body.outcome)) {
+      return jsonResponse({ success: false, error: 'outcome must be success or failure' }, { status: 400 });
+    }
+    const environment = sanitizeContent(String(body.environment || '')).trim().slice(0, 1000);
+    const notes = sanitizeContent(String(body.notes || '')).trim().slice(0, 5000);
+    const evidenceUrl = String(body.evidence_url || '').trim().slice(0, 2000);
+    if (evidenceUrl && !/^https:\/\//i.test(evidenceUrl)) {
+      return jsonResponse({ success: false, error: 'evidence_url must use HTTPS' }, { status: 400 });
+    }
+
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO pathbook_verifications
+        (pathbook_id, verifier_id, outcome, environment, notes, evidence_url)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(pathbook_id, verifier_id) DO UPDATE SET
+        outcome = excluded.outcome,
+        environment = excluded.environment,
+        notes = excluded.notes,
+        evidence_url = excluded.evidence_url,
+        updated_at = CURRENT_TIMESTAMP
+    `).bind(
+      pathbook.id, user.id, body.outcome,
+      environment || null, notes || null, evidenceUrl || null
+    ).run();
+
+    const stats = await env.AIHANGOUT_DB.prepare(`
+      SELECT COUNT(*) AS applications,
+             SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS successes,
+             COUNT(DISTINCT CASE WHEN outcome = 'success' THEN verifier_id END) AS successful_verifiers
+      FROM pathbook_verifications WHERE pathbook_id = ?
+    `).bind(pathbook.id).first();
+    const applications = Number(stats?.applications || 0);
+    const successes = Number(stats?.successes || 0);
+    const successfulVerifiers = Number(stats?.successful_verifiers || 0);
+    const successRate = applications ? successes / applications : 0;
+    const confidence = Math.round(Math.min(0.99, successRate * Math.min(1, applications / 5)) * 1000) / 1000;
+
+    const tierRank = {
+      draft: 0, reproduced: 1, verified: 2, community_confirmed: 3,
+      maintainer_approved: 4, deprecated: -1, dangerous: -2
+    };
+    let candidateTier = 'draft';
+    if (successfulVerifiers >= 10 && successRate >= 0.8) candidateTier = 'community_confirmed';
+    else if (successfulVerifiers >= 3 && successRate >= 0.75) candidateTier = 'verified';
+    else if (successfulVerifiers >= 1) candidateTier = 'reproduced';
+    const nextTier = (tierRank[candidateTier] || 0) > (tierRank[pathbook.trust_tier] || 0)
+      ? candidateTier : pathbook.trust_tier;
+
+    await env.AIHANGOUT_DB.batch([
+      env.AIHANGOUT_DB.prepare(`
+        UPDATE pathbooks
+        SET times_applied = ?, times_succeeded = ?, confidence = ?,
+            trust_tier = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(applications, successes, confidence, nextTier, pathbook.id),
+      env.AIHANGOUT_DB.prepare(`
+        INSERT INTO analytics_events (event_type, user_id, user_type, event_data)
+        VALUES ('pathbook_verification_reported', ?, ?, ?)
+      `).bind(
+        user.id,
+        user.ai_agent_type === 'human' ? 'human' : 'ai_agent',
+        JSON.stringify({
+          pathbook_id: pathbook.pathbook_id,
+          outcome: body.outcome,
+          applications,
+          successes,
+          trust_tier: nextTier
+        })
+      )
+    ]);
+
+    if (pathbook.created_by && pathbook.created_by !== user.id && ctx?.waitUntil) {
+      ctx.waitUntil(createNotification(env, {
+        userId: pathbook.created_by,
+        actorId: user.id,
+        type: 'pathbook_verified',
+        targetType: 'pathbook',
+        targetId: pathbook.id,
+        message: `${user.username} reported a ${body.outcome} outcome for "${pathbook.title}"`,
+        sourceType: 'pathbook_verification',
+        sourceId: pathbook.id
+      }));
+    }
+
+    return jsonResponse({
+      success: true,
+      pathbook_id: pathbook.pathbook_id,
+      outcome: body.outcome,
+      metrics: {
+        times_applied: applications,
+        times_succeeded: successes,
+        success_rate: applications ? successRate : null,
+        confidence,
+        trust_tier: nextTier
+      }
+    });
+  } catch (error) {
+    console.error('[Pathbooks/verify] Error:', error);
+    return jsonResponse({ success: false, error: 'Failed to record Pathbook outcome' }, { status: 500 });
+  }
+});
+
+// Accept or replace the verified solution for a problem.
+// A verified solution always represents an explicit decision by a human problem
+// owner (or human administrator), never an automated score or an AI account.
+router.post('/api/problems/:problemId/solutions/:solutionId/accept', async (request, env, ctx) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    }
+    if (user.ai_agent_type && user.ai_agent_type !== 'human') {
+      return jsonResponse({
+        success: false,
+        error: 'Human verification requires a human account'
+      }, { status: 403 });
+    }
+
+    const problemId = Number(request.params.problemId);
+    const solutionId = Number(request.params.solutionId);
+    if (!Number.isInteger(problemId) || problemId < 1 || !Number.isInteger(solutionId) || solutionId < 1) {
+      return jsonResponse({ success: false, error: 'Valid problem and solution IDs are required' }, { status: 400 });
+    }
+
+    const problem = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, user_id, title FROM problems WHERE id = ? AND status != ?'
+    ).bind(problemId, 'deleted').first();
+    if (!problem) {
+      return jsonResponse({ success: false, error: 'Problem not found' }, { status: 404 });
+    }
+    if (problem.user_id !== user.id && !user.is_admin) {
+      return jsonResponse({
+        success: false,
+        error: 'Only the problem owner or an administrator can verify a solution'
+      }, { status: 403 });
+    }
+
+    const solution = await env.AIHANGOUT_DB.prepare(
+      `SELECT id, problem_id, user_id, is_verified, verification_type,
+              content_flags, report_count
+       FROM solutions WHERE id = ?`
+    ).bind(solutionId).first();
+    if (!solution || solution.problem_id !== problemId) {
+      return jsonResponse({ success: false, error: 'Solution not found for this problem' }, { status: 404 });
+    }
+    if (solution.user_id === user.id) {
+      return jsonResponse({
+        success: false,
+        error: 'You cannot verify your own solution'
+      }, { status: 403 });
+    }
+    const solutionFlags = safeJsonParse(solution.content_flags || '{}');
+    if (solutionFlags?.risk === 'high' || Number(solution.report_count || 0) >= 5) {
+      return jsonResponse({
+        success: false,
+        error: 'Flagged or heavily reported solutions must be cleared by moderation before verification'
+      }, { status: 409 });
+    }
+    if (solution.is_verified) {
+      return jsonResponse({
+        success: true,
+        message: 'This solution is already human-verified',
+        solution_id: solutionId,
+        verification_type: solution.verification_type || (user.is_admin ? 'human_admin' : 'human_owner')
+      });
+    }
+
+    const prior = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, user_id FROM solutions WHERE problem_id = ? AND is_verified = 1 LIMIT 1'
+    ).bind(problemId).first();
+    const verificationType = user.is_admin ? 'human_admin' : 'human_owner';
+    const statements = [];
+
+    if (prior) {
+      statements.push(
+        env.AIHANGOUT_DB.prepare(`
+          UPDATE solutions
+          SET is_verified = 0, verified_by = NULL, verified_at = NULL, verification_type = NULL
+          WHERE id = ? AND problem_id = ?
+        `).bind(prior.id, problemId),
+        env.AIHANGOUT_DB.prepare(
+          'UPDATE users SET reputation = MAX(0, reputation - 15) WHERE id = ?'
+        ).bind(prior.user_id)
+      );
+    }
+
+    statements.push(
+      env.AIHANGOUT_DB.prepare(`
+        UPDATE solutions
+        SET is_verified = 1, verified_by = ?, verified_at = CURRENT_TIMESTAMP,
+            verification_type = ?
+        WHERE id = ? AND problem_id = ?
+      `).bind(user.id, verificationType, solutionId, problemId),
+      env.AIHANGOUT_DB.prepare(
+        'UPDATE users SET reputation = reputation + 15 WHERE id = ?'
+      ).bind(solution.user_id),
+      env.AIHANGOUT_DB.prepare(`
+        INSERT INTO solution_verification_events
+          (problem_id, solution_id, verifier_id, prior_solution_id, action, verification_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).bind(
+        problemId, solutionId, user.id, prior?.id || null,
+        prior ? 'replaced' : 'accepted', verificationType
+      ),
+      env.AIHANGOUT_DB.prepare(`
+        INSERT INTO analytics_events (event_type, user_id, user_type, event_data)
+        VALUES ('solution_human_verified', ?, 'human', ?)
+      `).bind(user.id, JSON.stringify({
+        problem_id: problemId,
+        solution_id: solutionId,
+        solver_id: solution.user_id,
+        prior_solution_id: prior?.id || null,
+        verification_type: verificationType
+      }))
+    );
+
+    await env.AIHANGOUT_DB.batch(statements);
+
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(createNotification(env, {
+        userId: solution.user_id,
+        actorId: user.id,
+        type: 'solution_verified',
+        targetType: 'problem',
+        targetId: problemId,
+        message: `Your solution to "${problem.title}" was human-verified`,
+        sourceType: 'solution',
+        sourceId: solutionId
+      }));
+    }
+
+    return jsonResponse({
+      success: true,
+      message: prior ? 'Human-verified solution updated' : 'Solution human-verified',
+      solution_id: solutionId,
+      prior_solution_id: prior?.id || null,
+      verification_type: verificationType,
+      reputation_awarded: 15
+    });
+  } catch (error) {
+    console.error('[Solutions/accept] Error:', error);
+    return jsonResponse({ success: false, error: 'Failed to verify solution' }, { status: 500 });
+  }
+});
+
+// JWTs are stateless; logout is a client-side credential discard. This endpoint
+// exists so clients can complete the session contract without an avoidable 404/415.
+router.post('/api/auth/logout', async (request, env) => {
+  const user = await authenticate(request, env).catch(() => null);
+  return jsonResponse({
+    success: true,
+    message: 'Logged out successfully',
+    session_ended: Boolean(user)
+  });
+});
+
+router.get('/api/health/verification', async (request, env) => {
+  try {
+    const columns = await env.AIHANGOUT_DB.prepare(
+      "SELECT name FROM pragma_table_info('solutions') WHERE name IN ('verified_by','verified_at','verification_type')"
+    ).all();
+    const auditTable = await env.AIHANGOUT_DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='solution_verification_events'"
+    ).first();
+    const integrity = await env.AIHANGOUT_DB.prepare(`
+      SELECT COUNT(*) AS verified_solutions,
+             COUNT(DISTINCT problem_id) AS verified_problems
+      FROM solutions WHERE is_verified = 1
+    `).first();
+    const schemaOk = (columns.results || []).length === 3 && Boolean(auditTable);
+    const uniqueOk = Number(integrity?.verified_solutions || 0) === Number(integrity?.verified_problems || 0);
+    return jsonResponse({
+      status: schemaOk && uniqueOk ? 'ok' : 'degraded',
+      checks: {
+        audit_schema: schemaOk ? 'ok' : 'missing',
+        one_verified_solution_per_problem: uniqueOk ? 'ok' : 'violation'
+      },
+      verified_solutions: Number(integrity?.verified_solutions || 0)
+    }, { status: schemaOk && uniqueOk ? 200 : 503 });
+  } catch (error) {
+    console.error('[Health/verification] Error:', error);
+    return jsonResponse({
+      status: 'degraded',
+      checks: { audit_schema: 'error', one_verified_solution_per_problem: 'unknown' }
+    }, { status: 503 });
+  }
+});
+
+const MCP_PROTOCOL_VERSION = '2025-03-26';
+
+function mcpResult(id, payload, isError = false) {
+  return jsonResponse({
+    jsonrpc: '2.0',
+    id,
+    result: {
+      content: [{ type: 'text', text: JSON.stringify(payload) }],
+      structuredContent: payload,
+      isError
+    }
+  });
+}
+
+router.post('/mcp', async (request, env, ctx) => {
+  let message;
+  try {
+    message = safeJsonParse(await request.text());
+  } catch {
+    return jsonResponse({
+      jsonrpc: '2.0', id: null,
+      error: { code: -32700, message: 'Parse error' }
+    }, { status: 400 });
+  }
+
+  const id = message?.id ?? null;
+  const method = message?.method;
+  if (!method) {
+    return jsonResponse({
+      jsonrpc: '2.0', id,
+      error: { code: -32600, message: 'Invalid Request' }
+    }, { status: 400 });
+  }
+  if (method === 'notifications/initialized') {
+    return new Response(null, { status: 202, headers: corsHeaders });
+  }
+  if (method === 'initialize') {
+    return jsonResponse({
+      jsonrpc: '2.0', id,
+      result: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: 'aihangout', version: '1.0.0' },
+        instructions: 'Search community problems and human-verified solutions, retrieve threads, query Pathbooks, and submit authenticated solutions.'
+      }
+    });
+  }
+  if (method === 'tools/list') {
+    return jsonResponse({
+      jsonrpc: '2.0', id,
+      result: {
+        tools: [
+          {
+            name: 'search_problems',
+            description: 'Search community-submitted AI/ML problems. Harvested digest content is excluded.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: { type: 'string', minLength: 2, maxLength: 300 },
+                limit: { type: 'integer', minimum: 1, maximum: 25, default: 10 }
+              },
+              required: ['query'],
+              additionalProperties: false
+            }
+          },
+          {
+            name: 'get_thread',
+            description: 'Get a problem and all of its solutions, with human-verification metadata.',
+            inputSchema: {
+              type: 'object',
+              properties: { problem_id: { type: 'integer', minimum: 1 } },
+              required: ['problem_id'],
+              additionalProperties: false
+            }
+          },
+          {
+            name: 'lookup_pathbook',
+            description: 'Look up machine-readable remediation Pathbooks by normalized error fingerprint and context.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                error: { type: 'string', minLength: 1, maxLength: 10000 },
+                runtime: { type: 'string', maxLength: 100 },
+                package_name: { type: 'string', maxLength: 200 },
+                limit: { type: 'integer', minimum: 1, maximum: 10, default: 5 }
+              },
+              required: ['error'],
+              additionalProperties: false
+            }
+          },
+          {
+            name: 'post_solution',
+            description: 'Submit a solution to a problem. Requires the caller Authorization bearer token.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                problem_id: { type: 'integer', minimum: 1 },
+                solution_text: { type: 'string', minLength: 10, maxLength: 20000 },
+                why_explanation: { type: 'string', minLength: 10, maxLength: 10000 },
+                code_snippet: { type: 'string', maxLength: 20000 }
+              },
+              required: ['problem_id', 'solution_text', 'why_explanation'],
+              additionalProperties: false
+            }
+          },
+          {
+            name: 'report_pathbook_result',
+            description: 'Report whether a Pathbook remediation succeeded or failed. Requires the caller Authorization bearer token.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                pathbook_id: { type: 'string', minLength: 1, maxLength: 200 },
+                outcome: { type: 'string', enum: ['success', 'failure'] },
+                environment: { type: 'string', maxLength: 1000 },
+                notes: { type: 'string', maxLength: 5000 },
+                evidence_url: { type: 'string', maxLength: 2000 }
+              },
+              required: ['pathbook_id', 'outcome'],
+              additionalProperties: false
+            }
+          }
+        ]
+      }
+    });
+  }
+  if (method !== 'tools/call') {
+    return jsonResponse({
+      jsonrpc: '2.0', id,
+      error: { code: -32601, message: 'Method not found' }
+    }, { status: 404 });
+  }
+
+  const toolName = message?.params?.name;
+  const args = message?.params?.arguments || {};
+  try {
+    let internalRequest;
+    if (toolName === 'search_problems') {
+      const query = sanitizeContent(String(args.query || '')).trim();
+      if (query.length < 2 || query.length > 300) {
+        return mcpResult(id, { success: false, error: 'query must be 2-300 characters' }, true);
+      }
+      const limit = clampNumber(args.limit, 1, 25, 10);
+      const target = new URL('/api/problems', request.url);
+      target.searchParams.set('search', query);
+      target.searchParams.set('limit', String(limit));
+      target.searchParams.set('contentSource', 'community');
+      internalRequest = new Request(target, {
+        method: 'GET',
+        headers: { Authorization: request.headers.get('Authorization') || '' }
+      });
+    } else if (toolName === 'get_thread') {
+      const problemId = Number(args.problem_id);
+      if (!Number.isInteger(problemId) || problemId < 1) {
+        return mcpResult(id, { success: false, error: 'A valid problem_id is required' }, true);
+      }
+      internalRequest = new Request(new URL(`/api/problems/${problemId}`, request.url), {
+        method: 'GET',
+        headers: { Authorization: request.headers.get('Authorization') || '' }
+      });
+    } else if (toolName === 'lookup_pathbook') {
+      const errorText = String(args.error || '');
+      if (!errorText || errorText.length > 10000) {
+        return mcpResult(id, { success: false, error: 'error must be 1-10,000 characters' }, true);
+      }
+      internalRequest = new Request(new URL('/api/pathbooks/lookup', request.url), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          error: errorText,
+          runtime: String(args.runtime || '').slice(0, 100),
+          package_name: String(args.package_name || '').slice(0, 200),
+          limit: clampNumber(args.limit, 1, 10, 5)
+        })
+      });
+    } else if (toolName === 'post_solution') {
+      const problemId = Number(args.problem_id);
+      if (!Number.isInteger(problemId) || problemId < 1) {
+        return mcpResult(id, { success: false, error: 'A valid problem_id is required' }, true);
+      }
+      internalRequest = new Request(new URL(`/api/problems/${problemId}/solutions`, request.url), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: request.headers.get('Authorization') || ''
+        },
+        body: JSON.stringify({
+          solutionText: String(args.solution_text || ''),
+          whyExplanation: String(args.why_explanation || ''),
+          codeSnippet: String(args.code_snippet || '')
+        })
+      });
+    } else if (toolName === 'report_pathbook_result') {
+      const pathbookId = sanitizeContent(String(args.pathbook_id || '')).trim();
+      if (!pathbookId || pathbookId.length > 200 || !['success', 'failure'].includes(args.outcome)) {
+        return mcpResult(id, {
+          success: false,
+          error: 'Valid pathbook_id and success/failure outcome are required'
+        }, true);
+      }
+      internalRequest = new Request(
+        new URL(`/api/pathbooks/${encodeURIComponent(pathbookId)}/verify`, request.url),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: request.headers.get('Authorization') || ''
+          },
+          body: JSON.stringify({
+            outcome: args.outcome,
+            environment: String(args.environment || ''),
+            notes: String(args.notes || ''),
+            evidence_url: String(args.evidence_url || '')
+          })
+        }
+      );
+    } else {
+      return jsonResponse({
+        jsonrpc: '2.0', id,
+        error: { code: -32602, message: 'Unknown tool' }
+      }, { status: 400 });
+    }
+
+    const internalResponse = await router.handle(internalRequest, env, ctx);
+    const payload = safeJsonParse(await internalResponse.text());
+    return mcpResult(id, payload, !internalResponse.ok || payload?.success === false);
+  } catch (error) {
+    console.error(`[MCP/${toolName}] Error:`, error);
+    return mcpResult(id, { success: false, error: 'Tool execution failed' }, true);
+  }
+});
+
 // Notification pipeline health: verifies inbox, preference, and delivery-audit
 // storage are queryable. This does not create users, content, or notifications.
 router.get('/api/health/notifications', async (request, env) => {
@@ -15369,11 +15942,11 @@ router.get('*', async (request, env) => {
         headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
         headers.set('Content-Security-Policy', [
           "default-src 'self'",
-          `script-src 'self' 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
-          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
-          "font-src 'self' https://fonts.gstatic.com",
+          `script-src 'self' 'nonce-${nonce}' https://static.cloudflareinsights.com`,
+          "style-src 'self' 'unsafe-inline'",
+          "font-src 'self' data:",
           "img-src 'self' data: https: blob:",
-          "connect-src 'self' https://aihangout.ai wss://aihangout.ai",
+          "connect-src 'self' https://aihangout.ai https://cloudflareinsights.com wss://aihangout.ai",
           "object-src 'none'",
           "frame-ancestors 'none'",
           "base-uri 'self'",
@@ -15391,11 +15964,11 @@ router.get('*', async (request, env) => {
         headers.set('Content-Type', 'text/html; charset=utf-8');
         headers.set('Content-Security-Policy', [
           "default-src 'self'",
-          `script-src 'self' 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
-          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
-          "font-src 'self' https://fonts.gstatic.com",
+          `script-src 'self' 'nonce-${nonce}' https://static.cloudflareinsights.com`,
+          "style-src 'self' 'unsafe-inline'",
+          "font-src 'self' data:",
           "img-src 'self' data: https: blob:",
-          "connect-src 'self' https://aihangout.ai wss://aihangout.ai",
+          "connect-src 'self' https://aihangout.ai https://cloudflareinsights.com wss://aihangout.ai",
           "object-src 'none'",
           "frame-ancestors 'none'",
           "base-uri 'self'",
@@ -15421,11 +15994,11 @@ router.get('*', async (request, env) => {
       h.set('Content-Type', 'text/html; charset=utf-8');
       h.set('Content-Security-Policy', [
         "default-src 'self'",
-        `script-src 'self' 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
-        "font-src 'self' https://fonts.gstatic.com",
+        `script-src 'self' 'nonce-${nonce}' https://static.cloudflareinsights.com`,
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
         "img-src 'self' data: https: blob:",
-        "connect-src 'self' https://aihangout.ai wss://aihangout.ai",
+        "connect-src 'self' https://aihangout.ai https://cloudflareinsights.com wss://aihangout.ai",
         "object-src 'none'",
         "frame-ancestors 'none'",
         "base-uri 'self'",
@@ -15834,7 +16407,11 @@ export default {
 
       if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
         const contentType = request.headers.get('Content-Type') || '';
-        if (!contentType.toLowerCase().startsWith('application/json')) {
+        const allowsBeaconPayload = url.pathname === '/api/events/batch' &&
+          (contentType === '' || contentType.toLowerCase().startsWith('text/plain'));
+        const allowsEmptyBody = url.pathname === '/api/auth/logout';
+        if (!allowsBeaconPayload && !allowsEmptyBody &&
+            !contentType.toLowerCase().startsWith('application/json')) {
           return jsonResponse({
             success: false,
             error: 'Content-Type must be application/json'
@@ -15847,6 +16424,30 @@ export default {
           success: false,
           error: 'Legacy content mutation endpoint retired',
           replacement: 'Use PUT or DELETE /api/problems/:id'
+        }, { status: 410 });
+      }
+
+      const retiredPrototypePaths = new Map([
+        ['/api/identity/universal-passport', 'Agent identity passport is not an operational product capability'],
+        ['/api/identity/track-activity', 'Agent identity passport is not an operational product capability'],
+        ['/api/identity/sync-collaboration', 'Agent identity passport is not an operational product capability'],
+        ['/api/predictions/problem-analysis', 'Prototype prediction endpoint retired; use grounded problem and solution data'],
+        ['/api/predictions/solution-success', 'Prototype prediction endpoint retired; use verified-solution metrics'],
+        ['/api/personas/matching', 'Prototype persona matching endpoint retired'],
+        ['/api/personas/evolution', 'Prototype persona evolution endpoint retired'],
+        ['/api/matching/problem-solution', 'Prototype matching endpoint retired; use /api/matching/recommendations/:problem_id'],
+        ['/api/matching/track-effectiveness', 'Prototype effectiveness endpoint retired; use human solution verification']
+      ]);
+      const retiredIdentityAnalytics = /^\/api\/identity\/analytics\/[^/]+$/.test(url.pathname);
+      const retiredPersonaAgent = /^\/api\/personas\/agent\/[^/]+$/.test(url.pathname);
+      if (retiredPrototypePaths.has(url.pathname) || retiredIdentityAnalytics || retiredPersonaAgent) {
+        return jsonResponse({
+          success: false,
+          error: retiredPrototypePaths.get(url.pathname) ||
+            (retiredIdentityAnalytics
+              ? 'Agent identity passport is not an operational product capability'
+              : 'Prototype persona analysis endpoint retired'),
+          capability_status: 'retired'
         }, { status: 410 });
       }
     }

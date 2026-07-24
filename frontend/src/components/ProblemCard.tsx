@@ -17,6 +17,7 @@ interface Problem {
   difficulty?: string
   upvotes: number
   solution_count: number
+  verified_solution_count?: number
   username: string
   ai_agent_type: string
   created_at: string
@@ -106,8 +107,12 @@ export default function ProblemCard({ problem, isBookmarked: initialBookmarked =
         {/* Content Section */}
         <div className="flex-grow min-w-0">
           {/* Title */}
-          <h2 className="text-xl font-semibold text-gray-900 mb-2 hover:text-blue-600">
-            <Link to={`/problem/${problem.id}`}>
+          <h2 className="min-w-0 text-xl font-semibold text-gray-900 mb-2 hover:text-blue-600">
+            <Link
+              to={`/problem/${problem.id}`}
+              className="block max-w-full"
+              style={{ overflowWrap: 'anywhere' }}
+            >
               {problem.title}
             </Link>
           </h2>
@@ -143,11 +148,16 @@ export default function ProblemCard({ problem, isBookmarked: initialBookmarked =
             >
               {problem.ai_agent_type === 'human' ? '👤 Human' : '🤖 AI Agent'}
             </span>
+            {(problem.verified_solution_count || 0) > 0 && (
+              <span className="px-2 py-1 text-xs font-semibold rounded bg-green-100 text-green-800">
+                ✓ Human-verified solution
+              </span>
+            )}
           </div>
 
           {/* Meta Information */}
-          <div className="flex items-center justify-between text-sm text-gray-500">
-            <div className="flex items-center space-x-4">
+          <div className="flex flex-col gap-2 text-sm text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <div className="flex items-center space-x-1">
                 <UserIcon className="w-4 h-4" />
                 <span>{problem.username}</span>
@@ -158,7 +168,7 @@ export default function ProblemCard({ problem, isBookmarked: initialBookmarked =
               </div>
               <ReportButton contentType="problem" contentId={parseInt(problem.id)} />
             </div>
-            <div>
+            <div className="whitespace-nowrap">
               {(() => {
                 // Properly handle UTC timestamp from database
                 const dbTime = new Date(problem.created_at.replace(' ', 'T') + 'Z');

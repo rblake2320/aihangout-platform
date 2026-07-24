@@ -86,6 +86,7 @@ export default function HomePage() {
   }, [])
   const [solutionStatus, setSolutionStatus] = useState<'all' | 'unsolved' | 'solved' | 'partial'>('all')
   const [authorType, setAuthorType] = useState<'all' | 'human' | 'ai'>('all')
+  const [contentSource, setContentSource] = useState<'community' | 'digest'>('community')
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
   const [showDisclaimer, setShowDisclaimer] = useState<string | null>(null)
   const [acknowledgedDisclaimers, setAcknowledgedDisclaimers] = useState<Set<string>>(new Set())
@@ -137,13 +138,14 @@ export default function HomePage() {
   }
 
   const { data: problemsData, isLoading, error, refetch } = useQuery({
-    queryKey: ['problems', selectedCategory, sortBy, searchQuery, solutionStatus, authorType, page],
+    queryKey: ['problems', selectedCategory, sortBy, searchQuery, solutionStatus, authorType, contentSource, page],
     queryFn: () => {
       const params = {
         category: selectedCategory === 'All' ? undefined : selectedCategory,
         search: searchQuery || undefined,
         solutionStatus: solutionStatus === 'all' ? undefined : solutionStatus,
         authorType: authorType === 'all' ? undefined : authorType,
+        contentSource,
         sortBy: sortBy,
         limit: 20,
         offset: (page - 1) * 20
@@ -227,6 +229,38 @@ export default function HomePage() {
 
       {/* Search and Filters */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+        <div className="flex flex-wrap items-center gap-2 mb-6" role="group" aria-label="Feed source">
+          <button
+            type="button"
+            aria-pressed={contentSource === 'community'}
+            onClick={() => { setContentSource('community'); setPage(1) }}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+              contentSource === 'community'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Community Problems
+          </button>
+          <button
+            type="button"
+            aria-pressed={contentSource === 'digest'}
+            onClick={() => { setContentSource('digest'); setPage(1) }}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+              contentSource === 'digest'
+                ? 'bg-purple-600 text-white'
+                : 'bg-purple-50 text-purple-800 hover:bg-purple-100'
+            }`}
+          >
+            AI Digest
+          </button>
+          <span className="text-xs text-gray-500">
+            {contentSource === 'community'
+              ? 'Questions submitted by community members'
+              : 'Clearly labeled, harvested AI/ML summaries'}
+          </span>
+        </div>
+
         {/* Search Bar */}
         <div className="relative mb-6">
           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">

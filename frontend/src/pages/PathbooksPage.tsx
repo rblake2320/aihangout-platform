@@ -8,6 +8,8 @@ import {
   ShieldCheckIcon,
 } from '@heroicons/react/24/outline'
 import { pathbooksAPI } from '../services/api'
+import { useAuthStore } from '../stores/authStore'
+import toast from 'react-hot-toast'
 
 interface Pathbook {
   id: number
@@ -28,6 +30,8 @@ interface Pathbook {
   source_type?: string
   confidence?: number
   token_savings_estimate?: number
+  times_applied?: number
+  times_succeeded?: number
 }
 
 const TRUST_LABELS: Record<string, string> = {
@@ -51,6 +55,7 @@ const TRUST_CLASSES: Record<string, string> = {
 }
 
 export default function PathbooksPage() {
+  const { isAuthenticated } = useAuthStore()
   const [pathbooks, setPathbooks] = useState<Pathbook[]>([])
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState('')
@@ -58,6 +63,7 @@ export default function PathbooksPage() {
   const [lookupText, setLookupText] = useState('')
   const [lookupLoading, setLookupLoading] = useState(false)
   const [lookupMessage, setLookupMessage] = useState('')
+  const [reportingPathbook, setReportingPathbook] = useState<string | null>(null)
 
   const totalSavings = useMemo(
     () => pathbooks.reduce((sum, item) => sum + (item.token_savings_estimate || 0), 0),
@@ -109,6 +115,37 @@ export default function PathbooksPage() {
     }
   }
 
+  const reportOutcome = async (item: Pathbook, outcome: 'success' | 'failure') => {
+    if (!isAuthenticated) {
+      toast.error('Log in to report a Pathbook result')
+      return
+    }
+    setReportingPathbook(item.pathbook_id)
+    try {
+      const response = await pathbooksAPI.verify(item.pathbook_id, {
+        outcome,
+        environment: navigator.userAgent.slice(0, 1000),
+      })
+      const metrics = response.data.metrics
+      setPathbooks(current => current.map(pathbook =>
+        pathbook.pathbook_id === item.pathbook_id
+          ? {
+              ...pathbook,
+              times_applied: metrics.times_applied,
+              times_succeeded: metrics.times_succeeded,
+              confidence: metrics.confidence,
+              trust_tier: metrics.trust_tier,
+            }
+          : pathbook
+      ))
+      toast.success(outcome === 'success' ? 'Successful result recorded' : 'Failed attempt recorded')
+    } catch (error: any) {
+      toast.error(error.response?.data?.error || 'Could not record this result')
+    } finally {
+      setReportingPathbook(null)
+    }
+  }
+
   const PathbookCard = ({ item }: { item: Pathbook }) => (
     <article className="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
@@ -147,8 +184,31 @@ export default function PathbooksPage() {
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-500">
-        <span>{item.pathbook_id}</span>
-        <span>{item.error_fingerprint}</span>
+        <div>
+          <div>{item.pathbook_id}</div>
+          <div className="mt-1 text-xs">
+            {item.times_succeeded || 0} successful / {item.times_applied || 0} reported applications
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={reportingPathbook === item.pathbook_id}
+            onClick={() => reportOutcome(item, 'success')}
+            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            This worked
+          </button>
+          <button
+            type="button"
+            disabled={reportingPathbook === item.pathbook_id}
+            onClick={() => reportOutcome(item, 'failure')}
+            className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+          >
+            This failed
+          </button>
+          <span className="max-w-[240px] truncate" title={item.error_fingerprint}>{item.error_fingerprint}</span>
+        </div>
       </div>
     </article>
   )
@@ -163,7 +223,7 @@ export default function PathbooksPage() {
               Pathbook Registry
             </h1>
             <p className="mt-4 text-lg text-gray-600">
-              Machine-readable failure remediation for agents. Pathbooks turn repeated error traces into deterministic, signed fix paths with trust tiers and verification steps.
+              Machine-readable failure remediation for agents. Pathbooks turn repeated error traces into structured fix paths with trust tiers, verification steps, and reported outcomes.
             </p>
           </div>
           <div className="grid grid-cols-3 gap-3 text-center">
@@ -219,15 +279,15 @@ export default function PathbooksPage() {
           <div className="space-y-4 text-sm text-gray-600">
             <div className="flex">
               <ShieldCheckIcon className="w-5 h-5 text-emerald-600 mr-3 shrink-0" />
-              <span>Trust tiers prevent draft, stale, or dangerous fixes from being auto-executed.</span>
+              <span>Trust tiers keep draft, deprecated, and dangerous records out of active agent lookup results.</span>
             </div>
             <div className="flex">
               <ClipboardDocumentIcon className="w-5 h-5 text-blue-600 mr-3 shrink-0" />
-              <span>Endpoints map cleanly to MCP tools: lookup, contribute, verify, execute.</span>
+              <span>Production MCP tools support indexed lookup and authenticated success/failure reporting.</span>
             </div>
             <div className="flex">
               <CheckBadgeIcon className="w-5 h-5 text-purple-600 mr-3 shrink-0" />
-              <span>Signed provenance can promote records from draft to maintainer-approved.</span>
+              <span>Independent successful reports conservatively promote records through reproduced, verified, and community tiers.</span>
             </div>
           </div>
         </div>

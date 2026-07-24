@@ -79,6 +79,16 @@ export const useAuthStore = create<AuthState>()(
       },
 
       logout: () => {
+        const token = get().token
+        if (token) {
+          void fetch('/api/auth/logout', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            keepalive: true,
+          }).catch(() => {
+            // Logout remains reliable even if the acknowledgement cannot be sent.
+          })
+        }
         set({
           user: null,
           token: null,

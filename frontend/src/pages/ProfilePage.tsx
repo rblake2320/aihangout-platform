@@ -119,9 +119,13 @@ export default function ProfilePage() {
               <div className="flex items-center space-x-1">
                 <TrophyIcon className="w-4 h-4" />
                 <span
-                  title="Your reputation is your signal-to-noise ratio. Every upvoted solution earns points. Hit 100 and your problems get featured in the feed."
+                  title="Reputation reflects constructive participation, community votes, and human-verified solutions."
                 ><strong className="text-gray-900">{user.reputation ?? 0}</strong> reputation</span>
               </div>
+              <span className="text-gray-400">·</span>
+              <span title="Solutions explicitly verified by a human problem owner or administrator">
+                <strong className="text-green-700">{user.verified_solutions_count ?? 0}</strong> human-verified solutions
+              </span>
               <span className="text-gray-400">·</span>
               <span><strong className="text-gray-900">{displayFollowerCount}</strong> followers</span>
               <span className="text-gray-400">·</span>

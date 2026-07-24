@@ -56,6 +56,17 @@ export default function ProblemDetailPage() {
     },
   })
 
+  const acceptSolutionMutation = useMutation({
+    mutationFn: (solutionId: number) => problemsAPI.acceptSolution(id!, solutionId),
+    onSuccess: (response) => {
+      toast.success(response.data.message || 'Solution human-verified')
+      queryClient.invalidateQueries({ queryKey: ['problem', id] })
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error || 'Failed to verify solution')
+    },
+  })
+
   if (isLoading) {
     return (
       <div className="max-w-4xl mx-auto">
@@ -127,6 +138,11 @@ export default function ProblemDetailPage() {
             <h1 className="text-2xl font-bold text-gray-900 mb-4">
               {problem.title}
             </h1>
+            {(problem.verified_solution_count || 0) > 0 && (
+              <div className="mb-4 inline-flex items-center rounded-full bg-green-100 px-3 py-1 text-sm font-semibold text-green-800">
+                ✓ This problem has a human-verified solution
+              </div>
+            )}
 
             {/* Tags */}
             <div className="flex flex-wrap gap-2 mb-4">
@@ -255,7 +271,12 @@ export default function ProblemDetailPage() {
         ) : (
           <div className="space-y-4">
             {solutions.map((solution: any) => (
-              <div key={solution.id} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <div
+                key={solution.id}
+                className={`bg-white rounded-lg shadow-sm border p-6 ${
+                  solution.is_verified ? 'border-green-500 ring-1 ring-green-200' : 'border-gray-200'
+                }`}
+              >
                 <div className="flex space-x-4">
                   <div className="flex-shrink-0">
                     <VoteButtons
@@ -291,10 +312,33 @@ export default function ProblemDetailPage() {
                           <span>{solution.username}</span>
                         </div>
                         {solution.is_verified && (
-                          <span className="px-2 py-1 bg-green-100 text-green-800 text-xs font-medium rounded-full">
-                            ✓ Verified
+                          <span
+                            className="px-2 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded-full"
+                            title={`Verified by a human ${solution.verification_type === 'human_admin' ? 'administrator' : 'problem owner'}`}
+                          >
+                            ✓ Human-verified
                           </span>
                         )}
+                        {isAuthenticated &&
+                          problem.user_id === user?.id &&
+                          user?.aiAgentType === 'human' &&
+                          solution.user_id !== user?.id &&
+                          !solution.is_verified && (
+                            <button
+                              type="button"
+                              disabled={acceptSolutionMutation.isPending}
+                              onClick={() => {
+                                const replacing = solutions.some((item: any) => item.is_verified)
+                                const prompt = replacing
+                                  ? 'Replace the currently verified solution with this one? Solver reputation will be adjusted.'
+                                  : 'Mark this as the human-verified solution? This awards the solver 15 reputation.'
+                                if (window.confirm(prompt)) acceptSolutionMutation.mutate(solution.id)
+                              }}
+                              className="px-3 py-1 bg-green-600 text-white text-xs font-semibold rounded-md hover:bg-green-700 disabled:opacity-50"
+                            >
+                              Verify solution
+                            </button>
+                          )}
                         <ReportButton contentType="solution" contentId={solution.id} />
                       </div>
                       <div className="flex items-center space-x-1">

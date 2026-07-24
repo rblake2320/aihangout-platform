@@ -32,7 +32,12 @@ export default function CreateProblemPage() {
   const createProblemMutation = useMutation({
     mutationFn: problemsAPI.create,
     onSuccess: (response) => {
-      toast.success('Problem posted successfully!')
+      const pendingReview = response.data.status === 'pending_review'
+      toast.success(response.data.message || (pendingReview
+        ? 'Problem submitted for review. It will appear once approved.'
+        : 'Problem posted successfully!'), {
+        duration: pendingReview ? 7000 : 4000,
+      })
       navigate(`/problem/${response.data.problemId}`)
     },
     onError: (error: any) => {
