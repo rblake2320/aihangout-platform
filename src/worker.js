@@ -1990,19 +1990,62 @@ router.post('/api/problems', async (request, env) => {
 // NOTIFICATION HELPER
 // ============================================================================
 
-async function createNotification(env, { userId, actorId, type, targetType, targetId, message }) {
+async function logNotificationDelivery(env, data) {
+  try {
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO notification_delivery_log
+        (user_id, actor_id, notification_type, target_type, target_id,
+         source_type, source_id, channel, status, error_message)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'in_app', ?, ?)
+    `).bind(
+      data.userId, data.actorId ?? null, data.type,
+      data.targetType ?? null, data.targetId ?? null,
+      data.sourceType ?? null, data.sourceId != null ? String(data.sourceId) : null,
+      data.status, data.errorMessage ?? null
+    ).run();
+  } catch (auditError) {
+    console.error('[Notification] Failed to write delivery audit:', auditError?.message || auditError);
+  }
+}
+
+async function createNotification(env, {
+  userId, actorId, type, targetType, targetId, message, sourceType, sourceId
+}) {
   if (!userId || !actorId || userId === actorId) return;
   try {
     const settingKey = `notify_${type}`;
     const settings = await env.AIHANGOUT_DB
       .prepare('SELECT * FROM user_settings WHERE user_id = ?')
       .bind(userId).first();
-    if (settings && settings[settingKey] === 0) return;
-    await env.AIHANGOUT_DB
-      .prepare('INSERT OR IGNORE INTO notifications (user_id, actor_id, type, target_type, target_id, message) VALUES (?,?,?,?,?,?)')
-      .bind(userId, actorId, type, targetType ?? null, targetId ?? null, message).run();
+    if (settings && settings[settingKey] === 0) {
+      await logNotificationDelivery(env, {
+        userId, actorId, type, targetType, targetId, sourceType, sourceId,
+        status: 'suppressed'
+      });
+      return;
+    }
+    const existing = await env.AIHANGOUT_DB.prepare(`
+      SELECT id FROM notifications
+      WHERE user_id = ? AND actor_id = ? AND type = ?
+        AND target_type IS ? AND target_id IS ?
+    `).bind(userId, actorId, type, targetType ?? null, targetId ?? null).first();
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO notifications
+        (user_id, actor_id, type, target_type, target_id, message, is_read, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, FALSE, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, actor_id, type, target_type, target_id)
+      DO UPDATE SET message = excluded.message, is_read = FALSE, created_at = CURRENT_TIMESTAMP
+    `).bind(userId, actorId, type, targetType ?? null, targetId ?? null, message).run();
+    await logNotificationDelivery(env, {
+      userId, actorId, type, targetType, targetId, sourceType, sourceId,
+      status: existing ? 'refreshed' : 'created'
+    });
   } catch (e) {
-    // Silent failure — notifications must never break the main response
+    console.error('[Notification] Delivery failed:', e?.message || e);
+    await logNotificationDelivery(env, {
+      userId, actorId, type, targetType, targetId, sourceType, sourceId,
+      status: 'failed', errorMessage: String(e?.message || e).slice(0, 500)
+    });
   }
 }
 
@@ -2151,12 +2194,18 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     }
 
     // Create AI learning data for Sentinel Model
-    await env.AIHANGOUT_DB
-      .prepare(`INSERT INTO ai_learning_data
-        (problem_id, solution_id, why_vector)
-        VALUES (?, ?, ?)`)
-      .bind(problemId, result.meta.last_row_id, JSON.stringify({ whyExplanation: safeWhyExplanation }))
-      .run();
+    try {
+      await env.AIHANGOUT_DB
+        .prepare(`INSERT INTO ai_learning_data
+          (problem_id, solution_id, why_vector)
+          VALUES (?, ?, ?)`)
+        .bind(problemId, result.meta.last_row_id, JSON.stringify({ whyExplanation: safeWhyExplanation }))
+        .run();
+    } catch (learningError) {
+      // The user's accepted response must not be reported as failed because an
+      // auxiliary learning record could not be written.
+      console.error('[Solution] AI learning capture failed:', learningError?.message || learningError);
+    }
 
     // Notify problem owner about new solution (non-blocking)
     if (problemOwner.user_id !== user.id) {
@@ -2166,7 +2215,9 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
         type: 'new_solution',
         targetType: 'problem',
         targetId: parseInt(problemId),
-        message: `${user.username} answered your question`
+        message: `${user.username} answered your question`,
+        sourceType: 'solution',
+        sourceId: result.meta.last_row_id
       }));
     }
 
@@ -2262,7 +2313,7 @@ router.post('/api/problems/:id/vote', async (request, env, ctx) => {
     await env.AIHANGOUT_DB
       .prepare('DELETE FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
       .bind(user.id, 'problem', targetId).run();
-    await env.AIHANGOUT_DB
+    const insertedVote = await env.AIHANGOUT_DB
       .prepare('INSERT INTO votes (user_id, target_type, target_id, vote_type) VALUES (?, ?, ?, ?)')
       .bind(user.id, 'problem', targetId, voteType).run();
 
@@ -2286,7 +2337,9 @@ router.post('/api/problems/:id/vote', async (request, env, ctx) => {
         type: 'vote_on_content',
         targetType: 'problem',
         targetId: parseInt(targetId),
-        message: `${user.username} upvoted your problem`
+        message: `${user.username} upvoted your problem`,
+        sourceType: 'vote',
+        sourceId: insertedVote.meta.last_row_id
       }));
     }
 
@@ -2353,7 +2406,7 @@ router.post('/api/vote', async (request, env, ctx) => {
       .run();
 
     // Add new vote
-    await env.AIHANGOUT_DB
+    const insertedVote = await env.AIHANGOUT_DB
       .prepare('INSERT INTO votes (user_id, target_type, target_id, vote_type) VALUES (?, ?, ?, ?)')
       .bind(user.id, targetType, targetId, voteType)
       .run();
@@ -2384,7 +2437,9 @@ router.post('/api/vote', async (request, env, ctx) => {
         type: 'vote_on_content',
         targetType,
         targetId: parseInt(targetId),
-        message: `${user.username} upvoted your ${targetType}`
+        message: `${user.username} upvoted your ${targetType}`,
+        sourceType: 'vote',
+        sourceId: insertedVote.meta.last_row_id
       }));
     } else if (voteType === 'down' && wasUpvote) {
       await env.AIHANGOUT_DB
@@ -13274,7 +13329,7 @@ router.post('/api/users/:id/follow', async (request, env, ctx) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     } else {
-      await env.AIHANGOUT_DB
+      const insertedFollow = await env.AIHANGOUT_DB
         .prepare('INSERT INTO followers (follower_id, following_id) VALUES (?, ?)')
         .bind(user.id, targetId).run();
       ctx.waitUntil(createNotification(env, {
@@ -13283,7 +13338,9 @@ router.post('/api/users/:id/follow', async (request, env, ctx) => {
         type: 'new_follower',
         targetType: 'user',
         targetId: user.id,
-        message: `${user.username} started following you`
+        message: `${user.username} started following you`,
+        sourceType: 'follow',
+        sourceId: insertedFollow.meta.last_row_id
       }));
       return new Response(JSON.stringify({ success: true, following: true }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -15096,6 +15153,42 @@ router.get('/api/health/auth', async (request, env) => {
     status: ok ? 200 : 503,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   });
+});
+
+// Notification pipeline health: verifies inbox, preference, and delivery-audit
+// storage are queryable. This does not create users, content, or notifications.
+router.get('/api/health/notifications', async (request, env) => {
+  const checks = {};
+  let ok = true;
+  try {
+    const requiredTables = ['notifications', 'user_settings', 'notification_delivery_log'];
+    const placeholders = requiredTables.map(() => '?').join(',');
+    const tables = await env.AIHANGOUT_DB.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})
+    `).bind(...requiredTables).all();
+    const present = new Set((tables.results || []).map(row => row.name));
+    const missing = requiredTables.filter(name => !present.has(name));
+    checks.schema = missing.length ? `missing:${missing.join(',')}` : 'ok';
+    if (missing.length) ok = false;
+
+    if (!missing.length) {
+      await env.AIHANGOUT_DB.prepare(`
+        SELECT notify_new_follower, notify_vote_on_content, notify_new_solution, email_notifications
+        FROM user_settings LIMIT 1
+      `).first();
+      checks.preferences = 'ok';
+      const failures = await env.AIHANGOUT_DB.prepare(`
+        SELECT COUNT(*) AS count FROM notification_delivery_log
+        WHERE status = 'failed' AND created_at >= datetime('now', '-1 hour')
+      `).first();
+      checks.failed_last_hour = Number(failures?.count || 0);
+    }
+  } catch (error) {
+    console.error('[Health/notifications] Error:', error);
+    checks.exception = String(error?.message || error);
+    ok = false;
+  }
+  return jsonResponse({ status: ok ? 'ok' : 'degraded', checks }, { status: ok ? 200 : 503 });
 });
 
 // HEAD handler for SPA routes (/terms, /privacy, /dmca, etc.)

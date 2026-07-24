@@ -20,6 +20,7 @@ const REQUIRED_CHECKS = [
     'Frontend contains sorting fix',
     'Deployed JS matches local dist build',
     'Auth crypto healthy (/api/health/auth)',
+    'Notification pipeline healthy (/api/health/notifications)',
     'Grounded capability APIs return production-safe responses',
     'PBKDF2 iterations within Workers cap (local src)'
 ];
@@ -137,6 +138,17 @@ async function verifyDeployment() {
             passedChecks++;
         } else {
             console.log(`❌ Auth crypto: DEGRADED — ${authHealth.data}`);
+        }
+
+        const notificationHealth = await makeExpectedHttpRequest(
+            `${PRODUCTION_URL}/api/health/notifications`, 200
+        );
+        if (notificationHealth.statusCode === 200 &&
+            JSON.parse(notificationHealth.data).status === 'ok') {
+            console.log('✅ Notification pipeline: healthy');
+            passedChecks++;
+        } else {
+            console.log(`❌ Notification pipeline: DEGRADED — ${notificationHealth.data}`);
         }
 
         // Legacy flywheel routes once called nonexistent helpers and returned raw 500s.
