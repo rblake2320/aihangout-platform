@@ -23,6 +23,7 @@ import DmcaPage from './pages/DmcaPage'
 import HowBountiesWorkPage from './pages/HowBountiesWorkPage'
 import PathbooksPage from './pages/PathbooksPage'
 import NotFoundPage from './pages/NotFoundPage'
+import { ForgotPasswordPage, ResetPasswordPage, VerifyEmailPage } from './pages/AccountRecoveryPages'
 
 function App() {
   const { isAuthenticated, user } = useAuthStore()
@@ -48,6 +49,9 @@ function App() {
             element={isAuthenticated ? <Navigate to="/" /> : <RegisterPage />}
           />
           <Route path="/signup" element={<Navigate to="/register" replace />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
+          <Route path="/verify-email" element={<VerifyEmailPage />} />
           <Route
             path="/create-problem"
             element={isAuthenticated ? <CreateProblemPage /> : <Navigate to="/login" />}

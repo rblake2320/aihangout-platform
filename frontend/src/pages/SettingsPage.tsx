@@ -116,15 +116,12 @@ export default function SettingsPage() {
             checked={!!settings?.notify_new_solution}
             onChange={v => handleChange('notify_new_solution', v)}
           />
-          <div className="flex items-center justify-between py-4 opacity-50 cursor-not-allowed">
-            <div>
-              <p className="font-medium text-gray-900">Email notifications</p>
-              <p className="text-sm text-gray-500">Receive email summaries (coming soon)</p>
-            </div>
-            <div className="relative inline-flex h-6 w-11 items-center rounded-full bg-gray-300">
-              <span className="inline-block h-4 w-4 transform rounded-full bg-white translate-x-1" />
-            </div>
-          </div>
+          <Toggle
+            label="Email notifications"
+            description="Receive email when someone responds to your content (verified email required)"
+            checked={!!settings?.email_notifications}
+            onChange={v => handleChange('email_notifications', v)}
+          />
         </div>
       </div>
     </div>

@@ -208,7 +208,9 @@ async function verifyDeployment() {
             `${PRODUCTION_URL}/api/health/notifications`, 200
         );
         if (notificationHealth.statusCode === 200 &&
-            JSON.parse(notificationHealth.data).status === 'ok') {
+            JSON.parse(notificationHealth.data).status === 'ok' &&
+            JSON.parse(notificationHealth.data).checks?.schema === 'ok' &&
+            JSON.parse(notificationHealth.data).checks?.email_provider === 'configured') {
             console.log('✅ Notification pipeline: healthy');
             passedChecks++;
         } else {

@@ -933,6 +933,82 @@ async function hashToken(raw) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+function validateNewPassword(password) {
+  if (typeof password !== 'string' || password.length < 12 || password.length > 128) {
+    return 'Password must be 12-128 characters';
+  }
+  const normalized = password.toLowerCase().replace(/\s+/g, '');
+  const common = new Set([
+    'password', 'password123', 'password1234', '123456789012',
+    'qwertyuiop12', 'letmein123456', 'admin12345678', 'aihangout123'
+  ]);
+  if (common.has(normalized) || /^(.)\1{11,}$/.test(password)) {
+    return 'Choose a less common password';
+  }
+  return null;
+}
+
+function escapeEmailHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+async function sendTransactionalEmail(env, { to, subject, html, text, idempotencyKey }) {
+  if (!env.RESEND_API_KEY) throw new Error('RESEND_API_KEY is not configured');
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey.slice(0, 256) } : {})
+    },
+    body: JSON.stringify({
+      from: 'AI Hangout <notifications@updates.aihangout.ai>',
+      to: [to],
+      subject,
+      html,
+      text
+    })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`Resend rejected email (${response.status}): ${payload?.message || 'delivery failed'}`);
+  }
+  return payload;
+}
+
+async function issueAuthEmailToken(env, userId, purpose, ttlMinutes) {
+  const raw = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(32)))
+    .map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const tokenHash = await hashToken(raw);
+  await env.AIHANGOUT_DB.batch([
+    env.AIHANGOUT_DB.prepare(
+      'DELETE FROM auth_email_tokens WHERE user_id = ? AND purpose = ? AND used_at IS NULL'
+    ).bind(userId, purpose),
+    env.AIHANGOUT_DB.prepare(`
+      INSERT INTO auth_email_tokens (user_id, purpose, token_hash, expires_at)
+      VALUES (?, ?, ?, datetime('now', ?))
+    `).bind(userId, purpose, tokenHash, `+${ttlMinutes} minutes`)
+  ]);
+  return raw;
+}
+
+async function sendVerificationEmail(env, user) {
+  const token = await issueAuthEmailToken(env, user.id, 'verify_email', 1440);
+  const link = `https://aihangout.ai/verify-email?token=${encodeURIComponent(token)}`;
+  return sendTransactionalEmail(env, {
+    to: user.email,
+    subject: 'Verify your AI Hangout email',
+    text: `Verify your email address by opening this link within 24 hours: ${link}`,
+    html: `<p>Hi ${escapeEmailHtml(user.username)},</p><p>Verify your AI Hangout email address:</p><p><a href="${link}">Verify email</a></p><p>This link expires in 24 hours.</p>`,
+    idempotencyKey: `verify-${user.id}-${await hashToken(token)}`
+  });
+}
+
 // Non-reversible 16-char session identifier for analytics logging.
 // Stores a prefix of the SHA-256 hash — enough to correlate events, never enough to recover the token.
 async function hashSessionId(token) {
@@ -1212,21 +1288,26 @@ async function checkPriorApprovedPosts(userId, db) {
 // API Routes
 
 // User Authentication
-router.post('/api/auth/register', async (request, env) => {
+router.post('/api/auth/register', async (request, env, ctx) => {
   try {
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'register');
     if (rl.limited) return rateLimitResponse(rl);
 
-    const { username, email, password, aiAgentType = 'human' } = await request.json();
+    const body = await request.json();
+    const username = String(body.username || '').trim();
+    const email = String(body.email || '').trim().toLowerCase();
+    const password = body.password;
+    const aiAgentType = body.aiAgentType || 'human';
 
     if (!username || username.length > 50) return new Response(JSON.stringify({ success: false, error: 'Username must be 1-50 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     // Restrict usernames to a safe character set. This is the one user field that is echoed
     // into stored notification text and AI-facing surfaces, so it must not carry HTML, quotes,
     // whitespace tricks, or LLM control tokens (<|im_start|>, [INST], etc.).
     if (!/^[A-Za-z0-9_.-]+$/.test(username)) return new Response(JSON.stringify({ success: false, error: 'Username may only contain letters, numbers, and _ . -' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-    if (!email || email.length > 254) return new Response(JSON.stringify({ success: false, error: 'Invalid email' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-    if (!password || password.length < 8 || password.length > 128) return new Response(JSON.stringify({ success: false, error: 'Password must be 8-128 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return new Response(JSON.stringify({ success: false, error: 'Invalid email' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    const passwordError = validateNewPassword(password);
+    if (passwordError) return new Response(JSON.stringify({ success: false, error: passwordError }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     const VALID_ACCOUNT_TYPES = new Set(['human', 'specialized', 'general', 'research', 'curator']);
     if (!VALID_ACCOUNT_TYPES.has(aiAgentType)) {
       return new Response(JSON.stringify({
@@ -1319,10 +1400,16 @@ router.post('/api/auth/register', async (request, env) => {
       console.error('Analytics logging failed (non-critical):', analyticsError);
     }
 
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(sendVerificationEmail(env, { id: userId, username, email })
+        .catch(error => console.error('[Email] Registration verification failed:', error?.message || error)));
+    }
+
     return new Response(JSON.stringify({
       success: true,
       token,
-      user: { id: userId, username, email, aiAgentType }
+      user: { id: userId, username, email, aiAgentType, emailVerified: false },
+      verificationEmailSent: Boolean(env.RESEND_API_KEY)
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -1332,13 +1419,112 @@ router.post('/api/auth/register', async (request, env) => {
   }
 });
 
+router.post('/api/auth/email/verify', async (request, env) => {
+  try {
+    const { token } = await request.json();
+    if (typeof token !== 'string' || token.length < 32 || token.length > 256) {
+      return errResponse('Invalid or expired verification link', null, 400);
+    }
+    const tokenHash = await hashToken(token);
+    const record = await env.AIHANGOUT_DB.prepare(`
+      UPDATE auth_email_tokens SET used_at = CURRENT_TIMESTAMP
+      WHERE token_hash = ? AND purpose = 'verify_email' AND used_at IS NULL
+        AND expires_at > CURRENT_TIMESTAMP
+      RETURNING user_id
+    `).bind(tokenHash).first();
+    if (!record) return errResponse('Invalid or expired verification link', null, 400);
+    await env.AIHANGOUT_DB.prepare(
+      'UPDATE users SET email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP) WHERE id = ?'
+    ).bind(record.user_id).run();
+    return jsonResponse({ success: true, message: 'Email verified' });
+  } catch (error) {
+    return errResponse('Email verification failed', error);
+  }
+});
+
+router.post('/api/auth/email/resend', async (request, env, ctx) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+    const current = await env.AIHANGOUT_DB.prepare(
+      'SELECT id, username, email, email_verified_at FROM users WHERE id = ?'
+    ).bind(user.id).first();
+    if (current?.email_verified_at) return jsonResponse({ success: true, alreadyVerified: true });
+    ctx.waitUntil(sendVerificationEmail(env, current)
+      .catch(error => console.error('[Email] Verification resend failed:', error?.message || error)));
+    return jsonResponse({ success: true, message: 'Verification email requested' });
+  } catch (error) {
+    return errResponse('Unable to resend verification email', error);
+  }
+});
+
+router.post('/api/auth/password/forgot', async (request, env, ctx) => {
+  try {
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'login');
+    if (rl.limited) return rateLimitResponse(rl);
+    const { email } = await request.json();
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const user = normalizedEmail
+      ? await env.AIHANGOUT_DB.prepare('SELECT id, username, email FROM users WHERE email = ?')
+          .bind(normalizedEmail).first()
+      : null;
+    if (user && ctx?.waitUntil) {
+      ctx.waitUntil((async () => {
+        const token = await issueAuthEmailToken(env, user.id, 'reset_password', 30);
+        const link = `https://aihangout.ai/reset-password?token=${encodeURIComponent(token)}`;
+        await sendTransactionalEmail(env, {
+          to: user.email,
+          subject: 'Reset your AI Hangout password',
+          text: `Reset your password within 30 minutes: ${link}`,
+          html: `<p>Hi ${escapeEmailHtml(user.username)},</p><p><a href="${link}">Reset your password</a></p><p>This single-use link expires in 30 minutes. If you did not request it, ignore this email.</p>`,
+          idempotencyKey: `reset-${user.id}-${await hashToken(token)}`
+        });
+      })().catch(error => console.error('[Email] Password reset email failed:', error?.message || error)));
+    }
+    return jsonResponse({
+      success: true,
+      message: 'If that address belongs to an account, a reset link will be sent.'
+    });
+  } catch (error) {
+    return errResponse('Unable to process password reset request', error);
+  }
+});
+
+router.post('/api/auth/password/reset', async (request, env) => {
+  try {
+    const { token, password } = await request.json();
+    const passwordError = validateNewPassword(password);
+    if (passwordError) return errResponse(passwordError, null, 400);
+    if (typeof token !== 'string' || token.length < 32 || token.length > 256) {
+      return errResponse('Invalid or expired reset link', null, 400);
+    }
+    const passwordHash = await hashPassword(password);
+    const tokenHash = await hashToken(token);
+    const record = await env.AIHANGOUT_DB.prepare(`
+      UPDATE auth_email_tokens SET used_at = CURRENT_TIMESTAMP
+      WHERE token_hash = ? AND purpose = 'reset_password' AND used_at IS NULL
+        AND expires_at > CURRENT_TIMESTAMP
+      RETURNING user_id
+    `).bind(tokenHash).first();
+    if (!record) return errResponse('Invalid or expired reset link', null, 400);
+    await env.AIHANGOUT_DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+      .bind(passwordHash, record.user_id).run();
+    return jsonResponse({ success: true, message: 'Password updated' });
+  } catch (error) {
+    return errResponse('Unable to reset password', error);
+  }
+});
+
 router.post('/api/auth/login', async (request, env) => {
   try {
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'login');
     if (rl.limited) return rateLimitResponse(rl);
 
-    const { email, password } = await request.json();
+    const body = await request.json();
+    const email = String(body.email || '').trim().toLowerCase();
+    const password = body.password;
 
     if (!email || !password) {
       return new Response(JSON.stringify({
@@ -2133,12 +2319,12 @@ async function logNotificationDelivery(env, data) {
       INSERT INTO notification_delivery_log
         (user_id, actor_id, notification_type, target_type, target_id,
          source_type, source_id, channel, status, error_message)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'in_app', ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       data.userId, data.actorId ?? null, data.type,
       data.targetType ?? null, data.targetId ?? null,
       data.sourceType ?? null, data.sourceId != null ? String(data.sourceId) : null,
-      data.status, data.errorMessage ?? null
+      data.channel || 'in_app', data.status, data.errorMessage ?? null
     ).run();
   } catch (auditError) {
     console.error('[Notification] Failed to write delivery audit:', auditError?.message || auditError);
@@ -2177,6 +2363,37 @@ async function createNotification(env, {
       userId, actorId, type, targetType, targetId, sourceType, sourceId,
       status: existing ? 'refreshed' : 'created'
     });
+    if (settings?.email_notifications === 1) {
+      const recipient = await env.AIHANGOUT_DB.prepare(
+        'SELECT email, email_verified_at FROM users WHERE id = ?'
+      ).bind(userId).first();
+      if (recipient?.email && recipient.email_verified_at) {
+        try {
+          const targetPath = targetType === 'problem' && targetId
+            ? `/problem/${targetId}`
+            : (targetType === 'pathbook' ? '/pathbooks' : '/');
+          const link = `https://aihangout.ai${targetPath}`;
+          await sendTransactionalEmail(env, {
+            to: recipient.email,
+            subject: 'New activity on AI Hangout',
+            text: `${message}\n\nOpen AI Hangout: ${link}`,
+            html: `<p>${escapeEmailHtml(message)}</p><p><a href="${link}">View activity on AI Hangout</a></p>`,
+            idempotencyKey: `notification-${type}-${userId}-${actorId}-${sourceId || targetId || 'event'}`
+          });
+          await logNotificationDelivery(env, {
+            userId, actorId, type, targetType, targetId, sourceType, sourceId,
+            channel: 'email', status: 'created'
+          });
+        } catch (emailError) {
+          console.error('[Notification] Email delivery failed:', emailError?.message || emailError);
+          await logNotificationDelivery(env, {
+            userId, actorId, type, targetType, targetId, sourceType, sourceId,
+            channel: 'email', status: 'failed',
+            errorMessage: String(emailError?.message || emailError).slice(0, 500)
+          });
+        }
+      }
+    }
   } catch (e) {
     console.error('[Notification] Delivery failed:', e?.message || e);
     await logNotificationDelivery(env, {
@@ -16716,7 +16933,9 @@ router.get('/api/health/notifications', async (request, env) => {
   const checks = {};
   let ok = true;
   try {
-    const requiredTables = ['notifications', 'user_settings', 'notification_delivery_log'];
+    const requiredTables = [
+      'notifications', 'user_settings', 'notification_delivery_log', 'auth_email_tokens'
+    ];
     const placeholders = requiredTables.map(() => '?').join(',');
     const tables = await env.AIHANGOUT_DB.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})
@@ -16737,6 +16956,8 @@ router.get('/api/health/notifications', async (request, env) => {
         WHERE status = 'failed' AND created_at >= datetime('now', '-1 hour')
       `).first();
       checks.failed_last_hour = Number(failures?.count || 0);
+      checks.email_provider = env.RESEND_API_KEY ? 'configured' : 'not_configured';
+      if (env.ENVIRONMENT === 'production' && !env.RESEND_API_KEY) ok = false;
     }
   } catch (error) {
     console.error('[Health/notifications] Error:', error);
