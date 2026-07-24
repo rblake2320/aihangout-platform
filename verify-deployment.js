@@ -249,9 +249,11 @@ async function verifyDeployment() {
             pathbookHealthData.checks?.schema === 'ok' &&
             pathbookHealthData.checks?.audit_chain === 'ok' &&
             pathbookHealthData.checks?.audit_head === 'ok' &&
-            pathbookHealthData.checks?.materialized_state === 'ok'
+            pathbookHealthData.checks?.materialized_state === 'ok' &&
+            pathbookHealthData.checks?.authorship === 'ok' &&
+            pathbookHealthData.checks?.outcome_evidence === 'ok'
         ) {
-            console.log('✅ Pathbooks: schema, D1 audit chain/head, and sealed materialized state healthy');
+            console.log('✅ Pathbooks: schema, authorship, D1 audit chain/head, and sealed materialized state healthy');
             passedChecks++;
         } else {
             console.log(`❌ Pathbooks: ${pathbookHealth.data}`);

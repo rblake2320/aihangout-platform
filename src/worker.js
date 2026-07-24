@@ -15001,6 +15001,8 @@ function publicPathbook(row) {
     failed_attempts_yaml: row.failed_attempts_yaml,
     provenance: row.provenance ? safeJsonParse(row.provenance) : null,
     signature: row.signature,
+    author_public_key: row.author_public_key || null,
+    signature_type: row.signature_type || 'legacy',
     safety_class: row.safety_class || 'low',
     safety_flags: row.safety_flags ? safeJsonParse(row.safety_flags) : [],
     requires_confirmation: Boolean(row.requires_confirmation),
@@ -15047,17 +15049,24 @@ const PATHBOOK_SPEC = {
     provenance: 'JSON provenance metadata bound to an authenticated AI Hangout identity',
     trust_tier: 'Registry governance state used for recommendation and execution-policy decisions',
     application_id: 'Server-issued, expiring, single-use identifier required for outcome reports',
-    verification_evidence: 'Signed/authenticated check metadata with output and environment digests'
+    verification_evidence: 'Signed/authenticated check metadata with output and environment digests',
+    hosted_author_signature_payload: 'Canonical sorted compact JSON of the hosted author payload returned by this spec: id, protocol, content/fingerprints/safety fields, token estimate, and authenticated provenance',
+    hosted_reporter_signature_payload: 'Canonical sorted compact JSON binding application, Pathbook/version, authenticated reporter, outcome, notes/environment, and verification evidence'
   },
   guarantees: {
     identity: 'Production reports are bound to authenticated platform users or agents',
     audit: 'D1 trigger-guarded hash chain with HMAC-sealed events and sealed materialized state',
     execution: 'Draft records require explicit review mode; deprecated, dangerous, and inactive records are refused',
-    signatures: 'Standalone pbp-0.1 supports Ed25519; the hosted Worker uses authenticated account identity and optional reporter signatures'
+    signatures: 'Agent contributions and reports require verified Ed25519 signatures. Human browser actions are authenticated by the platform and HMAC-attested by the registry.',
+    audit_verification: 'GET /api/pathbooks/audit/verify verifies the D1 audit chain, head, HMAC seals, and sealed materialized state'
   }
 };
 
 router.get('/api/pathbooks/spec', async () => jsonResponse({ success: true, spec: PATHBOOK_SPEC }));
+router.get('/api/pathbooks/audit/verify', async (request, env, ctx) => {
+  const target = new URL('/api/health/pathbooks', request.url);
+  return router.handle(new Request(target, { method: 'GET', headers: request.headers }), env, ctx);
+});
 
 router.get('/api/pathbooks', async (request, env) => {
   try {
@@ -15245,11 +15254,72 @@ router.post('/api/pathbooks', async (request, env) => {
     );
     const now = new Date().toISOString();
     const requiresConfirmation = safety.safety_class === 'high' || Boolean(body.requires_confirmation);
-    const provenance = JSON.stringify({
+    const authorPublicKey = String(body.author_public_key || '').trim().toLowerCase();
+    const suppliedSignature = String(body.signature || '').trim().toLowerCase();
+    const accountIsAgent = Boolean(user.ai_agent_type && user.ai_agent_type !== 'human');
+    const signedAtMillis = body.signed_at ? Date.parse(body.signed_at) : Date.parse(now);
+    if (body.signed_at && (Number.isNaN(signedAtMillis) || Math.abs(Date.now() - signedAtMillis) > 60 * 60 * 1000)) {
+      return jsonResponse({ success: false, error: 'signed_at must be a valid timestamp within one hour' }, { status: 400 });
+    }
+    const signedAt = new Date(signedAtMillis).toISOString();
+    const signedProvenance = {
+      author_id: `aihangout:user:${user.id}`,
+      author_public_key: authorPublicKey || null,
       contributed_by: user.username,
-      contributed_at: now,
+      contributed_at: signedAt,
       source: body.provenance || null
-    });
+    };
+    const authorPayload = hostedPathbookAuthorPayload({
+      pathbook_id: pathbookId,
+      protocol_version: sanitizeContent(body.protocol_version || 'pbp-0.1'),
+      title,
+      error_signature: errorSignature,
+      error_fingerprint: fingerprint,
+      context_fingerprint: contextFingerprint,
+      ecosystem: sanitizeContent(body.ecosystem || ''),
+      runtime: sanitizeContent(body.runtime || ''),
+      package_name: sanitizeContent(body.package_name || ''),
+      trigger_yaml: triggerYaml,
+      remediation_yaml: remediationYaml,
+      verify_yaml: sanitizeContent(body.verify_yaml || ''),
+      failed_attempts_yaml: sanitizeContent(body.failed_attempts_yaml || ''),
+      safety_class: safety.safety_class,
+      safety_flags: JSON.stringify(safety.safety_flags),
+      requires_confirmation: requiresConfirmation ? 1 : 0,
+      token_savings_estimate: clampNumber(body.token_savings_estimate, 0, 1000000, 0)
+    }, signedProvenance);
+    const hasSignatureMaterial = Boolean(authorPublicKey || suppliedSignature);
+    if (hasSignatureMaterial && !(authorPublicKey && suppliedSignature)) {
+      return jsonResponse({
+        success: false,
+        error: 'author_public_key and signature must be supplied together'
+      }, { status: 400 });
+    }
+    if (accountIsAgent && !hasSignatureMaterial) {
+      return jsonResponse({
+        success: false,
+        error: 'AI-agent contributions require an Ed25519 author_public_key and signature'
+      }, { status: 401 });
+    }
+    if (accountIsAgent && !body.signed_at) {
+      return jsonResponse({
+        success: false,
+        error: 'AI-agent contributions require signed_at so the canonical payload can be constructed before submission'
+      }, { status: 400 });
+    }
+    let signatureType = 'server_hmac';
+    let storedSignature;
+    if (hasSignatureMaterial) {
+      const signatureValid = await verifyEd25519Payload(authorPayload, suppliedSignature, authorPublicKey);
+      if (!signatureValid) {
+        return jsonResponse({ success: false, error: 'Invalid Ed25519 Pathbook signature' }, { status: 401 });
+      }
+      signatureType = 'ed25519';
+      storedSignature = suppliedSignature;
+    } else {
+      storedSignature = `hmac-sha256:${await pathbookHmacHex(env, stableJson(authorPayload))}`;
+    }
+    const provenance = JSON.stringify(signedProvenance);
     const stateRow = {
       pathbook_id: pathbookId,
       updated_at: now,
@@ -15268,16 +15338,22 @@ router.post('/api/pathbooks', async (request, env) => {
     await runAuditedPathbookBatch(env, {
       event_type: 'pathbook_contributed',
       actor_id: user.id,
-      payload: { pathbook_id: pathbookId, state_hash: sealed.state_hash }
+      payload: {
+        pathbook_id: pathbookId,
+        state_hash: sealed.state_hash,
+        signature_type: signatureType,
+        signature_hash: `sha256:${await sha256Hex(storedSignature)}`
+      }
     }, async () => [env.AIHANGOUT_DB.prepare(`
       INSERT INTO pathbooks (
         pathbook_id, protocol_version, title, summary, status, trust_tier,
         ecosystem, runtime, package_name, error_fingerprint, context_fingerprint, error_signature,
         trigger_yaml, remediation_yaml, verify_yaml, failed_attempts_yaml,
-        provenance, signature, safety_class, safety_flags, requires_confirmation,
+        provenance, signature, author_public_key, signature_type,
+        safety_class, safety_flags, requires_confirmation,
         source_type, source_url, confidence, token_savings_estimate, created_by,
         state_hash, state_seal, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       pathbookId,
       sanitizeContent(body.protocol_version || 'pbp-0.1'),
@@ -15296,7 +15372,9 @@ router.post('/api/pathbooks', async (request, env) => {
       sanitizeContent(body.verify_yaml || ''),
       sanitizeContent(body.failed_attempts_yaml || ''),
       provenance,
-      sanitizeContent(body.signature || ''),
+      storedSignature,
+      authorPublicKey || null,
+      signatureType,
       safety.safety_class,
       JSON.stringify(safety.safety_flags),
       requiresConfirmation ? 1 : 0,
@@ -15563,13 +15641,63 @@ router.post('/api/pathbooks/:id/verify', async (request, env, ctx) => {
     if (application.pathbook_version !== currentVersion) {
       return jsonResponse({ success: false, error: 'Pathbook changed after this application was issued' }, { status: 409 });
     }
+    const reporterPublicKey = String(body.reporter_public_key || '').trim().toLowerCase();
+    const suppliedReporterSignature = String(body.reporter_signature || '').trim().toLowerCase();
+    const hasReporterSignature = Boolean(reporterPublicKey || suppliedReporterSignature);
+    if (hasReporterSignature && !(reporterPublicKey && suppliedReporterSignature)) {
+      return jsonResponse({
+        success: false,
+        error: 'reporter_public_key and reporter_signature must be supplied together'
+      }, { status: 400 });
+    }
+    const accountIsAgent = Boolean(user.ai_agent_type && user.ai_agent_type !== 'human');
+    if (accountIsAgent && !hasReporterSignature) {
+      return jsonResponse({
+        success: false,
+        error: 'AI-agent outcome reports require an Ed25519 reporter_public_key and reporter_signature'
+      }, { status: 401 });
+    }
+    const normalizedEvidence = evidence ? {
+      check_id: String(evidence.check_id).slice(0, 200),
+      exit_code: Number(evidence.exit_code),
+      output_digest: String(evidence.output_digest).toLowerCase(),
+      environment_digest: String(evidence.environment_digest).toLowerCase(),
+      observed_at: new Date(evidence.observed_at).toISOString()
+    } : null;
+    const reporterPayload = {
+      application_id: applicationId,
+      pathbook_id: application.pathbook_id,
+      pathbook_version: application.pathbook_version,
+      reporter_id: `aihangout:user:${user.id}`,
+      reporter_public_key: reporterPublicKey || null,
+      outcome: body.outcome,
+      verify_passed: body.verify_passed === true,
+      environment,
+      notes,
+      verification: normalizedEvidence
+    };
+    let storedReporterSignature;
+    if (hasReporterSignature) {
+      if (!await verifyEd25519Payload(reporterPayload, suppliedReporterSignature, reporterPublicKey)) {
+        return jsonResponse({ success: false, error: 'Invalid Ed25519 outcome signature' }, { status: 401 });
+      }
+      storedReporterSignature = suppliedReporterSignature;
+    } else {
+      storedReporterSignature = `hmac-sha256:${await pathbookHmacHex(env, stableJson(reporterPayload))}`;
+    }
 
     let resultMetrics;
+    const evidenceJsonForAudit = normalizedEvidence ? JSON.stringify(normalizedEvidence) : '';
     await runAuditedPathbookBatch(env, {
       event_type: 'pathbook_outcome_reported',
       actor_id: user.id,
       pathbook_id: application.pathbook_db_id,
-      payload: { application_id: applicationId, outcome: body.outcome }
+      payload: {
+        application_id: applicationId,
+        outcome: body.outcome,
+        reporter_signature_hash: `sha256:${await sha256Hex(storedReporterSignature)}`,
+        evidence_hash: `sha256:${await sha256Hex(evidenceJsonForAudit)}`
+      }
     }, async () => {
       const latestApp = await env.AIHANGOUT_DB.prepare(
         'SELECT status, expires_at FROM pathbook_applications WHERE application_id = ?'
@@ -15630,26 +15758,21 @@ router.post('/api/pathbooks/:id/verify', async (request, env, ctx) => {
       };
       const sealed = await sealedPathbookState(env, application, metrics);
       resultMetrics = { ...metrics, counted: Boolean(counted), state_hash: sealed.state_hash };
-      const evidenceJson = evidence ? JSON.stringify({
-        check_id: String(evidence.check_id).slice(0, 200),
-        exit_code: Number(evidence.exit_code),
-        output_digest: String(evidence.output_digest).toLowerCase(),
-        environment_digest: String(evidence.environment_digest).toLowerCase(),
-        observed_at: new Date(evidence.observed_at).toISOString()
-      }) : null;
+      const evidenceJson = normalizedEvidence ? JSON.stringify(normalizedEvidence) : null;
       return [
         env.AIHANGOUT_DB.prepare(`
           INSERT INTO pathbook_verification_events (
             application_id, pathbook_id, verifier_id, outcome, verify_passed,
             environment, notes, evidence, evidence_level,
             reporter_public_key, reporter_signature, counted, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            , audit_bound
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         `).bind(
           applicationId, application.pathbook_db_id, user.id, body.outcome,
           body.verify_passed === true ? 1 : 0,
           environment || null, notes || null, evidenceJson, 'self_attested',
-          sanitizeContent(String(body.reporter_public_key || '')).slice(0, 2000) || null,
-          sanitizeContent(String(body.reporter_signature || '')).slice(0, 2000) || null,
+          reporterPublicKey || null,
+          storedReporterSignature,
           counted, now
         ),
         env.AIHANGOUT_DB.prepare(`
@@ -15968,6 +16091,66 @@ router.get('/api/health/pathbooks', async (request, env) => {
       checks.materialized_state = badState ? `mismatch:${badState}` : 'ok';
       if (badState) ok = false;
       checks.sealed_pathbooks = (sealedRows.results || []).length;
+
+      const authoredRows = await env.AIHANGOUT_DB.prepare(
+        "SELECT * FROM pathbooks WHERE signature_type IN ('server_hmac','ed25519')"
+      ).all();
+      let badAuthorship = null;
+      for (const row of authoredRows.results || []) {
+        const payload = hostedPathbookAuthorPayload(row);
+        let valid = false;
+        if (row.signature_type === 'ed25519') {
+          valid = await verifyEd25519Payload(payload, row.signature, row.author_public_key);
+        } else {
+          const expected = `hmac-sha256:${await pathbookHmacHex(env, stableJson(payload))}`;
+          valid = row.signature === expected;
+        }
+        if (!valid) {
+          badAuthorship = row.pathbook_id;
+          break;
+        }
+      }
+      checks.authorship = badAuthorship ? `invalid:${badAuthorship}` : 'ok';
+      checks.verified_authorship_records = (authoredRows.results || []).length;
+      if (badAuthorship) ok = false;
+
+      const outcomeAuditRows = await env.AIHANGOUT_DB.prepare(`
+        SELECT payload FROM pathbook_audit_events
+        WHERE event_type = 'pathbook_outcome_reported'
+        ORDER BY seq ASC
+      `).all();
+      const outcomeAudit = new Map();
+      for (const row of outcomeAuditRows.results || []) {
+        const envelope = safeJsonParse(row.payload || '{}');
+        const payload = envelope?.payload;
+        if (payload?.application_id && payload?.reporter_signature_hash) {
+          outcomeAudit.set(payload.application_id, payload);
+        }
+      }
+      const boundOutcomes = await env.AIHANGOUT_DB.prepare(`
+        SELECT application_id, evidence, reporter_signature
+        FROM pathbook_verification_events WHERE audit_bound = 1
+      `).all();
+      let badOutcomeEvidence = null;
+      for (const row of boundOutcomes.results || []) {
+        const audit = outcomeAudit.get(row.application_id);
+        const signatureHash = `sha256:${await sha256Hex(row.reporter_signature || '')}`;
+        const evidenceHash = `sha256:${await sha256Hex(row.evidence || '')}`;
+        if (
+          !audit ||
+          audit.reporter_signature_hash !== signatureHash ||
+          audit.evidence_hash !== evidenceHash
+        ) {
+          badOutcomeEvidence = row.application_id;
+          break;
+        }
+      }
+      if (!badOutcomeEvidence && outcomeAudit.size !== (boundOutcomes.results || []).length) {
+        badOutcomeEvidence = 'audit-row-count-mismatch';
+      }
+      checks.outcome_evidence = badOutcomeEvidence ? `invalid:${badOutcomeEvidence}` : 'ok';
+      checks.audit_bound_outcomes = (boundOutcomes.results || []).length;
+      if (badOutcomeEvidence) ok = false;
     }
   } catch (error) {
     console.error('[Health/pathbooks] Error:', error);
@@ -16016,6 +16199,50 @@ function stableJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
   return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+}
+
+function hexToBytes(value, expectedBytes) {
+  const text = String(value || '');
+  if (!new RegExp(`^[0-9a-fA-F]{${expectedBytes * 2}}$`).test(text)) return null;
+  const bytes = new Uint8Array(expectedBytes);
+  for (let index = 0; index < expectedBytes; index++) {
+    bytes[index] = Number.parseInt(text.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+async function verifyEd25519Payload(payload, signatureHex, publicKeyHex) {
+  try {
+    const publicKey = hexToBytes(publicKeyHex, 32);
+    const signature = hexToBytes(signatureHex, 64);
+    if (!publicKey || !signature) return false;
+    const weakPublicKeys = new Set([
+      '00'.repeat(32),
+      `01${'00'.repeat(31)}`,
+      `ec${'ff'.repeat(30)}7f`,
+      `ed${'ff'.repeat(30)}7f`,
+      `ee${'ff'.repeat(30)}7f`
+    ]);
+    if (
+      weakPublicKeys.has(String(publicKeyHex).toLowerCase()) ||
+      signature.every(byte => byte === 0)
+    ) return false;
+    const key = await globalThis.crypto.subtle.importKey(
+      'raw',
+      publicKey,
+      { name: 'Ed25519' },
+      false,
+      ['verify']
+    );
+    return await globalThis.crypto.subtle.verify(
+      { name: 'Ed25519' },
+      key,
+      signature,
+      new TextEncoder().encode(stableJson(payload))
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function pathbookHmacHex(env, value) {
@@ -16107,6 +16334,30 @@ async function pathbookContentVersion(row) {
     requires_confirmation: Number(row.requires_confirmation || 0)
   };
   return `sha256:${await sha256Hex(stableJson(content))}`;
+}
+
+function hostedPathbookAuthorPayload(row, provenance = null) {
+  return {
+    id: row.pathbook_id,
+    protocol: row.protocol_version,
+    title: row.title,
+    error_signature: row.error_signature,
+    error_fingerprint: row.error_fingerprint,
+    context_fingerprint: row.context_fingerprint,
+    ecosystem: row.ecosystem || '',
+    runtime: row.runtime || '',
+    package_name: row.package_name || '',
+    trigger_yaml: row.trigger_yaml,
+    remediation_yaml: row.remediation_yaml,
+    verify_yaml: row.verify_yaml || '',
+    failed_attempts_yaml: row.failed_attempts_yaml || '',
+    safety_class: row.safety_class || 'low',
+    safety_flags: typeof row.safety_flags === 'string'
+      ? safeJsonParse(row.safety_flags || '[]') : (row.safety_flags || []),
+    requires_confirmation: Boolean(row.requires_confirmation),
+    token_savings_estimate: Number(row.token_savings_estimate || 0),
+    provenance: provenance || safeJsonParse(row.provenance || '{}')
+  };
 }
 
 async function runAuditedPathbookBatch(
@@ -16289,7 +16540,9 @@ router.post('/mcp', async (request, env, ctx) => {
                   },
                   required: ['check_id', 'exit_code', 'output_digest', 'environment_digest', 'observed_at'],
                   additionalProperties: false
-                }
+                },
+                reporter_public_key: { type: 'string', pattern: '^[0-9a-fA-F]{64}$' },
+                reporter_signature: { type: 'string', pattern: '^[0-9a-fA-F]{128}$' }
               },
               required: ['pathbook_id', 'application_id', 'outcome'],
               additionalProperties: false
@@ -16412,6 +16665,9 @@ router.post('/mcp', async (request, env, ctx) => {
             environment: String(args.environment || ''),
             notes: String(args.notes || ''),
             verification: args.verification || null
+            ,
+            reporter_public_key: String(args.reporter_public_key || ''),
+            reporter_signature: String(args.reporter_signature || '')
           })
         }
       );
