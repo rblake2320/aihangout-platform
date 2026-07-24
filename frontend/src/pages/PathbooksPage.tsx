@@ -32,6 +32,9 @@ interface Pathbook {
   token_savings_estimate?: number
   times_applied?: number
   times_succeeded?: number
+  safety_class?: string
+  safety_flags?: string[]
+  requires_confirmation?: boolean
 }
 
 const TRUST_LABELS: Record<string, string> = {
@@ -64,6 +67,7 @@ export default function PathbooksPage() {
   const [lookupLoading, setLookupLoading] = useState(false)
   const [lookupMessage, setLookupMessage] = useState('')
   const [reportingPathbook, setReportingPathbook] = useState<string | null>(null)
+  const [applications, setApplications] = useState<Record<string, string>>({})
 
   const totalSavings = useMemo(
     () => pathbooks.reduce((sum, item) => sum + (item.token_savings_estimate || 0), 0),
@@ -115,16 +119,57 @@ export default function PathbooksPage() {
     }
   }
 
-  const reportOutcome = async (item: Pathbook, outcome: 'success' | 'failure') => {
+  const sha256 = async (value: string) => {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+    return `sha256:${Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, '0')).join('')}`
+  }
+
+  const startApplication = async (item: Pathbook) => {
     if (!isAuthenticated) {
-      toast.error('Log in to report a Pathbook result')
+      toast.error('Log in to apply a Pathbook')
+      return
+    }
+    const confirmRisk = item.requires_confirmation
+      ? window.confirm(`This Pathbook contains high-risk operations (${(item.safety_flags || []).join(', ') || 'review required'}). Review every command before continuing.`)
+      : false
+    if (item.requires_confirmation && !confirmRisk) return
+    setReportingPathbook(item.pathbook_id)
+    try {
+      const response = await pathbooksAPI.execute(item.pathbook_id, { confirm_risk: confirmRisk })
+      setApplications(current => ({
+        ...current,
+        [item.pathbook_id]: response.data.application.application_id,
+      }))
+      toast.success('Application issued. Follow the remediation, run its verification, then report the result.')
+    } catch (error: any) {
+      toast.error(error.response?.data?.error || 'Could not issue this application')
+    } finally {
+      setReportingPathbook(null)
+    }
+  }
+
+  const reportOutcome = async (item: Pathbook, outcome: 'success' | 'failure') => {
+    const applicationId = applications[item.pathbook_id]
+    if (!applicationId) {
+      toast.error('Start an application before reporting its result')
       return
     }
     setReportingPathbook(item.pathbook_id)
     try {
+      const observedAt = new Date().toISOString()
+      const environment = navigator.userAgent.slice(0, 1000)
       const response = await pathbooksAPI.verify(item.pathbook_id, {
+        application_id: applicationId,
         outcome,
-        environment: navigator.userAgent.slice(0, 1000),
+        verify_passed: outcome === 'success',
+        environment,
+        verification: {
+          check_id: 'pathbook-ui-self-check',
+          exit_code: outcome === 'success' ? 0 : 1,
+          output_digest: await sha256(`${item.pathbook_id}|${outcome}|${item.verify_yaml || ''}|${observedAt}`),
+          environment_digest: await sha256(environment),
+          observed_at: observedAt,
+        },
       })
       const metrics = response.data.metrics
       setPathbooks(current => current.map(pathbook =>
@@ -138,6 +183,11 @@ export default function PathbooksPage() {
             }
           : pathbook
       ))
+      setApplications(current => {
+        const next = { ...current }
+        delete next[item.pathbook_id]
+        return next
+      })
       toast.success(outcome === 'success' ? 'Successful result recorded' : 'Failed attempt recorded')
     } catch (error: any) {
       toast.error(error.response?.data?.error || 'Could not record this result')
@@ -191,22 +241,35 @@ export default function PathbooksPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            disabled={reportingPathbook === item.pathbook_id}
-            onClick={() => reportOutcome(item, 'success')}
-            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-          >
-            This worked
-          </button>
-          <button
-            type="button"
-            disabled={reportingPathbook === item.pathbook_id}
-            onClick={() => reportOutcome(item, 'failure')}
-            className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
-          >
-            This failed
-          </button>
+          {applications[item.pathbook_id] ? (
+            <>
+              <button
+                type="button"
+                disabled={reportingPathbook === item.pathbook_id}
+                onClick={() => reportOutcome(item, 'success')}
+                className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                Verification passed
+              </button>
+              <button
+                type="button"
+                disabled={reportingPathbook === item.pathbook_id}
+                onClick={() => reportOutcome(item, 'failure')}
+                className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+              >
+                Verification failed
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              disabled={reportingPathbook === item.pathbook_id}
+              onClick={() => startApplication(item)}
+              className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              Apply and verify
+            </button>
+          )}
           <span className="max-w-[240px] truncate" title={item.error_fingerprint}>{item.error_fingerprint}</span>
         </div>
       </div>

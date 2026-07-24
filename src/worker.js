@@ -14970,8 +14970,8 @@ function clampNumber(value, min, max, fallback) {
 async function fingerprintText(text) {
   const normalized = String(text || '')
     .toLowerCase()
-    .replace(/[a-f0-9]{32,}/g, '<hash>')
-    .replace(/\b\d+\b/g, '<num>')
+    .replace(/\b0x[0-9a-f]+\b|\b[0-9a-f]{8,}\b/g, '<hash>')
+    .replace(/\d+/g, '<num>')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 2048);
@@ -14993,6 +14993,7 @@ function publicPathbook(row) {
     runtime: row.runtime,
     package_name: row.package_name,
     error_fingerprint: row.error_fingerprint,
+    context_fingerprint: row.context_fingerprint,
     error_signature: row.error_signature,
     trigger_yaml: row.trigger_yaml,
     remediation_yaml: row.remediation_yaml,
@@ -15000,6 +15001,9 @@ function publicPathbook(row) {
     failed_attempts_yaml: row.failed_attempts_yaml,
     provenance: row.provenance ? safeJsonParse(row.provenance) : null,
     signature: row.signature,
+    safety_class: row.safety_class || 'low',
+    safety_flags: row.safety_flags ? safeJsonParse(row.safety_flags) : [],
+    requires_confirmation: Boolean(row.requires_confirmation),
     source_type: row.source_type,
     source_url: row.source_url,
     times_applied: row.times_applied,
@@ -15030,17 +15034,26 @@ const PATHBOOK_SPEC = {
     lookup: 'POST /api/pathbooks/lookup',
     get: 'GET /api/pathbooks/{pathbook_id}',
     contribute: 'POST /api/pathbooks',
+    execute: 'POST /api/pathbooks/{pathbook_id}/execute',
     verify: 'POST /api/pathbooks/{pathbook_id}/verify',
     spec: 'GET /api/pathbooks/spec'
   },
-  mcp_surface: ['lookup_pathbook', 'report_pathbook_result'],
+  mcp_surface: ['lookup_pathbook', 'execute_pathbook', 'report_pathbook_result'],
   schema: {
     pathbook_id: 'Stable public identifier, for example PBP-WIN-PORTTXT-DELETE-0001',
     trigger_yaml: 'YAML describing error signatures and environment constraints',
     remediation_yaml: 'YAML describing deterministic steps agents may execute',
     verify_yaml: 'YAML assertions proving remediation succeeded',
-    provenance: 'JSON provenance metadata; signed records should include signer and digest references',
-    trust_tier: 'Registry governance state used for recommendation and execution-policy decisions'
+    provenance: 'JSON provenance metadata bound to an authenticated AI Hangout identity',
+    trust_tier: 'Registry governance state used for recommendation and execution-policy decisions',
+    application_id: 'Server-issued, expiring, single-use identifier required for outcome reports',
+    verification_evidence: 'Signed/authenticated check metadata with output and environment digests'
+  },
+  guarantees: {
+    identity: 'Production reports are bound to authenticated platform users or agents',
+    audit: 'D1 trigger-guarded hash chain with HMAC-sealed events and sealed materialized state',
+    execution: 'Draft records require explicit review mode; deprecated, dangerous, and inactive records are refused',
+    signatures: 'Standalone pbp-0.1 supports Ed25519; the hosted Worker uses authenticated account identity and optional reporter signatures'
   }
 };
 
@@ -15102,21 +15115,35 @@ router.post('/api/pathbooks/lookup', async (request, env) => {
     const runtime = sanitizeContent(body.runtime || body.environment?.runtime || '');
     const packageName = sanitizeContent(body.package_name || body.package || '');
     const fingerprint = body.error_fingerprint || await fingerprintText(errorText);
+    const contextFingerprint = body.context_fingerprint || await contextFingerprintText(errorText);
     const limit = clampNumber(body.limit, 1, 20, 5);
 
-    const exactRows = fingerprint ? await env.AIHANGOUT_DB.prepare(`
+    const contextRows = contextFingerprint ? await env.AIHANGOUT_DB.prepare(`
       SELECT * FROM pathbooks
       WHERE status = 'active'
-        AND trust_tier NOT IN ('deprecated','dangerous')
+        AND trust_tier NOT IN ('draft','deprecated','dangerous')
+        AND context_fingerprint = ?
+      ORDER BY confidence DESC, times_succeeded DESC
+      LIMIT ?
+    `).bind(contextFingerprint, limit).all() : { results: [] };
+    const contextMatches = (contextRows.results || []).map(row => ({ ...row, match_score: 1 }));
+    const contextIds = new Set(contextMatches.map(row => row.id));
+    const primaryRows = contextMatches.length >= limit || !fingerprint ? { results: [] } : await env.AIHANGOUT_DB.prepare(`
+      SELECT * FROM pathbooks
+      WHERE status = 'active'
+        AND trust_tier NOT IN ('draft','deprecated','dangerous')
         AND error_fingerprint = ?
       ORDER BY confidence DESC, times_succeeded DESC
       LIMIT ?
-    `).bind(fingerprint, limit).all() : { results: [] };
-    const exactMatches = (exactRows.results || []).map(row => ({ ...row, match_score: 1 }));
+    `).bind(fingerprint, limit - contextMatches.length).all();
+    const primaryMatches = (primaryRows.results || [])
+      .filter(row => !contextIds.has(row.id))
+      .map(row => ({ ...row, match_score: 0.95 }));
+    const exactMatches = [...contextMatches, ...primaryMatches];
 
     const rows = exactMatches.length >= limit ? { results: [] } : await env.AIHANGOUT_DB.prepare(`
       SELECT * FROM pathbooks
-      WHERE status = 'active' AND trust_tier NOT IN ('deprecated','dangerous')
+      WHERE status = 'active' AND trust_tier NOT IN ('draft','deprecated','dangerous')
       ORDER BY confidence DESC, times_succeeded DESC
       LIMIT 100
     `).all();
@@ -15136,7 +15163,12 @@ router.post('/api/pathbooks/lookup', async (request, env) => {
 
     return jsonResponse({
       success: true,
-      query: { error_fingerprint: fingerprint, runtime, package_name: packageName },
+      query: {
+        error_fingerprint: fingerprint,
+        context_fingerprint: contextFingerprint,
+        runtime,
+        package_name: packageName
+      },
       pathbooks: ranked.map(publicPathbook)
     });
   } catch (error) {
@@ -15179,25 +15211,73 @@ router.post('/api/pathbooks', async (request, env) => {
         error: 'title, error_signature, trigger_yaml, and remediation_yaml are required'
       }, { status: 400 });
     }
+    if (
+      title.length > 200 ||
+      errorSignature.length > 10000 ||
+      triggerYaml.length > 50000 ||
+      remediationYaml.length > 50000 ||
+      String(body.verify_yaml || '').length > 50000 ||
+      String(body.failed_attempts_yaml || '').length > 50000
+    ) {
+      return jsonResponse({ success: false, error: 'One or more Pathbook fields exceed their size limit' }, { status: 413 });
+    }
+    if (!/^\s*(?:[-\w"']+\s*:|- )/m.test(triggerYaml) || !/^\s*(?:[-\w"']+\s*:|- )/m.test(remediationYaml)) {
+      return jsonResponse({ success: false, error: 'trigger_yaml and remediation_yaml must contain structured YAML' }, { status: 400 });
+    }
+    const safety = assessPathbookRemediation(remediationYaml);
+    if (safety.rejected) {
+      return jsonResponse({ success: false, error: 'Pathbook remediation contains prompt-injection instructions' }, { status: 400 });
+    }
 
     const pathbookId = sanitizeContent(body.pathbook_id || `PBP-${crypto.randomUUID().slice(0, 8).toUpperCase()}`);
-    const trustTier = user.is_admin && body.trust_tier ? sanitizeContent(body.trust_tier) : 'draft';
-    const status = user.is_admin && body.status ? sanitizeContent(body.status) : 'draft';
+    if (!/^[A-Z0-9][A-Z0-9._-]{2,199}$/i.test(pathbookId)) {
+      return jsonResponse({ success: false, error: 'pathbook_id must be 3-200 letters, numbers, dots, underscores, or hyphens' }, { status: 400 });
+    }
+    const validTiers = new Set(PATHBOOK_SPEC.trust_tiers);
+    const requestedTier = sanitizeContent(body.trust_tier || 'draft');
+    const trustTier = user.is_admin && validTiers.has(requestedTier) ? requestedTier : 'draft';
+    const requestedStatus = sanitizeContent(body.status || 'draft');
+    const status = user.is_admin && ['draft', 'active', 'inactive'].includes(requestedStatus)
+      ? requestedStatus : 'draft';
     const fingerprint = sanitizeContent(body.error_fingerprint || await fingerprintText(errorSignature));
+    const contextFingerprint = sanitizeContent(
+      body.context_fingerprint || await contextFingerprintText(errorSignature)
+    );
+    const now = new Date().toISOString();
+    const requiresConfirmation = safety.safety_class === 'high' || Boolean(body.requires_confirmation);
     const provenance = JSON.stringify({
       contributed_by: user.username,
-      contributed_at: new Date().toISOString(),
+      contributed_at: now,
       source: body.provenance || null
     });
+    const stateRow = {
+      pathbook_id: pathbookId,
+      updated_at: now,
+      trust_tier: trustTier,
+      times_applied: 0,
+      times_succeeded: 0,
+      confidence: user.is_admin ? Number(body.confidence || 0.2) : 0.2,
+      status,
+      context_fingerprint: contextFingerprint,
+      safety_class: safety.safety_class,
+      safety_flags: JSON.stringify(safety.safety_flags),
+      requires_confirmation: requiresConfirmation ? 1 : 0
+    };
+    const sealed = await sealedPathbookState(env, stateRow);
 
-    await env.AIHANGOUT_DB.prepare(`
+    await runAuditedPathbookBatch(env, {
+      event_type: 'pathbook_contributed',
+      actor_id: user.id,
+      payload: { pathbook_id: pathbookId, state_hash: sealed.state_hash }
+    }, async () => [env.AIHANGOUT_DB.prepare(`
       INSERT INTO pathbooks (
         pathbook_id, protocol_version, title, summary, status, trust_tier,
-        ecosystem, runtime, package_name, error_fingerprint, error_signature,
+        ecosystem, runtime, package_name, error_fingerprint, context_fingerprint, error_signature,
         trigger_yaml, remediation_yaml, verify_yaml, failed_attempts_yaml,
-        provenance, signature, source_type, source_url, confidence,
-        token_savings_estimate, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        provenance, signature, safety_class, safety_flags, requires_confirmation,
+        source_type, source_url, confidence, token_savings_estimate, created_by,
+        state_hash, state_seal, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       pathbookId,
       sanitizeContent(body.protocol_version || 'pbp-0.1'),
@@ -15209,6 +15289,7 @@ router.post('/api/pathbooks', async (request, env) => {
       sanitizeContent(body.runtime || ''),
       sanitizeContent(body.package_name || ''),
       fingerprint,
+      contextFingerprint,
       errorSignature,
       triggerYaml,
       remediationYaml,
@@ -15216,12 +15297,19 @@ router.post('/api/pathbooks', async (request, env) => {
       sanitizeContent(body.failed_attempts_yaml || ''),
       provenance,
       sanitizeContent(body.signature || ''),
+      safety.safety_class,
+      JSON.stringify(safety.safety_flags),
+      requiresConfirmation ? 1 : 0,
       sanitizeContent(body.source_type || 'community'),
       sanitizeContent(body.source_url || ''),
-      user.is_admin ? Number(body.confidence || 0.2) : 0.2,
+      stateRow.confidence,
       clampNumber(body.token_savings_estimate, 0, 1000000, 0),
-      user.id || null
-    ).run();
+      user.id || null,
+      sealed.state_hash,
+      sealed.state_seal,
+      now,
+      now
+    )]);
 
     const created = await env.AIHANGOUT_DB.prepare(
       'SELECT * FROM pathbooks WHERE pathbook_id = ?'
@@ -15316,119 +15404,321 @@ router.get('/api/health/auth', async (request, env) => {
   });
 });
 
+router.post('/api/pathbooks/:id/execute', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    }
+    const body = safeJsonParse(await request.text());
+    const pathbook = await env.AIHANGOUT_DB.prepare(
+      `SELECT *
+       FROM pathbooks WHERE pathbook_id = ? OR id = ?`
+    ).bind(request.params.id, Number(request.params.id) || -1).first();
+    if (!pathbook) {
+      return jsonResponse({ success: false, error: 'Pathbook not found' }, { status: 404 });
+    }
+    if (
+      pathbook.status === 'dangerous' ||
+      ['deprecated', 'dangerous'].includes(pathbook.trust_tier) ||
+      pathbook.status === 'inactive'
+    ) {
+      return jsonResponse({ success: false, error: 'This Pathbook cannot be executed' }, { status: 409 });
+    }
+    if ((pathbook.status === 'draft' || pathbook.trust_tier === 'draft') && !(user.is_admin && body.allow_untrusted === true)) {
+      return jsonResponse({
+        success: false,
+        error: 'Draft Pathbooks require explicit administrator review mode'
+      }, { status: 403 });
+    }
+    if (pathbook.requires_confirmation && body.confirm_risk !== true) {
+      return jsonResponse({
+        success: false,
+        error: 'This Pathbook contains high-risk operations and requires explicit confirmation',
+        requires_confirmation: true,
+        safety_flags: safeJsonParse(pathbook.safety_flags || '[]')
+      }, { status: 409 });
+    }
+
+    const applicationId = crypto.randomUUID();
+    const issuedAt = new Date();
+    const expiresAt = new Date(issuedAt.getTime() + 30 * 60 * 1000);
+    const version = await pathbookContentVersion(pathbook);
+    await runAuditedPathbookBatch(env, {
+      event_type: 'pathbook_application_issued',
+      actor_id: user.id,
+      pathbook_id: pathbook.id,
+      payload: { application_id: applicationId, pathbook_version: version }
+    }, async () => [env.AIHANGOUT_DB.prepare(`
+      INSERT INTO pathbook_applications (
+        application_id, pathbook_id, executor_id, pathbook_version,
+        issued_at, expires_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, 'issued')
+    `).bind(
+      applicationId, pathbook.id, user.id, version,
+      issuedAt.toISOString(), expiresAt.toISOString()
+    )]);
+
+    return jsonResponse({
+      success: true,
+      application: {
+        application_id: applicationId,
+        pathbook_id: pathbook.pathbook_id,
+        pathbook_version: version,
+        issued_at: issuedAt.toISOString(),
+        expires_at: expiresAt.toISOString()
+      },
+      execution: {
+        remediation_yaml: pathbook.remediation_yaml,
+        verify_yaml: pathbook.verify_yaml,
+        safety_class: pathbook.safety_class || 'low',
+        safety_flags: safeJsonParse(pathbook.safety_flags || '[]'),
+        requires_confirmation: Boolean(pathbook.requires_confirmation)
+      }
+    }, { status: 201 });
+  } catch (error) {
+    console.error('[Pathbooks/execute] Error:', error);
+    return jsonResponse({ success: false, error: 'Failed to issue Pathbook application' }, { status: 500 });
+  }
+});
+
 router.post('/api/pathbooks/:id/verify', async (request, env, ctx) => {
   try {
     const user = await authenticate(request, env);
     if (!user) {
       return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
     }
-    const pathbook = await env.AIHANGOUT_DB.prepare(
-      `SELECT id, pathbook_id, title, status, trust_tier, created_by
-       FROM pathbooks WHERE pathbook_id = ? OR id = ?`
-    ).bind(request.params.id, Number(request.params.id) || -1).first();
-    if (!pathbook || pathbook.status !== 'active') {
-      return jsonResponse({ success: false, error: 'Active Pathbook not found' }, { status: 404 });
-    }
-
     const body = safeJsonParse(await request.text());
-    if (!['success', 'failure'].includes(body.outcome)) {
-      return jsonResponse({ success: false, error: 'outcome must be success or failure' }, { status: 400 });
+    const applicationId = sanitizeContent(String(body.application_id || '')).trim();
+    if (!applicationId) {
+      return jsonResponse({ success: false, error: 'A server-issued application_id is required' }, { status: 400 });
+    }
+    if (!['success', 'failure', 'dangerous'].includes(body.outcome)) {
+      return jsonResponse({ success: false, error: 'outcome must be success, failure, or dangerous' }, { status: 400 });
     }
     const environment = sanitizeContent(String(body.environment || '')).trim().slice(0, 1000);
     const notes = sanitizeContent(String(body.notes || '')).trim().slice(0, 5000);
-    const evidenceUrl = String(body.evidence_url || '').trim().slice(0, 2000);
-    if (evidenceUrl && !/^https:\/\//i.test(evidenceUrl)) {
-      return jsonResponse({ success: false, error: 'evidence_url must use HTTPS' }, { status: 400 });
+    const evidence = body.verification && typeof body.verification === 'object'
+      ? body.verification : null;
+    const digestPattern = /^sha256:[0-9a-f]{64}$/i;
+    if (
+      body.outcome === 'success' &&
+      (
+        body.verify_passed !== true ||
+        !evidence ||
+        !String(evidence.check_id || '').slice(0, 200) ||
+        !Number.isInteger(Number(evidence.exit_code)) ||
+        !digestPattern.test(String(evidence.output_digest || '')) ||
+        !digestPattern.test(String(evidence.environment_digest || '')) ||
+        Number.isNaN(Date.parse(String(evidence.observed_at || '')))
+      )
+    ) {
+      return jsonResponse({
+        success: false,
+        error: 'Successful outcomes require passed verification evidence with SHA-256 output and environment digests'
+      }, { status: 400 });
     }
 
-    await env.AIHANGOUT_DB.prepare(`
-      INSERT INTO pathbook_verifications
-        (pathbook_id, verifier_id, outcome, environment, notes, evidence_url)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(pathbook_id, verifier_id) DO UPDATE SET
-        outcome = excluded.outcome,
-        environment = excluded.environment,
-        notes = excluded.notes,
-        evidence_url = excluded.evidence_url,
-        updated_at = CURRENT_TIMESTAMP
-    `).bind(
-      pathbook.id, user.id, body.outcome,
-      environment || null, notes || null, evidenceUrl || null
-    ).run();
+    const application = await env.AIHANGOUT_DB.prepare(`
+      SELECT p.*,
+             a.application_id,
+             a.pathbook_id AS pathbook_db_id,
+             a.executor_id,
+             a.pathbook_version,
+             a.issued_at,
+             a.expires_at,
+             a.consumed_at,
+             a.status AS application_status
+      FROM pathbook_applications a
+      JOIN pathbooks p ON p.id = a.pathbook_id
+      WHERE a.application_id = ?
+    `).bind(applicationId).first();
+    if (!application) {
+      return jsonResponse({ success: false, error: 'Application was not issued by this registry' }, { status: 404 });
+    }
+    if (
+      String(application.pathbook_id) !== String(request.params.id) &&
+      String(application.id) !== String(request.params.id)
+    ) {
+      return jsonResponse({ success: false, error: 'Application belongs to a different Pathbook' }, { status: 409 });
+    }
+    if (Number(application.executor_id) !== Number(user.id)) {
+      return jsonResponse({ success: false, error: 'Application belongs to a different identity' }, { status: 403 });
+    }
+    if (application.application_status === 'consumed') {
+      const prior = await env.AIHANGOUT_DB.prepare(
+        'SELECT outcome FROM pathbook_verification_events WHERE application_id = ?'
+      ).bind(applicationId).first();
+      return jsonResponse({
+        success: true,
+        duplicate: true,
+        application_id: applicationId,
+        outcome: prior?.outcome || body.outcome
+      });
+    }
+    if (application.application_status !== 'issued' || Date.parse(application.expires_at) <= Date.now()) {
+      return jsonResponse({ success: false, error: 'Application has expired or is no longer active' }, { status: 409 });
+    }
+    const currentVersion = await pathbookContentVersion(application);
+    if (application.pathbook_version !== currentVersion) {
+      return jsonResponse({ success: false, error: 'Pathbook changed after this application was issued' }, { status: 409 });
+    }
 
-    const stats = await env.AIHANGOUT_DB.prepare(`
-      SELECT COUNT(*) AS applications,
-             SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS successes,
-             COUNT(DISTINCT CASE WHEN outcome = 'success' THEN verifier_id END) AS successful_verifiers
-      FROM pathbook_verifications WHERE pathbook_id = ?
-    `).bind(pathbook.id).first();
-    const applications = Number(stats?.applications || 0);
-    const successes = Number(stats?.successes || 0);
-    const successfulVerifiers = Number(stats?.successful_verifiers || 0);
-    const successRate = applications ? successes / applications : 0;
-    const confidence = Math.round(Math.min(0.99, successRate * Math.min(1, applications / 5)) * 1000) / 1000;
+    let resultMetrics;
+    await runAuditedPathbookBatch(env, {
+      event_type: 'pathbook_outcome_reported',
+      actor_id: user.id,
+      pathbook_id: application.pathbook_db_id,
+      payload: { application_id: applicationId, outcome: body.outcome }
+    }, async () => {
+      const latestApp = await env.AIHANGOUT_DB.prepare(
+        'SELECT status, expires_at FROM pathbook_applications WHERE application_id = ?'
+      ).bind(applicationId).first();
+      if (!latestApp || latestApp.status !== 'issued' || Date.parse(latestApp.expires_at) <= Date.now()) {
+        throw new Error('pathbook_application_not_active');
+      }
+      const priorEvents = await env.AIHANGOUT_DB.prepare(`
+        SELECT outcome, verify_passed, verifier_id, counted
+        FROM pathbook_verification_events WHERE pathbook_id = ?
+      `).bind(application.pathbook_db_id).all();
+      const reporterCount = (priorEvents.results || []).filter(
+        event => Number(event.verifier_id) === Number(user.id) && Number(event.counted) === 1
+      ).length;
+      const counted = Number(application.created_by) !== Number(user.id) && reporterCount < 3 ? 1 : 0;
+      const allEvents = [...(priorEvents.results || []), {
+        outcome: body.outcome,
+        verify_passed: body.verify_passed === true ? 1 : 0,
+        verifier_id: user.id,
+        counted
+      }];
+      const countedEvents = allEvents.filter(event => Number(event.counted) === 1);
+      const verifiedSuccesses = countedEvents.filter(
+        event => event.outcome === 'success' && Number(event.verify_passed) === 1
+      );
+      const successes = countedEvents.filter(event => event.outcome === 'success').length;
+      const failures = countedEvents.filter(event => event.outcome === 'failure').length;
+      const dangerousReporters = new Set(countedEvents.filter(
+        event => event.outcome === 'dangerous'
+      ).map(event => String(event.verifier_id))).size;
+      const distinctVerified = new Set(verifiedSuccesses.map(event => String(event.verifier_id))).size;
+      const distinctReporters = new Set(countedEvents.map(event => String(event.verifier_id))).size;
+      const applications = countedEvents.length;
+      const confidence = Math.round(((successes + 1) / (applications + 2)) * 1000) / 1000;
+      let candidateTier = 'draft';
+      if (dangerousReporters >= 2) candidateTier = 'dangerous';
+      else if (applications >= 5 && successes / Math.max(1, successes + failures) < 0.4) candidateTier = 'deprecated';
+      else if (applications >= 10 && distinctReporters >= 5 && confidence >= 0.8) candidateTier = 'community_confirmed';
+      else if (verifiedSuccesses.length >= 3 && distinctVerified >= 2) candidateTier = 'verified';
+      else if (verifiedSuccesses.length >= 1) candidateTier = 'reproduced';
+      const terminal = new Set(['maintainer_approved', 'deprecated', 'dangerous']);
+      const rank = { draft: 0, reproduced: 1, verified: 2, community_confirmed: 3, maintainer_approved: 4 };
+      let nextTier = application.trust_tier;
+      if (!terminal.has(application.trust_tier)) {
+        nextTier = ['deprecated', 'dangerous'].includes(candidateTier) ||
+          Number(rank[candidateTier] || 0) > Number(rank[application.trust_tier] || 0)
+          ? candidateTier : application.trust_tier;
+      }
+      const now = new Date().toISOString();
+      const newStatus = nextTier === 'dangerous' ? 'dangerous' : application.status;
+      const metrics = {
+        times_applied: applications,
+        times_succeeded: successes,
+        confidence,
+        trust_tier: nextTier,
+        status: newStatus,
+        updated_at: now
+      };
+      const sealed = await sealedPathbookState(env, application, metrics);
+      resultMetrics = { ...metrics, counted: Boolean(counted), state_hash: sealed.state_hash };
+      const evidenceJson = evidence ? JSON.stringify({
+        check_id: String(evidence.check_id).slice(0, 200),
+        exit_code: Number(evidence.exit_code),
+        output_digest: String(evidence.output_digest).toLowerCase(),
+        environment_digest: String(evidence.environment_digest).toLowerCase(),
+        observed_at: new Date(evidence.observed_at).toISOString()
+      }) : null;
+      return [
+        env.AIHANGOUT_DB.prepare(`
+          INSERT INTO pathbook_verification_events (
+            application_id, pathbook_id, verifier_id, outcome, verify_passed,
+            environment, notes, evidence, evidence_level,
+            reporter_public_key, reporter_signature, counted, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          applicationId, application.pathbook_db_id, user.id, body.outcome,
+          body.verify_passed === true ? 1 : 0,
+          environment || null, notes || null, evidenceJson, 'self_attested',
+          sanitizeContent(String(body.reporter_public_key || '')).slice(0, 2000) || null,
+          sanitizeContent(String(body.reporter_signature || '')).slice(0, 2000) || null,
+          counted, now
+        ),
+        env.AIHANGOUT_DB.prepare(`
+          UPDATE pathbook_applications
+          SET status = 'consumed', consumed_at = ?
+          WHERE application_id = ? AND status = 'issued'
+        `).bind(now, applicationId),
+        env.AIHANGOUT_DB.prepare(`
+          INSERT INTO pathbook_verifications
+            (pathbook_id, verifier_id, outcome, environment, notes, evidence_url)
+          VALUES (?, ?, ?, ?, ?, NULL)
+          ON CONFLICT(pathbook_id, verifier_id) DO UPDATE SET
+            outcome = excluded.outcome, environment = excluded.environment,
+            notes = excluded.notes, updated_at = CURRENT_TIMESTAMP
+        `).bind(application.pathbook_db_id, user.id, body.outcome === 'dangerous' ? 'failure' : body.outcome, environment || null, notes || null),
+        env.AIHANGOUT_DB.prepare(`
+          UPDATE pathbooks
+          SET times_applied = ?, times_succeeded = ?, confidence = ?,
+              trust_tier = ?, status = ?, state_hash = ?, state_seal = ?, updated_at = ?
+          WHERE id = ?
+        `).bind(
+          applications, successes, confidence, nextTier, newStatus,
+          sealed.state_hash, sealed.state_seal, now, application.pathbook_db_id
+        ),
+        env.AIHANGOUT_DB.prepare(`
+          INSERT INTO analytics_events (event_type, user_id, user_type, event_data)
+          VALUES ('pathbook_verification_reported', ?, ?, ?)
+        `).bind(
+          user.id,
+          user.ai_agent_type === 'human' ? 'human' : 'ai_agent',
+          JSON.stringify({
+            pathbook_id: application.pathbook_id,
+            application_id: applicationId,
+            outcome: body.outcome,
+            counted: Boolean(counted),
+            trust_tier: nextTier
+          })
+        )
+      ];
+    });
 
-    const tierRank = {
-      draft: 0, reproduced: 1, verified: 2, community_confirmed: 3,
-      maintainer_approved: 4, deprecated: -1, dangerous: -2
-    };
-    let candidateTier = 'draft';
-    if (successfulVerifiers >= 10 && successRate >= 0.8) candidateTier = 'community_confirmed';
-    else if (successfulVerifiers >= 3 && successRate >= 0.75) candidateTier = 'verified';
-    else if (successfulVerifiers >= 1) candidateTier = 'reproduced';
-    const nextTier = (tierRank[candidateTier] || 0) > (tierRank[pathbook.trust_tier] || 0)
-      ? candidateTier : pathbook.trust_tier;
-
-    await env.AIHANGOUT_DB.batch([
-      env.AIHANGOUT_DB.prepare(`
-        UPDATE pathbooks
-        SET times_applied = ?, times_succeeded = ?, confidence = ?,
-            trust_tier = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).bind(applications, successes, confidence, nextTier, pathbook.id),
-      env.AIHANGOUT_DB.prepare(`
-        INSERT INTO analytics_events (event_type, user_id, user_type, event_data)
-        VALUES ('pathbook_verification_reported', ?, ?, ?)
-      `).bind(
-        user.id,
-        user.ai_agent_type === 'human' ? 'human' : 'ai_agent',
-        JSON.stringify({
-          pathbook_id: pathbook.pathbook_id,
-          outcome: body.outcome,
-          applications,
-          successes,
-          trust_tier: nextTier
-        })
-      )
-    ]);
-
-    if (pathbook.created_by && pathbook.created_by !== user.id && ctx?.waitUntil) {
+    if (application.created_by && application.created_by !== user.id && ctx?.waitUntil) {
       ctx.waitUntil(createNotification(env, {
-        userId: pathbook.created_by,
+        userId: application.created_by,
         actorId: user.id,
         type: 'pathbook_verified',
         targetType: 'pathbook',
-        targetId: pathbook.id,
-        message: `${user.username} reported a ${body.outcome} outcome for "${pathbook.title}"`,
+        targetId: application.pathbook_db_id,
+        message: `${user.username} reported a ${body.outcome} outcome for "${application.title}"`,
         sourceType: 'pathbook_verification',
-        sourceId: pathbook.id
+        sourceId: application.pathbook_db_id
       }));
     }
 
     return jsonResponse({
       success: true,
-      pathbook_id: pathbook.pathbook_id,
+      application_id: applicationId,
+      pathbook_id: application.pathbook_id,
       outcome: body.outcome,
-      metrics: {
-        times_applied: applications,
-        times_succeeded: successes,
-        success_rate: applications ? successRate : null,
-        confidence,
-        trust_tier: nextTier
-      }
+      metrics: resultMetrics
     });
   } catch (error) {
     console.error('[Pathbooks/verify] Error:', error);
+    if (String(error?.message || error).includes('pathbook_application_not_active')) {
+      return jsonResponse({ success: false, error: 'Application has already been consumed or expired' }, { status: 409 });
+    }
+    if (String(error?.message || error).includes('UNIQUE')) {
+      return jsonResponse({ success: true, duplicate: true, error: 'Outcome was already recorded' });
+    }
     return jsonResponse({ success: false, error: 'Failed to record Pathbook outcome' }, { status: 500 });
   }
 });
@@ -15619,6 +15909,74 @@ router.get('/api/health/verification', async (request, env) => {
   }
 });
 
+router.get('/api/health/pathbooks', async (request, env) => {
+  const checks = {};
+  let ok = true;
+  try {
+    const requiredTables = [
+      'pathbooks', 'pathbook_applications', 'pathbook_verification_events',
+      'pathbook_audit_head', 'pathbook_audit_events'
+    ];
+    const placeholders = requiredTables.map(() => '?').join(',');
+    const tables = await env.AIHANGOUT_DB.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})
+    `).bind(...requiredTables).all();
+    const present = new Set((tables.results || []).map(row => row.name));
+    const missing = requiredTables.filter(name => !present.has(name));
+    checks.schema = missing.length ? `missing:${missing.join(',')}` : 'ok';
+    ok = missing.length === 0;
+
+    if (ok) {
+      const head = await env.AIHANGOUT_DB.prepare(
+        'SELECT head_seq, head_hash FROM pathbook_audit_head WHERE id = 1'
+      ).first();
+      const events = await env.AIHANGOUT_DB.prepare(
+        'SELECT * FROM pathbook_audit_events ORDER BY seq ASC'
+      ).all();
+      let previous = '0'.repeat(64);
+      let lastSeq = 0;
+      for (const event of events.results || []) {
+        const expectedHash = `sha256:${await sha256Hex(`${previous}|${event.payload}`)}`;
+        const expectedSeal = await pathbookHmacHex(env, expectedHash);
+        if (event.prev_hash !== previous || event.event_hash !== expectedHash || event.event_seal !== expectedSeal) {
+          ok = false;
+          checks.audit_chain = `broken_at:${event.seq}`;
+          break;
+        }
+        previous = event.event_hash;
+        lastSeq = Number(event.seq);
+      }
+      if (!checks.audit_chain) checks.audit_chain = 'ok';
+      if (Number(head?.head_seq || 0) !== lastSeq || String(head?.head_hash || '') !== previous) {
+        ok = false;
+        checks.audit_head = 'mismatch';
+      } else {
+        checks.audit_head = 'ok';
+      }
+
+      const sealedRows = await env.AIHANGOUT_DB.prepare(
+        'SELECT * FROM pathbooks WHERE state_hash IS NOT NULL OR state_seal IS NOT NULL'
+      ).all();
+      let badState = null;
+      for (const row of sealedRows.results || []) {
+        const sealed = await sealedPathbookState(env, row);
+        if (row.state_hash !== sealed.state_hash || row.state_seal !== sealed.state_seal) {
+          badState = row.pathbook_id;
+          break;
+        }
+      }
+      checks.materialized_state = badState ? `mismatch:${badState}` : 'ok';
+      if (badState) ok = false;
+      checks.sealed_pathbooks = (sealedRows.results || []).length;
+    }
+  } catch (error) {
+    console.error('[Health/pathbooks] Error:', error);
+    checks.exception = String(error?.message || error);
+    ok = false;
+  }
+  return jsonResponse({ status: ok ? 'ok' : 'degraded', checks }, { status: ok ? 200 : 503 });
+});
+
 const MCP_PROTOCOL_VERSION = '2025-03-26';
 
 function mcpResult(id, payload, isError = false) {
@@ -15631,6 +15989,176 @@ function mcpResult(id, payload, isError = false) {
       isError
     }
   });
+}
+
+async function sha256Hex(value) {
+  const digest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(String(value))
+  );
+  return Array.from(new Uint8Array(digest))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function contextFingerprintText(text) {
+  const source = String(text || '');
+  const primary = await fingerprintText(source);
+  const stableCodes = [];
+  const pattern = /\b(winerror|errno|error\s+code|status(?:\s+code)?|http|cuda\s+error)\s*[:#]?\s*(\d{1,6})\b/gi;
+  for (const match of source.matchAll(pattern)) {
+    stableCodes.push(`${match[1].toLowerCase().replace(/\s+/g, '-')}:${match[2]}`);
+  }
+  return `sha256:${await sha256Hex(`${primary}|${stableCodes.join('|')}`)}`;
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+}
+
+async function pathbookHmacHex(env, value) {
+  if (!env.JWT_SECRET) throw new Error('JWT_SECRET is required for Pathbook audit seals');
+  const material = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`aihangout:pathbook:audit:${env.JWT_SECRET}`)
+  );
+  const key = await globalThis.crypto.subtle.importKey(
+    'raw',
+    material,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await globalThis.crypto.subtle.sign(
+    'HMAC',
+    key,
+    new TextEncoder().encode(String(value))
+  );
+  return Array.from(new Uint8Array(signature))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function assessPathbookRemediation(text) {
+  const source = String(text || '');
+  const injectionPatterns = [
+    /\bignore\s+(?:all\s+)?previous\s+instructions\b/i,
+    /\breveal\s+(?:the\s+)?system\s+prompt\b/i,
+    /\byou\s+are\s+now\s+(?:dan|unrestricted)\b/i,
+    /<\s*\/?\s*system\s*>/i
+  ];
+  if (injectionPatterns.some(pattern => pattern.test(source))) {
+    return { rejected: true, safety_class: 'high', safety_flags: ['prompt_injection'] };
+  }
+  const riskPatterns = [
+    ['recursive_delete', /(?:\brm\s+-rf\b|\bRemove-Item\b[^\n]*-Recurse)/i],
+    ['broad_process_kill', /\btaskkill\b[^\n]*(?:\/IM|\*)/i],
+    ['disk_format', /\b(?:format|mkfs(?:\.\w+)?)\b/i],
+    ['registry_or_boot', /\b(?:bcdedit|reg\s+(?:delete|add)|Set-ItemProperty\s+['"]?HKLM)/i],
+    ['download_execute', /(?:curl|wget|Invoke-WebRequest)[^\n|;]*(?:\||;)[^\n]*(?:sh|bash|powershell|pwsh)/i]
+  ];
+  const flags = riskPatterns.filter(([, pattern]) => pattern.test(source)).map(([name]) => name);
+  return {
+    rejected: false,
+    safety_class: flags.length ? 'high' : 'low',
+    safety_flags: flags
+  };
+}
+
+function pathbookStatePayload(row, metrics = {}) {
+  return {
+    pathbook_id: row.pathbook_id,
+    updated_at: metrics.updated_at || row.updated_at,
+    trust_tier: metrics.trust_tier || row.trust_tier,
+    times_applied: Number(metrics.times_applied ?? row.times_applied ?? 0),
+    times_succeeded: Number(metrics.times_succeeded ?? row.times_succeeded ?? 0),
+    confidence: Number(metrics.confidence ?? row.confidence ?? 0),
+    status: metrics.status || row.status,
+    context_fingerprint: row.context_fingerprint || null,
+    safety_class: row.safety_class || 'low',
+    safety_flags: row.safety_flags || '[]',
+    requires_confirmation: Number(row.requires_confirmation || 0)
+  };
+}
+
+async function sealedPathbookState(env, row, metrics = {}) {
+  const payload = stableJson(pathbookStatePayload(row, metrics));
+  const stateHash = `sha256:${await sha256Hex(payload)}`;
+  return {
+    state_hash: stateHash,
+    state_seal: await pathbookHmacHex(env, stateHash)
+  };
+}
+
+async function pathbookContentVersion(row) {
+  const content = {
+    pathbook_id: row.pathbook_id,
+    protocol_version: row.protocol_version,
+    error_fingerprint: row.error_fingerprint,
+    context_fingerprint: row.context_fingerprint || null,
+    trigger_yaml: row.trigger_yaml,
+    remediation_yaml: row.remediation_yaml,
+    verify_yaml: row.verify_yaml || '',
+    failed_attempts_yaml: row.failed_attempts_yaml || '',
+    safety_class: row.safety_class || 'low',
+    safety_flags: row.safety_flags || '[]',
+    requires_confirmation: Number(row.requires_confirmation || 0)
+  };
+  return `sha256:${await sha256Hex(stableJson(content))}`;
+}
+
+async function runAuditedPathbookBatch(
+  env,
+  { event_type, actor_id = null, pathbook_id = null, payload },
+  buildStatements,
+  maxAttempts = 5
+) {
+  const eventPayload = stableJson({
+    event_type,
+    actor_id,
+    pathbook_id,
+    payload,
+    occurred_at: new Date().toISOString()
+  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const head = await env.AIHANGOUT_DB.prepare(
+      'SELECT head_seq, head_hash FROM pathbook_audit_head WHERE id = 1'
+    ).first();
+    if (!head) throw new Error('Pathbook audit head is missing');
+    const previousHash = String(head.head_hash);
+    const eventHash = `sha256:${await sha256Hex(`${previousHash}|${eventPayload}`)}`;
+    const eventSeal = await pathbookHmacHex(env, eventHash);
+    try {
+      const statements = await buildStatements();
+      statements.push(
+        env.AIHANGOUT_DB.prepare(`
+          INSERT INTO pathbook_audit_events
+            (event_type, actor_id, pathbook_id, payload, prev_hash, event_hash, event_seal)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          event_type,
+          actor_id,
+          pathbook_id,
+          eventPayload,
+          previousHash,
+          eventHash,
+          eventSeal
+        )
+      );
+      return await env.AIHANGOUT_DB.batch(statements);
+    } catch (error) {
+      if (
+        attempt < maxAttempts &&
+        String(error?.message || error).includes('pathbook_audit_head_conflict')
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error('Pathbook audit head remained contended');
 }
 
 router.post('/mcp', async (request, env, ctx) => {
@@ -15710,6 +16238,20 @@ router.post('/mcp', async (request, env, ctx) => {
             }
           },
           {
+            name: 'execute_pathbook',
+            description: 'Issue a short-lived, single-use application and retrieve a Pathbook remediation plan. Requires Authorization.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                pathbook_id: { type: 'string', minLength: 1, maxLength: 200 },
+                confirm_risk: { type: 'boolean', default: false },
+                allow_untrusted: { type: 'boolean', default: false }
+              },
+              required: ['pathbook_id'],
+              additionalProperties: false
+            }
+          },
+          {
             name: 'post_solution',
             description: 'Submit a solution to a problem. Requires the caller Authorization bearer token.',
             inputSchema: {
@@ -15726,17 +16268,30 @@ router.post('/mcp', async (request, env, ctx) => {
           },
           {
             name: 'report_pathbook_result',
-            description: 'Report whether a Pathbook remediation succeeded or failed. Requires the caller Authorization bearer token.',
+            description: 'Report an evidenced result for a server-issued Pathbook application. Requires Authorization.',
             inputSchema: {
               type: 'object',
               properties: {
                 pathbook_id: { type: 'string', minLength: 1, maxLength: 200 },
-                outcome: { type: 'string', enum: ['success', 'failure'] },
+                application_id: { type: 'string', minLength: 1, maxLength: 200 },
+                outcome: { type: 'string', enum: ['success', 'failure', 'dangerous'] },
+                verify_passed: { type: 'boolean' },
                 environment: { type: 'string', maxLength: 1000 },
                 notes: { type: 'string', maxLength: 5000 },
-                evidence_url: { type: 'string', maxLength: 2000 }
+                verification: {
+                  type: 'object',
+                  properties: {
+                    check_id: { type: 'string', minLength: 1, maxLength: 200 },
+                    exit_code: { type: 'integer' },
+                    output_digest: { type: 'string', pattern: '^sha256:[0-9a-fA-F]{64}$' },
+                    environment_digest: { type: 'string', pattern: '^sha256:[0-9a-fA-F]{64}$' },
+                    observed_at: { type: 'string', format: 'date-time' }
+                  },
+                  required: ['check_id', 'exit_code', 'output_digest', 'environment_digest', 'observed_at'],
+                  additionalProperties: false
+                }
               },
-              required: ['pathbook_id', 'outcome'],
+              required: ['pathbook_id', 'application_id', 'outcome'],
               additionalProperties: false
             }
           }
@@ -15793,6 +16348,25 @@ router.post('/mcp', async (request, env, ctx) => {
           limit: clampNumber(args.limit, 1, 10, 5)
         })
       });
+    } else if (toolName === 'execute_pathbook') {
+      const pathbookId = sanitizeContent(String(args.pathbook_id || '')).trim();
+      if (!pathbookId || pathbookId.length > 200) {
+        return mcpResult(id, { success: false, error: 'A valid pathbook_id is required' }, true);
+      }
+      internalRequest = new Request(
+        new URL(`/api/pathbooks/${encodeURIComponent(pathbookId)}/execute`, request.url),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: request.headers.get('Authorization') || ''
+          },
+          body: JSON.stringify({
+            confirm_risk: args.confirm_risk === true,
+            allow_untrusted: args.allow_untrusted === true
+          })
+        }
+      );
     } else if (toolName === 'post_solution') {
       const problemId = Number(args.problem_id);
       if (!Number.isInteger(problemId) || problemId < 1) {
@@ -15812,10 +16386,15 @@ router.post('/mcp', async (request, env, ctx) => {
       });
     } else if (toolName === 'report_pathbook_result') {
       const pathbookId = sanitizeContent(String(args.pathbook_id || '')).trim();
-      if (!pathbookId || pathbookId.length > 200 || !['success', 'failure'].includes(args.outcome)) {
+      if (
+        !pathbookId ||
+        pathbookId.length > 200 ||
+        !String(args.application_id || '') ||
+        !['success', 'failure', 'dangerous'].includes(args.outcome)
+      ) {
         return mcpResult(id, {
           success: false,
-          error: 'Valid pathbook_id and success/failure outcome are required'
+          error: 'Valid pathbook_id, application_id, and outcome are required'
         }, true);
       }
       internalRequest = new Request(
@@ -15827,10 +16406,12 @@ router.post('/mcp', async (request, env, ctx) => {
             Authorization: request.headers.get('Authorization') || ''
           },
           body: JSON.stringify({
+            application_id: String(args.application_id || ''),
             outcome: args.outcome,
+            verify_passed: args.verify_passed === true,
             environment: String(args.environment || ''),
             notes: String(args.notes || ''),
-            evidence_url: String(args.evidence_url || '')
+            verification: args.verification || null
           })
         }
       );

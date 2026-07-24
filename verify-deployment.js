@@ -24,6 +24,7 @@ const REQUIRED_CHECKS = [
     'Auth crypto healthy (/api/health/auth)',
     'Notification pipeline healthy (/api/health/notifications)',
     'Human verification pipeline healthy and feed sources separated',
+    'Pathbook audit, state, and application pipeline healthy',
     'Launch contracts and CSP are production-safe',
     'Grounded capability APIs return production-safe responses',
     'PBKDF2 iterations within Workers cap (local src)'
@@ -234,6 +235,22 @@ async function verifyDeployment() {
             console.log(`❌ Human verification/feed: health=${verificationData.status}, community=${communityClean}, digest=${digestClean}`);
         }
 
+        const pathbookHealth = await makeApiRequest(`${PRODUCTION_URL}/api/health/pathbooks`);
+        const pathbookHealthData = pathbookHealth.statusCode === 200
+            ? JSON.parse(pathbookHealth.data) : {};
+        if (
+            pathbookHealthData.status === 'ok' &&
+            pathbookHealthData.checks?.schema === 'ok' &&
+            pathbookHealthData.checks?.audit_chain === 'ok' &&
+            pathbookHealthData.checks?.audit_head === 'ok' &&
+            pathbookHealthData.checks?.materialized_state === 'ok'
+        ) {
+            console.log('✅ Pathbooks: schema, D1 audit chain/head, and sealed materialized state healthy');
+            passedChecks++;
+        } else {
+            console.log(`❌ Pathbooks: ${pathbookHealth.data}`);
+        }
+
         const launchContracts = await Promise.all([
             makeApiRequest(`${PRODUCTION_URL}/api/events/batch`, {
                 method: 'POST',
@@ -256,6 +273,7 @@ async function verifyDeployment() {
         const launchContractsOk =
             launchContracts.map(result => result.statusCode).join(',') === '200,200,410,200' &&
             launchContracts[3].data.includes('lookup_pathbook') &&
+            launchContracts[3].data.includes('execute_pathbook') &&
             launchContracts[3].data.includes('post_solution') &&
             launchContracts[3].data.includes('report_pathbook_result') &&
             !htmlResponse.data.includes('fonts.googleapis.com') &&

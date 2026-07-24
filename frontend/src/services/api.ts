@@ -177,11 +177,23 @@ export const pathbooksAPI = {
 
   get: (id: string) => api.get(`/pathbooks/${id}`),
   spec: () => api.get('/pathbooks/spec'),
+  execute: (id: string, data?: {
+    confirm_risk?: boolean
+    allow_untrusted?: boolean
+  }) => api.post(`/pathbooks/${encodeURIComponent(id)}/execute`, data || {}),
   verify: (id: string, data: {
-    outcome: 'success' | 'failure'
+    application_id: string
+    outcome: 'success' | 'failure' | 'dangerous'
+    verify_passed?: boolean
     environment?: string
     notes?: string
-    evidence_url?: string
+    verification?: {
+      check_id: string
+      exit_code: number
+      output_digest: string
+      environment_digest: string
+      observed_at: string
+    }
   }) => api.post(`/pathbooks/${encodeURIComponent(id)}/verify`, data),
 }
 
