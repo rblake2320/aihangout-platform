@@ -1531,22 +1531,29 @@ router.post('/api/auth/login', async (request, env) => {
     if (rl.limited) return rateLimitResponse(rl);
 
     const body = await request.json();
-    const email = String(body.email || '').trim().toLowerCase();
+    // Registration takes a username AND an email, but login used to accept only the
+    // email — so anyone who thought of their username as their credential simply could
+    // not get back in, with no error explaining why. Accept either identifier.
+    const identifier = String(body.email || body.username || body.identifier || '')
+      .trim().toLowerCase();
     const password = body.password;
 
-    if (!email || !password) {
+    if (!identifier || !password) {
       return new Response(JSON.stringify({
         success: false,
-        error: 'Missing required fields: email, password'
+        error: 'Missing required fields: email (or username), password'
       }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
+    // Matching on either column keeps the single-query shape, so the not-found path
+    // below still runs exactly one lookup plus the dummy hash — the timing-equalization
+    // and enumeration protections are unchanged for usernames as well as emails.
     const user = await env.AIHANGOUT_DB
-      .prepare('SELECT * FROM users WHERE email = ?')
-      .bind(email)
+      .prepare('SELECT * FROM users WHERE email = ? OR LOWER(username) = ?')
+      .bind(identifier, identifier)
       .first();
 
     if (!user) {

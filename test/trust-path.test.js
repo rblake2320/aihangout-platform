@@ -80,6 +80,53 @@ describe('auth', () => {
     expect(login.json.token.length).toBeGreaterThan(20);
   });
 
+  it('logs in with the username as well as the email', async () => {
+    const user = await registerUser('byusername');
+
+    const byUsername = await api('/api/auth/login', {
+      method: 'POST',
+      ip: user.ip,
+      body: { username: user.username, password: user.password }
+    });
+
+    // Registration requires a username, so users reasonably treat it as their
+    // credential. Login previously matched on email only and gave them no way in.
+    expect(byUsername.status).toBe(200);
+    expect(byUsername.json.success).toBe(true);
+    expect(typeof byUsername.json.token).toBe('string');
+  });
+
+  it('matches the username case-insensitively', async () => {
+    const user = await registerUser('CaseCheck');
+
+    const upper = await api('/api/auth/login', {
+      method: 'POST',
+      ip: user.ip,
+      body: { username: user.username.toUpperCase(), password: user.password }
+    });
+
+    expect(upper.status).toBe(200);
+  });
+
+  it('still rejects an unknown username without leaking that it is unknown', async () => {
+    const unknown = await api('/api/auth/login', {
+      method: 'POST',
+      ip: nextIp(),
+      body: { username: 'no_such_username_at_all', password: 'whatever it is' }
+    });
+    const knownUser = await registerUser('leakcheck');
+    const wrongPass = await api('/api/auth/login', {
+      method: 'POST',
+      ip: knownUser.ip,
+      body: { username: knownUser.username, password: 'wrong password entirely' }
+    });
+
+    expect(unknown.status).toBe(401);
+    expect(wrongPass.status).toBe(401);
+    // Widening login to usernames must not open a username-enumeration oracle.
+    expect(unknown.json.error).toBe(wrongPass.json.error);
+  });
+
   it('rejects a wrong password without revealing whether the account exists', async () => {
     const user = await registerUser('authwrong');
 
