@@ -474,6 +474,23 @@ describe('activity log', () => {
     expect(entry.payload).toContain('[REDACTED]');
   });
 
+  it('attributes a FAILED login to the account that was targeted', async () => {
+    const target = `brute_target_${unique}_${Date.now()}`;
+    await api('/api/auth/login', {
+      method: 'POST',
+      ip: nextIp(),
+      body: { username: target, password: 'wrong on purpose' }
+    });
+
+    const entry = await waitForEntry(e => e.path === '/api/auth/login' && e.username === target);
+    // Without this, every failed-auth row has username = NULL, so a detection engine
+    // can correlate a brute-force burst but cannot say which account was under attack.
+    // Sentinel Blue's BT-IDENTITY-001 alert came back with user: null for exactly this.
+    expect(entry, 'failed login was not attributed to the targeted account').not.toBeNull();
+    expect(entry.user_id).toBeNull();
+    expect(entry.outcome).toBe('rejected');
+  });
+
   it('is admin-only', async () => {
     const user = await registerUser('lognonadmin');
     const anon = await api('/api/admin/activity-log');

@@ -17864,6 +17864,20 @@ export default {
           actor = null;
         }
 
+        // Failed auth has no authenticated actor, so `username` would be NULL for the
+        // entire event class that matters most for brute-force triage: a detection
+        // engine can correlate the attempts but cannot say WHICH account was targeted.
+        // Fall back to the identifier the caller attempted. It is already present in
+        // the stored payload (only credentials are redacted), so promoting it to a
+        // queryable column exposes nothing new and makes the attempts groupable.
+        let attemptedIdentifier = null;
+        if (!actor && url.pathname.startsWith('/api/auth/') && parsedPayload) {
+          const candidate = parsedPayload.username || parsedPayload.email || parsedPayload.identifier;
+          if (typeof candidate === 'string' && candidate.trim()) {
+            attemptedIdentifier = candidate.trim().slice(0, 120);
+          }
+        }
+
         const rawIp = request.headers.get('CF-Connecting-IP') || '';
         let ipHash = null;
         if (rawIp) {
@@ -17882,7 +17896,7 @@ export default {
           path: url.pathname,
           action: activityActionFor(request.method, url.pathname),
           userId: actor?.id ?? null,
-          username: actor?.username ?? null,
+          username: actor?.username ?? attemptedIdentifier,
           agentType: detectAgentRequest(request),
           ipHash,
           outcome: accepted ? 'accepted' : 'rejected',
