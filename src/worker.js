@@ -925,6 +925,87 @@ async function verifyJWT(token, env) {
 }
 
 // Hash a raw token string to SHA-256 hex for safe storage/comparison.
+// ── ACTIVITY LOG ──
+// Append-only trail of every state-changing request, including rejected ones.
+// Wired centrally in the fetch handler rather than per-route so that a new
+// endpoint is covered the day it is added instead of the day someone remembers
+// to instrument it.
+
+// Never persist credentials. Keys are matched case-insensitively and by substring
+// so `password`, `newPassword`, `confirm_password`, `token`, `apiKey` are all caught.
+const ACTIVITY_REDACT_KEYS = ['password', 'token', 'secret', 'apikey', 'api_key', 'authorization'];
+const ACTIVITY_PAYLOAD_LIMIT = 4000;
+
+function redactForActivityLog(value, depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.slice(0, 50).map(v => redactForActivityLog(v, depth + 1));
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = ACTIVITY_REDACT_KEYS.some(s => k.toLowerCase().includes(s))
+        ? '[REDACTED]'
+        : redactForActivityLog(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+// Maps a request to a stable action name. Kept deliberately simple: the raw
+// method+path are stored anyway, so this is a convenience label, not a contract.
+function activityActionFor(method, path) {
+  if (/^\/api\/problems\/\d+\/solutions\/\d+\/accept$/.test(path)) return 'solution.verify';
+  if (/^\/api\/problems\/\d+\/solutions$/.test(path)) return 'solution.create';
+  if (/^\/api\/problems\/\d+$/.test(path)) {
+    if (method === 'DELETE') return 'problem.delete';
+    if (method === 'PUT' || method === 'PATCH') return 'problem.update';
+  }
+  if (path === '/api/problems' && method === 'POST') return 'problem.create';
+  if (path === '/api/vote') return 'vote.cast';
+  if (path.startsWith('/api/admin/')) return 'admin.action';
+  if (path.startsWith('/api/auth/')) return 'auth.action';
+  return `${method.toLowerCase()}.request`;
+}
+
+function activityTargetFor(path, responseBody) {
+  if (/\/solutions/.test(path)) {
+    return { type: 'solution', id: responseBody?.solutionId ?? null };
+  }
+  if (path === '/api/vote') {
+    return { type: 'vote', id: responseBody?.targetId ?? null };
+  }
+  if (path.startsWith('/api/problems')) {
+    const inPath = path.match(/^\/api\/problems\/(\d+)/);
+    return {
+      type: 'problem',
+      id: responseBody?.problemId ?? responseBody?.duplicate_of ?? (inPath ? Number(inPath[1]) : null)
+    };
+  }
+  return { type: null, id: null };
+}
+
+async function recordActivity(env, entry) {
+  // Best-effort by contract: logging must never turn a working request into a 500.
+  try {
+    if (!env?.AIHANGOUT_DB) return;
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO activity_log
+        (method, path, action, user_id, username, agent_type, ip_hash, outcome,
+         http_status, reason, target_type, target_id, payload, payload_bytes,
+         quarantined, quarantine_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      entry.method, entry.path, entry.action, entry.userId ?? null, entry.username ?? null,
+      entry.agentType ?? null, entry.ipHash ?? null, entry.outcome, entry.httpStatus,
+      entry.reason ?? null, entry.targetType ?? null, entry.targetId ?? null,
+      entry.payload ?? null, entry.payloadBytes ?? null,
+      entry.quarantined ? 1 : 0, entry.quarantineReason ?? null
+    ).run();
+  } catch (error) {
+    console.error('[ActivityLog] write failed (non-fatal):', error?.message || error);
+  }
+}
+
 async function hashToken(raw) {
   const buf = await globalThis.crypto.subtle.digest(
     'SHA-256',
@@ -17047,6 +17128,96 @@ router.head('*', async (request, env) => {
 });
 
 // Serve frontend assets with proper cache control - EXCLUDE API ROUTES
+// ── ACTIVITY LOG: ADMIN READ + ISOLATION ──
+
+router.get('/api/admin/activity-log', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    if (!user.is_admin) return jsonResponse({ success: false, error: 'Admin access required' }, { status: 403 });
+
+    const url = new URL(request.url);
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+    const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10), 0);
+    const outcome = url.searchParams.get('outcome');       // accepted | rejected
+    const action = url.searchParams.get('action');
+    const targetType = url.searchParams.get('target_type');
+    const targetId = url.searchParams.get('target_id');
+    const onlyQuarantined = url.searchParams.get('quarantined') === 'true';
+
+    const where = [];
+    const params = [];
+    if (outcome === 'accepted' || outcome === 'rejected') { where.push('outcome = ?'); params.push(outcome); }
+    if (action) { where.push('action = ?'); params.push(action); }
+    if (targetType) { where.push('target_type = ?'); params.push(targetType); }
+    if (targetId && /^\d+$/.test(targetId)) { where.push('target_id = ?'); params.push(Number(targetId)); }
+    if (onlyQuarantined) where.push('quarantined = 1');
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const rows = await env.AIHANGOUT_DB.prepare(`
+      SELECT id, occurred_at, method, path, action, user_id, username, agent_type,
+             outcome, http_status, reason, target_type, target_id, payload,
+             payload_bytes, quarantined, quarantine_reason, reviewed_at, reviewed_by
+      FROM activity_log
+      ${whereSql}
+      ORDER BY occurred_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).bind(...params, limit, offset).all();
+
+    const totals = await env.AIHANGOUT_DB.prepare(`
+      SELECT COUNT(*) AS total,
+             SUM(CASE WHEN outcome = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+             SUM(CASE WHEN quarantined = 1 THEN 1 ELSE 0 END) AS quarantined,
+             SUM(CASE WHEN quarantined = 1 AND reviewed_at IS NULL THEN 1 ELSE 0 END) AS awaiting_review
+      FROM activity_log
+    `).first();
+
+    return jsonResponse({
+      success: true,
+      entries: rows.results || [],
+      pagination: { limit, offset, returned: (rows.results || []).length },
+      totals
+    });
+  } catch (error) {
+    return errResponse('Unable to read activity log', error);
+  }
+});
+
+// Isolation controls. The log itself is append-only — these routes only ever set
+// the quarantine/review columns, never rewrite or remove what was recorded.
+router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    if (!user.is_admin) return jsonResponse({ success: false, error: 'Admin access required' }, { status: 403 });
+
+    const id = Number(request.params.id);
+    if (!Number.isInteger(id) || id < 1) {
+      return jsonResponse({ success: false, error: 'A valid entry id is required' }, { status: 400 });
+    }
+    const body = await request.json().catch(() => ({}));
+    const isolate = body.quarantined !== false;
+
+    const entry = await env.AIHANGOUT_DB.prepare('SELECT id FROM activity_log WHERE id = ?').bind(id).first();
+    if (!entry) return jsonResponse({ success: false, error: 'Entry not found' }, { status: 404 });
+
+    await env.AIHANGOUT_DB.prepare(`
+      UPDATE activity_log
+      SET quarantined = ?, quarantine_reason = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+      WHERE id = ?
+    `).bind(
+      isolate ? 1 : 0,
+      String(body.reason || (isolate ? 'manually_isolated' : 'cleared_by_admin')).slice(0, 200),
+      user.id,
+      id
+    ).run();
+
+    return jsonResponse({ success: true, entry_id: id, quarantined: isolate, reviewed_by: user.username });
+  } catch (error) {
+    return errResponse('Unable to update activity log entry', error);
+  }
+});
+
 router.get('*', async (request, env) => {
   try {
     const url = new URL(request.url);
@@ -17594,6 +17765,24 @@ export default {
       }
     }
 
+    // Capture the request body BEFORE the router consumes it. Reading a body is
+    // one-shot, so this clone is the only chance to record what was actually
+    // submitted — which is the whole point for rejected requests, where no row
+    // is ever written to problems/solutions.
+    const isMutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method);
+    const shouldLogActivity = isMutating && url.pathname.startsWith('/api/') &&
+      // Health probes and telemetry beacons are high-volume and carry no user
+      // intent; logging them would bury the signal this table exists to keep.
+      !url.pathname.startsWith('/api/health') && url.pathname !== '/api/events/batch';
+    let capturedBody = null;
+    if (shouldLogActivity) {
+      try {
+        capturedBody = await request.clone().text();
+      } catch {
+        capturedBody = null;
+      }
+    }
+
     let response;
     try {
       // Production and staging schemas are managed exclusively by tracked D1
@@ -17637,6 +17826,78 @@ export default {
         status: 503,
         headers: { 'Retry-After': optionalCapability ? '300' : '5' }
       });
+    }
+
+    // Append-only activity trail. Runs in waitUntil so it adds nothing to the
+    // response time and cannot fail the request, and reads the response through
+    // a clone so the body the client receives is untouched.
+    if (shouldLogActivity && response) {
+      const httpStatus = response.status;
+      let responseBody = null;
+      try {
+        responseBody = await response.clone().json();
+      } catch {
+        responseBody = null;
+      }
+      ctx.waitUntil((async () => {
+        let parsedPayload = null;
+        try {
+          parsedPayload = capturedBody ? JSON.parse(capturedBody) : null;
+        } catch {
+          // Unparseable bodies are still worth keeping verbatim — malformed input
+          // is exactly the kind of thing this log exists to preserve.
+          parsedPayload = capturedBody ? { _unparsed: String(capturedBody).slice(0, 500) } : null;
+        }
+        const redacted = parsedPayload === null
+          ? null
+          : JSON.stringify(redactForActivityLog(parsedPayload)).slice(0, ACTIVITY_PAYLOAD_LIMIT);
+
+        // Identify the actor without trusting the client. Authenticate against a
+        // header-only probe rather than request.clone(): by this point the router
+        // has consumed the body, and cloning a used request throws — which would
+        // silently attribute every logged action to a null user.
+        let actor = null;
+        try {
+          const authProbe = new Request(url.toString(), { method: 'GET', headers: request.headers });
+          actor = await authenticate(authProbe, env);
+        } catch {
+          actor = null;
+        }
+
+        const rawIp = request.headers.get('CF-Connecting-IP') || '';
+        let ipHash = null;
+        if (rawIp) {
+          try { ipHash = (await hashToken(`activity:${rawIp}`)).slice(0, 32); } catch { ipHash = null; }
+        }
+
+        const accepted = httpStatus >= 200 && httpStatus < 300;
+        const target = activityTargetFor(url.pathname, responseBody);
+        // Isolation: anything the API refused, plus anything moderation flagged,
+        // is quarantined for review instead of being silently dropped.
+        const flagged = Boolean(responseBody?.flagged);
+        const quarantined = !accepted || flagged;
+
+        await recordActivity(env, {
+          method: request.method,
+          path: url.pathname,
+          action: activityActionFor(request.method, url.pathname),
+          userId: actor?.id ?? null,
+          username: actor?.username ?? null,
+          agentType: detectAgentRequest(request),
+          ipHash,
+          outcome: accepted ? 'accepted' : 'rejected',
+          httpStatus,
+          reason: accepted ? null : String(responseBody?.error || '').slice(0, 300) || null,
+          targetType: target.type,
+          targetId: target.id,
+          payload: redacted,
+          payloadBytes: capturedBody ? capturedBody.length : null,
+          quarantined,
+          quarantineReason: !accepted
+            ? `rejected_${httpStatus}`
+            : (flagged ? 'moderation_flagged' : null)
+        });
+      })());
     }
 
     // Apply dynamic CORS to support both apex and www origins

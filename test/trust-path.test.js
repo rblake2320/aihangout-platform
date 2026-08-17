@@ -398,6 +398,92 @@ describe('human verification', () => {
   });
 });
 
+describe('activity log', () => {
+  // The log is written from ctx.waitUntil, so it lands just after the response.
+  // Poll the DB directly rather than sleeping a fixed amount.
+  async function waitForEntry(predicate, attempts = 40) {
+    const { env } = await import('cloudflare:test');
+    for (let i = 0; i < attempts; i++) {
+      const rows = await env.AIHANGOUT_DB
+        .prepare('SELECT * FROM activity_log ORDER BY id DESC LIMIT 60').all();
+      const hit = (rows.results || []).find(predicate);
+      if (hit) return hit;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    return null;
+  }
+
+  it('records an accepted problem submission with its payload', async () => {
+    const user = await registerUser('logaccept');
+    const title = `Activity log accepted probe ${unique}`;
+    const res = await createProblem(user, { title });
+    expect(res.status).toBe(200);
+
+    const entry = await waitForEntry(e => e.action === 'problem.create' && (e.payload || '').includes(title));
+    expect(entry, 'no activity_log row for the accepted submission').not.toBeNull();
+    expect(entry.outcome).toBe('accepted');
+    expect(entry.http_status).toBe(200);
+    expect(entry.user_id).toBe(user.id);
+    expect(entry.quarantined).toBe(0);
+  });
+
+  it('records a REJECTED submission, preserving the content that was refused', async () => {
+    const user = await registerUser('logreject');
+    const title = `Activity log duplicate probe ${unique}`;
+    await createProblem(user, { title });
+    const dup = await createProblem(user, { title });
+    expect(dup.status).toBe(409);
+
+    // Match on this test's own title — other tests also produce 409s, and a loose
+    // predicate would happily assert against theirs.
+    const entry = await waitForEntry(e =>
+      e.outcome === 'rejected' && e.http_status === 409 && (e.payload || '').includes(title));
+    // The whole point: a refused submission leaves no row in `problems`, so without
+    // this log the content and the reason would both be gone.
+    expect(entry, 'no activity_log row for the rejected submission').not.toBeNull();
+    expect(entry.reason).toMatch(/already submitted/i);
+    expect(entry.payload).toContain(title);
+    expect(entry.quarantined).toBe(1);
+    expect(entry.quarantine_reason).toBe('rejected_409');
+  });
+
+  it('records deletions so content cannot vanish without a trace', async () => {
+    const user = await registerUser('logdelete');
+    const created = await createProblem(user, { title: `Activity log delete probe ${unique}` });
+    const problemId = created.json.problemId ?? created.json.problem?.id ?? created.json.id;
+
+    await api(`/api/problems/${problemId}`, { method: 'DELETE', token: user.token, ip: user.ip, body: {} });
+
+    const entry = await waitForEntry(e => e.action === 'problem.delete' && e.target_id === problemId);
+    expect(entry, 'a delete left no audit trail').not.toBeNull();
+    expect(entry.user_id).toBe(user.id);
+  });
+
+  it('never stores passwords or tokens', async () => {
+    const secret = 'SuperSecretPassphrase!2026';
+    await api('/api/auth/login', {
+      method: 'POST',
+      ip: nextIp(),
+      body: { email: 'nobody-at-all@example.test', password: secret }
+    });
+
+    const entry = await waitForEntry(e => e.path === '/api/auth/login');
+    expect(entry, 'login attempt was not logged').not.toBeNull();
+    // Redaction is the reason this table is safe to keep forever.
+    expect(entry.payload).not.toContain(secret);
+    expect(entry.payload).toContain('[REDACTED]');
+  });
+
+  it('is admin-only', async () => {
+    const user = await registerUser('lognonadmin');
+    const anon = await api('/api/admin/activity-log');
+    const asUser = await api('/api/admin/activity-log', { token: user.token, ip: user.ip });
+
+    expect(anon.status).toBe(401);
+    expect(asUser.status).toBe(403);
+  });
+});
+
 describe('health', () => {
   it('reports database connectivity', async () => {
     const res = await api('/api/health');
