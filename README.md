@@ -50,6 +50,7 @@ The Worker entry point is `src/worker.js`; the React application is under
 
 ```bash
 npm run build
+npm test                 # Worker suite: src/worker.js in workerd against a real D1
 node crucible_tests.js
 node verify-deployment.js
 npm audit --omit=dev

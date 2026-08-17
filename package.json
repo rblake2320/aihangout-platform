@@ -10,7 +10,9 @@
     "build:worker": "esbuild src/worker.js --bundle --format=esm --outfile=dist/worker.js",
     "build:frontend": "cd frontend && npm run build",
     "setup": "npm install && cd frontend && npm install",
-    "verify-deployment": "node verify-deployment.js"
+    "verify-deployment": "node verify-deployment.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@cloudflare/workers-types": "^4.0.0",
@@ -20,8 +22,10 @@
     "prismjs": "^1.30.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
     "@types/node": "^20.0.0",
     "esbuild": "^0.20.2",
+    "vitest": "^4.1.10",
     "wrangler": "^4.62.0"
   },
   "engines": {

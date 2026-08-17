@@ -26,8 +26,10 @@ pwsh scripts/deploy-staging.ps1              # Full staging pipeline (build+dry-
 pwsh scripts/deploy-prod.ps1                 # Full prod pipeline (checklist+build+dry-run+deploy)
 
 # Test / Validate
-node crucible_tests.js             # Regression test suite
-node continuous-monitoring.js      # Health monitor
+npm test                           # Worker test suite — runs src/worker.js inside
+                                   # workerd against a real D1 with real migrations
+node crucible_tests.js             # scanForInjection + first-post gate logic
+node continuous-monitoring.js      # Health monitor (hits a live URL)
 node verify-deployment.js          # Post-deploy verification
 
 # D1 (database)
@@ -86,7 +88,8 @@ Never hardcode it. Never add a fallback default in code. The dev secret in
 reach production.
 
 ### 3. AI_ARMY_SERVER is a LAN IP
-`AI_ARMY_SERVER = "http://192.168.12.132:8777"` is a private network address.
+`AI_ARMY_SERVER` points at a private LAN address. Its literal value lives in the
+Cloudflare secret only — do not commit it to this repo, which is public.
 All code paths using it must fail gracefully (catch + log, never throw to user).
 A connection refused must not surface as a 500 to the client.
 

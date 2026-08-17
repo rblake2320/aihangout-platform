@@ -1,0 +1,116 @@
+name: CI
+
+# This repository previously had no CI at all: nothing gated a merge to master, and
+# the deployed Worker had drifted from committed source more than once. These jobs
+# run the real build, the real Worker test suite (workerd + real D1), and real
+# secret/config guards.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  worker:
+    name: Worker build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Worker bundle
+        run: npm run build:worker
+
+      - name: Run Worker test suite (workerd + real D1)
+        run: npm test
+
+      - name: Run CRUCIBLE injection/gate suite
+        run: node crucible_tests.js
+
+  guards:
+    name: Security and config guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # PBKDF2 above 100000 is not merely suboptimal here — Cloudflare's Web Crypto
+      # rejects it outright, which took registration and login down for three weeks
+      # in July 2026. This guard makes that regression impossible to merge.
+      - name: PBKDF2 iterations must not exceed the Workers cap
+        run: |
+          value=$(sed -n 's/^const PBKDF2_ITERATIONS = \([0-9]\{1,\}\).*/\1/p' src/worker.js | head -1)
+          echo "PBKDF2_ITERATIONS = $value"
+          if [ -z "$value" ] || [ "$value" -gt 100000 ]; then
+            echo "::error::PBKDF2_ITERATIONS must be <= 100000 (Cloudflare Workers Web Crypto cap)"
+            exit 1
+          fi
+
+      # The D1 binding is AIHANGOUT_DB in every environment. `env.DB` is always
+      # undefined and silently sends handlers down their error/fallback paths.
+      - name: No references to the non-existent env.DB binding
+        run: |
+          if grep -nE 'env\.DB\b' src/worker.js; then
+            echo "::error::src/worker.js references env.DB; the only D1 binding is env.AIHANGOUT_DB"
+            exit 1
+          fi
+          echo "OK: no env.DB references"
+
+      # This repo is public. Private network addresses must not be committed.
+      - name: No private network addresses in tracked files
+        run: |
+          if git grep -nE '(192\.168\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})' -- . ':(exclude).github/workflows/ci.yml'; then
+            echo "::error::A private network address is committed to this public repository"
+            exit 1
+          fi
+          echo "OK: no private addresses"
+
+      - name: No hardcoded secrets
+        run: |
+          if git grep -nEi "(api[_-]?key|secret|passwd|password|token)[[:space:]]*[:=][[:space:]]*[\"'][A-Za-z0-9_\-]{16,}[\"']" -- 'src/*' 'wrangler.toml' 'migrations/*'; then
+            echo "::error::Possible hardcoded secret in tracked source"
+            exit 1
+          fi
+          echo "OK: no hardcoded secrets"
+
+      - name: JWT_SECRET must not be set in wrangler.toml
+        run: |
+          if grep -nE '^[[:space:]]*JWT_SECRET[[:space:]]*=' wrangler.toml; then
+            echo "::error::JWT_SECRET belongs in Cloudflare secrets, not wrangler.toml"
+            exit 1
+          fi
+          echo "OK: JWT_SECRET not in wrangler.toml"
+
+  deploy-check:
+    name: Wrangler dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Worker bundle
+        run: npm run build:worker
+
+      # Catches binding/config errors before they reach production. No credentials
+      # are needed for a dry run, so this is safe to run on pull requests.
+      - name: Validate production config
+        run: npx wrangler deploy --env production --dry-run

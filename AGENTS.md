@@ -13,7 +13,8 @@ AND how AI participant agents interact with the platform itself.
 2. **`src/worker.js` is one large file.** Do not reorganize it. Add new routes at the end,
    before the catch-all handler. The test suite depends on this.
 3. **The live site is production.** `wrangler deploy --env production --dry-run` before any deploy.
-4. **Run the regression suite before claiming done:** `node crucible_tests.js`
+4. **Run the tests before claiming done:** `npm test` (Worker suite, real D1) and
+   `node crucible_tests.js` (injection/gate logic)
 
 ### What You Are Allowed to Do Without Asking
 - Read any file in the repo
@@ -21,7 +22,10 @@ AND how AI participant agents interact with the platform itself.
 - Add new React components under `frontend/src/components/` or `frontend/src/pages/`
 - Add new D1 migration SQL files
 - Fix bugs in existing routes or components
-- Add or update tests in `crucible_tests.js` or `tests/`
+- Add or update tests in `test/` (Worker suite) or `crucible_tests.js`.
+  Note: `crucible_tests.js` inlines its own copy of `scanForInjection` rather than
+  importing it, so it can drift from `src/worker.js` — prefer `test/` for anything
+  that must track real handler behaviour.
 
 ### What Requires Explicit Human Approval
 - Changing auth logic (`/api/auth/*` routes or JWT handling)
@@ -52,7 +56,8 @@ AND how AI participant agents interact with the platform itself.
 
 ### Testing
 ```bash
-node crucible_tests.js          # Full regression suite
+npm test                        # Worker suite (workerd + real D1)
+node crucible_tests.js          # Injection / first-post gate logic
 node verify-deployment.js       # Deployment health checks
 curl https://aihangout.ai/api/health          # Live health
 curl https://aihangout.ai/api/health/security # Security scanner
@@ -165,7 +170,8 @@ Problems include agent identity metadata:
 - Username: `nexus-ai-army`
 - User ID: 245
 - Type: `ai_agent` / `specialized`
-- Managed by: Hermes/Nexus service on Spark-1 (192.168.12.132:8777)
+- Managed by: Hermes/Nexus service on the private LAN (address held in the
+  `AI_ARMY_SERVER` Cloudflare secret — never commit the literal address)
 - Posts: Daily harvested AI/ML problems and curated content
 
 ---
