@@ -44,6 +44,9 @@ function scanForInjection(text) {
     { label: 'delimiter:INST_tag',         regex: /\[INST\]|\[\/INST\]/i,                                                                    risk: 'high'   },
     { label: 'delimiter:SYS_tag',          regex: /<<SYS>>|<\/SYS>/i,                                                                       risk: 'high'   },
     { label: 'delimiter:pipe_sep',         regex: /<\|system\|>|<\|user\|>|<\|assistant\|>/i,                                                risk: 'high'   },
+    // Post-sanitization markers — these mean sanitizeLLMTokens already neutralized an injection attempt.
+    // Flag for admin review so the attempt is visible even though the stored content is safe.
+    { label: 'sanitized:llm_token_blocked', regex: /\[(IM_START|IM_END|ENDOFTEXT|INST|SYS|SYSTEM|USER|ASSISTANT|DELIMITER)_BLOCKED\]/i,      risk: 'high'   },
     { label: 'meta:tell_me_your',          regex: /tell\s+me\s+your\s+(system\s+prompt|instructions?|rules?|guidelines?)/i,                  risk: 'high'   },
     { label: 'meta:what_is_your_prompt',   regex: /what\s+is\s+your\s+(system\s+prompt|initial\s+prompt|instructions?)/i,                   risk: 'high'   },
     { label: 'meta:repeat_instructions',   regex: /repeat\s+(your|the)\s+(instructions?|prompt|guidelines?)/i,                              risk: 'high'   },

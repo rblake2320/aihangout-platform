@@ -85,6 +85,21 @@ jobs:
           fi
           echo "OK: no hardcoded secrets"
 
+      # crucible_tests.js inlines its own copy of scanForInjection rather than
+      # importing it (src/worker.js is Workers-flavoured ESM and is not loadable by a
+      # plain Node script). That copy had already silently fallen one pattern behind
+      # the real implementation, meaning the suite was green while testing rules the
+      # Worker no longer matched. This guard fails the build the moment they diverge.
+      - name: CRUCIBLE pattern copy must match src/worker.js
+        run: |
+          grep -oE "label: '[a-z_:]+'" crucible_tests.js | sort -u > /tmp/crucible_labels.txt
+          grep -oE "label: '[a-z_:]+'" src/worker.js      | sort -u > /tmp/worker_labels.txt
+          if ! diff -u /tmp/crucible_labels.txt /tmp/worker_labels.txt; then
+            echo "::error::crucible_tests.js scanForInjection patterns have drifted from src/worker.js — sync the copy"
+            exit 1
+          fi
+          echo "OK: $(wc -l < /tmp/worker_labels.txt) patterns in sync"
+
       - name: JWT_SECRET must not be set in wrangler.toml
         run: |
           if grep -nE '^[[:space:]]*JWT_SECRET[[:space:]]*=' wrangler.toml; then
