@@ -292,11 +292,43 @@ export default function Chat() {
     // Try to establish SSE connection for real-time updates
     let eventSource: EventSource | null = null
     let useFallback = false
+    // Minting the ticket is async, so the effect can be cleaned up (unmount, or
+    // isOpen/isAuthenticated changing) before `eventSource` is ever assigned.
+    // Without this flag, cleanup below would close a still-null `eventSource`
+    // and the connection created moments later would leak, uncleaned, past the
+    // component's lifetime.
+    let cancelled = false
 
-    const connectSSE = () => {
+    const connectSSE = async () => {
       try {
-        const clientId = `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-        eventSource = new EventSource(`/api/chat/events/1?clientId=${clientId}`)
+        // The browser EventSource API cannot set an Authorization header, so a
+        // short-lived single-use ticket is minted first over a normal
+        // authenticated request and passed in the stream URL instead.
+        const { token } = useAuthStore.getState()
+        if (!token) {
+          useFallback = true
+          return
+        }
+        const ticketResponse = await fetch('/api/chat/events/ticket', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ channelId: 1 })
+        })
+        const ticketData = await ticketResponse.json()
+        if (cancelled) return
+        if (!ticketData.success) {
+          useFallback = true
+          return
+        }
+        eventSource = new EventSource(`/api/chat/events/1?ticket=${ticketData.ticket}`)
+        if (cancelled) {
+          eventSource.close()
+          eventSource = null
+          return
+        }
 
         eventSource.onopen = () => {
           useFallback = false
@@ -367,6 +399,7 @@ export default function Chat() {
     sendHeartbeat()
 
     return () => {
+      cancelled = true
       eventSource?.close()
       clearInterval(usersInterval)
       clearInterval(heartbeatInterval)
