@@ -770,7 +770,7 @@ async function initDatabase(env) {
 }
 
 // SECURE PASSWORD HASHING - CRITICAL SECURITY FIX (2026-02-02)
-// PBKDF2-SHA256. Iteration count raised to OWASP-2023 guidance (600k). Stored hashes are
+// PBKDF2-SHA256. Stored hashes are
 // versioned as `pbkdf2$<iterations>$<saltHex>$<hashHex>` so the cost can be raised again
 // without locking anyone out. Legacy hashes in the old `<saltHex>:<hashHex>` format are
 // still verified at their original 100k cost (see verifyPassword) and are transparently
@@ -958,7 +958,15 @@ function escapeEmailHtml(value) {
 }
 
 async function sendTransactionalEmail(env, { to, subject, html, text, idempotencyKey }) {
-  if (!env.RESEND_API_KEY) throw new Error('RESEND_API_KEY is not configured');
+  // Email is an optional integration. When it is not configured (staging, local dev,
+  // CI) every signup used to raise "RESEND_API_KEY is not configured" from inside a
+  // waitUntil promise, turning a known-absent config into recurring runtime noise.
+  // Skip loudly instead: callers already surface delivery state to the client via
+  // `verificationEmailSent`, and no caller depends on this throwing.
+  if (!env.RESEND_API_KEY) {
+    console.error('[Email] RESEND_API_KEY not configured — skipping send:', subject);
+    return { skipped: true, reason: 'RESEND_API_KEY not configured' };
+  }
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -2107,6 +2115,41 @@ router.post('/api/problems', async (request, env) => {
       }
     }
 
+    // Content dedup: external_id above only catches callers that supply one, and it
+    // is auto-generated per request when omitted — so the same title+description
+    // submitted twice created two rows (observed live: problems 277 and 278, posted
+    // 2s apart, byte-identical). A training corpus built on this data degrades if the
+    // same problem appears N times, so the guard belongs at ingest, not at export.
+    // Matching is on collapsed-whitespace, case-insensitive title+description scoped
+    // to the submitting user, so two people independently hitting the same issue are
+    // still allowed through — only one user double-posting is blocked.
+    // Normalization is deliberately limited to trim + lowercase because it has to be
+    // expressed identically on both sides: SQLite has no cheap repeated-whitespace
+    // collapse, so anything fancier in JS would silently stop matching the SQL side.
+    const dedupKey = (value) => (value || '').trim().toLowerCase();
+    const duplicate = await env.AIHANGOUT_DB
+      .prepare(`
+        SELECT id FROM problems
+        WHERE user_id = ?
+          AND status != 'deleted'
+          AND LOWER(TRIM(title)) = ?
+          AND LOWER(TRIM(description)) = ?
+        LIMIT 1
+      `)
+      .bind(user.id, dedupKey(safeTitle), dedupKey(safeDescription))
+      .first();
+    if (duplicate) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'You have already submitted this problem',
+        problemId: duplicate.id,
+        duplicate_of: duplicate.id
+      }), {
+        status: 409,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     // Validate difficulty value
     const validDifficulties = ['easy', 'medium', 'hard'];
     if (!validDifficulties.includes(difficulty)) {
@@ -2424,7 +2467,15 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     if (gate.blocked) return rateLimitResponse({ ...gate });
 
     const { problemId } = request.params;
-    const { solutionText, codeSnippet, whyExplanation } = await request.json();
+    // Accept both camelCase and snake_case keys. The handler historically read
+    // only camelCase while its own 400 message named the snake_case key, so an
+    // API consumer (including the AI agents this platform targets) that trusted
+    // the error text stayed broken no matter how it retried. Both spellings are
+    // now valid; camelCase wins if a caller somehow sends both.
+    const solutionBody = await request.json();
+    const solutionText = solutionBody.solutionText ?? solutionBody.solution_text;
+    const codeSnippet = solutionBody.codeSnippet ?? solutionBody.code_snippet;
+    const whyExplanation = solutionBody.whyExplanation ?? solutionBody.why_explanation;
 
     const problemOwner = await env.AIHANGOUT_DB
       .prepare('SELECT user_id FROM problems WHERE id = ?')
@@ -2440,7 +2491,7 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     if (!solutionText || solutionText.trim() === '') {
       return new Response(JSON.stringify({
         success: false,
-        error: 'solution_text is required'
+        error: 'solutionText (or solution_text) is required'
       }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -2754,17 +2805,20 @@ router.post('/api/vote', async (request, env, ctx) => {
       .prepare('SELECT vote_type FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
       .bind(user.id, targetType, targetId).first();
 
-    // Replace the existing vote atomically from the caller's perspective.
-    await env.AIHANGOUT_DB
-      .prepare('DELETE FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
-      .bind(user.id, targetType, targetId)
-      .run();
-
-    // Add new vote
-    const insertedVote = await env.AIHANGOUT_DB
-      .prepare('INSERT INTO votes (user_id, target_type, target_id, vote_type) VALUES (?, ?, ?, ?)')
-      .bind(user.id, targetType, targetId, voteType)
-      .run();
+    // Replace the existing vote in a single atomic batch. Previously this was an
+    // unbatched DELETE followed by a separate INSERT: a failure between the two
+    // silently dropped the user's vote, and two concurrent requests from the same
+    // user could interleave into duplicate rows. D1 batch() runs both in one
+    // transaction. The UNIQUE index on votes(user_id, target_type, target_id)
+    // (migration 0012) is the backstop that makes duplicates impossible.
+    const [, insertedVote] = await env.AIHANGOUT_DB.batch([
+      env.AIHANGOUT_DB
+        .prepare('DELETE FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?')
+        .bind(user.id, targetType, targetId),
+      env.AIHANGOUT_DB
+        .prepare('INSERT INTO votes (user_id, target_type, target_id, vote_type) VALUES (?, ?, ?, ?)')
+        .bind(user.id, targetType, targetId, voteType)
+    ]);
 
     // Update vote count
     const voteCount = await env.AIHANGOUT_DB
@@ -6417,7 +6471,7 @@ router.get('/api/matching/recommendations/:problem_id', async (request, env) => 
     const { problem_id } = request.params;
 
     // Get problem details from database
-    const problemData = await env.DB.prepare(`
+    const problemData = await env.AIHANGOUT_DB.prepare(`
       SELECT * FROM problems WHERE id = ?
     `).bind(problem_id).first();
 
@@ -6667,7 +6721,7 @@ async function updateSolutionPatternLearning(env, effectivenessData) {
     // This would update a learning database or cache with new effectiveness information
 
     // Store effectiveness data for future matching
-    await env.DB.prepare(`
+    await env.AIHANGOUT_DB.prepare(`
       INSERT INTO solution_effectiveness_log
       (solution_id, problem_id, effectiveness_score, resolution_time, feedback, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -7797,7 +7851,7 @@ async function createOrUpdatePassport(env, universalIdentity, verification) {
     };
 
     // Store in database
-    await env.DB.prepare(`
+    await env.AIHANGOUT_DB.prepare(`
       INSERT OR REPLACE INTO universal_ai_passports
       (universal_id, passport_data, identity_strength, verification_status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -8853,7 +8907,7 @@ router.get('/api/harvest/external-problems', async (request, env) => {
     query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
     params.push(limit, offset);
 
-    const result = await env.DB.prepare(query).bind(...params).all();
+    const result = await env.AIHANGOUT_DB.prepare(query).bind(...params).all();
     const externalProblems = result.results || [];
 
     // Feed external problem browsing to flywheel (simplified)

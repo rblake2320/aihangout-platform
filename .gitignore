@@ -52,9 +52,10 @@ credentials.json
 *.json
 !package.json
 !package-lock.json
-automated-regression-test.js
-continuous-monitoring.js
-crucible_tests.js
+# NOTE: crucible_tests.js, continuous-monitoring.js and automated-regression-test.js
+# were previously ignored here. They are real, passing test/monitoring code, and
+# excluding them meant the public repo advertised a test suite it did not ship —
+# every fresh clone (and CI) had nothing to run. They are now tracked.
 test_online_counter.js
 test_sessions_direct.js
 manual_heartbeat_test.html

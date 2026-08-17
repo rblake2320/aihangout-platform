@@ -51,7 +51,8 @@ id = "9cd27d12b2c341b3a5b77f47b69a89c0"
 [env.production.vars]
 ENVIRONMENT = "production"
 API_VERSION = "v1"
-AI_ARMY_SERVER = "http://192.168.12.132:8777"
+# AI_ARMY_SERVER is a private LAN address — set it as a secret, not in this file:
+#   wrangler secret put AI_ARMY_SERVER --env production
 
 [build]
 command = "npm run build"
