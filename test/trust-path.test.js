@@ -491,6 +491,128 @@ describe('activity log', () => {
     expect(entry.outcome).toBe('rejected');
   });
 
+  // Promote a real registered user to admin in the real database. This is test
+  // setup, not a stand-in for the behaviour under test: the prune itself runs
+  // through the actual HTTP route.
+  async function adminUser(prefix) {
+    const { env } = await import('cloudflare:test');
+    const user = await registerUser(prefix);
+    await env.AIHANGOUT_DB.prepare('UPDATE users SET is_admin = 1 WHERE id = ?')
+      .bind(user.id).run();
+    return user;
+  }
+
+  it('prunes routine traffic past retention but keeps quarantined evidence', async () => {
+    const { env } = await import('cloudflare:test');
+    // Seed aged rows directly: there is no honest way to age a row through the API,
+    // and the retention boundary is exactly what needs proving.
+    for (const [outcome, status, quarantined] of [
+      ['accepted', 200, 0],
+      ['rejected', 409, 1],
+    ]) {
+      await env.AIHANGOUT_DB.prepare(`
+        INSERT INTO activity_log
+          (occurred_at, method, path, action, outcome, http_status, quarantined)
+        VALUES (datetime('now','-90 days'), 'POST', '/api/problems', 'retention.probe', ?, ?, ?)
+      `).bind(outcome, status, quarantined).run();
+    }
+
+    const admin = await adminUser('pruneadmin');
+    const res = await api('/api/admin/activity-log/prune', {
+      method: 'POST', token: admin.token, ip: admin.ip, body: {},
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.json.error).toBeUndefined();
+    expect(res.json.pruned_accepted).toBeGreaterThanOrEqual(1);
+    // 90 days old is inside the 180-day quarantine window, so evidence survives.
+    expect(res.json.pruned_quarantined).toBe(0);
+
+    const remaining = await env.AIHANGOUT_DB.prepare(
+      `SELECT outcome, quarantined FROM activity_log WHERE action = 'retention.probe'`
+    ).all();
+    const rows = remaining.results || [];
+    expect(rows.every((r) => r.quarantined === 1)).toBe(true);
+  });
+
+  it('refuses a prune that would erase evidence sooner than routine traffic', async () => {
+    const admin = await adminUser('pruneorder');
+    const res = await api('/api/admin/activity-log/prune', {
+      method: 'POST', token: admin.token, ip: admin.ip,
+      body: { retention_days: 30, quarantine_retention_days: 1 },
+    });
+    // Otherwise this endpoint becomes a way to delete the interesting rows first.
+    expect(res.status).toBe(400);
+    expect(res.json.error).toMatch(/greater than or equal/);
+  });
+
+  it('the database refuses to delete a row still inside its retention window', async () => {
+    const { env } = await import('cloudflare:test');
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO activity_log
+        (occurred_at, method, path, action, outcome, http_status, quarantined)
+      VALUES (datetime('now','-1 day'), 'POST', '/api/problems', 'floor.recent', 'accepted', 200, 0)
+    `).run();
+
+    // Not "the route declines to" — the storage layer itself must refuse, so a future
+    // endpoint or a bug cannot rewrite recent history.
+    await expect(
+      env.AIHANGOUT_DB.prepare(`DELETE FROM activity_log WHERE action = 'floor.recent'`).run()
+    ).rejects.toThrow(/retention window/);
+  });
+
+  it('the database refuses to delete quarantined evidence early', async () => {
+    const { env } = await import('cloudflare:test');
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO activity_log
+        (occurred_at, method, path, action, outcome, http_status, quarantined)
+      VALUES (datetime('now','-60 days'), 'POST', '/api/problems', 'floor.evidence', 'rejected', 409, 1)
+    `).run();
+
+    // 60 days is past the 30-day routine window but well inside the 180-day evidence
+    // window: deleting the record of refused requests is exactly the attacker move.
+    await expect(
+      env.AIHANGOUT_DB.prepare(`DELETE FROM activity_log WHERE action = 'floor.evidence'`).run()
+    ).rejects.toThrow(/retention window/);
+  });
+
+  it('allows deletion once evidence is past its longer window', async () => {
+    const { env } = await import('cloudflare:test');
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO activity_log
+        (occurred_at, method, path, action, outcome, http_status, quarantined)
+      VALUES (datetime('now','-400 days'), 'POST', '/api/problems', 'floor.ancient', 'rejected', 409, 1)
+    `).run();
+
+    const del = await env.AIHANGOUT_DB
+      .prepare(`DELETE FROM activity_log WHERE action = 'floor.ancient'`).run();
+    expect(del.meta.changes).toBe(1);
+  });
+
+  it('still refuses to rewrite an immutable field', async () => {
+    const { env } = await import('cloudflare:test');
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO activity_log
+        (occurred_at, method, path, action, outcome, http_status, quarantined)
+      VALUES (datetime('now'), 'POST', '/api/problems', 'floor.immutable', 'rejected', 409, 1)
+    `).run();
+
+    // Retention must not have weakened field immutability.
+    await expect(
+      env.AIHANGOUT_DB.prepare(
+        `UPDATE activity_log SET outcome = 'accepted' WHERE action = 'floor.immutable'`
+      ).run()
+    ).rejects.toThrow(/append-only/);
+  });
+
+  it('prune is admin-only', async () => {
+    const user = await registerUser('prunenonadmin');
+    const res = await api('/api/admin/activity-log/prune', {
+      method: 'POST', token: user.token, ip: user.ip, body: {},
+    });
+    expect(res.status).toBe(403);
+  });
+
   it('is admin-only', async () => {
     const user = await registerUser('lognonadmin');
     const anon = await api('/api/admin/activity-log');

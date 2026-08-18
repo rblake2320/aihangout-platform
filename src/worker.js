@@ -1005,6 +1005,39 @@ function activityTargetFor(path, responseBody) {
   return { type: null, id: null };
 }
 
+// Retention windows, in days. Routine accepted traffic is operational noise after a
+// month; refused and moderation-flagged entries are the evidence worth keeping, so
+// they survive six times longer. Exported for the test to assert against rather than
+// duplicating the numbers.
+const ACTIVITY_RETENTION_DAYS = 30;
+const ACTIVITY_QUARANTINE_RETENTION_DAYS = 180;
+
+async function pruneActivityLog(env, {
+  retentionDays = ACTIVITY_RETENTION_DAYS,
+  quarantineRetentionDays = ACTIVITY_QUARANTINE_RETENTION_DAYS,
+} = {}) {
+  try {
+    const accepted = await env.AIHANGOUT_DB.prepare(
+      `DELETE FROM activity_log
+       WHERE quarantined = 0 AND occurred_at < datetime('now', ?)`
+    ).bind(`-${retentionDays} days`).run();
+    const quarantined = await env.AIHANGOUT_DB.prepare(
+      `DELETE FROM activity_log
+       WHERE quarantined = 1 AND occurred_at < datetime('now', ?)`
+    ).bind(`-${quarantineRetentionDays} days`).run();
+    const removed = (accepted?.meta?.changes || 0) + (quarantined?.meta?.changes || 0);
+    if (removed > 0) console.log(`[ActivityLog] pruned ${removed} rows past retention`);
+    return {
+      pruned_accepted: accepted?.meta?.changes || 0,
+      pruned_quarantined: quarantined?.meta?.changes || 0,
+    };
+  } catch (error) {
+    // Never let retention maintenance break the cron that also runs the harvest.
+    console.error('[ActivityLog] prune failed (non-fatal):', error?.message || error);
+    return { pruned_accepted: 0, pruned_quarantined: 0, error: String(error?.message || error) };
+  }
+}
+
 async function recordActivity(env, entry) {
   // Best-effort by contract: logging must never turn a working request into a 500.
   try {
@@ -17307,6 +17340,42 @@ router.get('/api/admin/activity-log', async (request, env) => {
   }
 });
 
+// Retention on demand. The daily cron does this automatically; exposing it lets an
+// operator reclaim space immediately after an abuse burst instead of waiting, and
+// gives the retention policy something to test against.
+router.post('/api/admin/activity-log/prune', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    if (!user.is_admin) return jsonResponse({ success: false, error: 'Admin access required' }, { status: 403 });
+
+    const body = await request.json().catch(() => ({}));
+    const retentionDays = Number.isInteger(body.retention_days) && body.retention_days >= 0
+      ? body.retention_days : ACTIVITY_RETENTION_DAYS;
+    const quarantineRetentionDays =
+      Number.isInteger(body.quarantine_retention_days) && body.quarantine_retention_days >= 0
+        ? body.quarantine_retention_days : ACTIVITY_QUARANTINE_RETENTION_DAYS;
+    // Quarantined evidence must never be prunable sooner than routine traffic,
+    // otherwise this endpoint becomes a way to erase the interesting rows first.
+    if (quarantineRetentionDays < retentionDays) {
+      return jsonResponse({
+        success: false,
+        error: 'quarantine_retention_days must be greater than or equal to retention_days'
+      }, { status: 400 });
+    }
+
+    const result = await pruneActivityLog(env, { retentionDays, quarantineRetentionDays });
+    return jsonResponse({
+      success: true,
+      retention_days: retentionDays,
+      quarantine_retention_days: quarantineRetentionDays,
+      ...result,
+    });
+  } catch (error) {
+    return errResponse('Unable to prune activity log', error);
+  }
+});
+
 // Isolation controls. The log itself is append-only — these routes only ever set
 // the quarantine/review columns, never rewrite or remove what was recorded.
 router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
@@ -18111,6 +18180,13 @@ async function runDailyHarvest(env) {
     await env.AIHANGOUT_DB.prepare(
       "DELETE FROM guest_sessions WHERE last_seen < datetime('now', '-1 day')"
     ).run();
+    // activity_log retention. The log deliberately records REJECTED requests, which
+    // makes it writable by anyone who can reach the API — including an unauthenticated
+    // flood. Without pruning it grows toward D1's storage limit and becomes a denial-of
+    // -service path against the database that serves the product.
+    // Quarantined rows (anything refused or moderation-flagged) are the interesting
+    // ones and are kept far longer than routine accepted traffic.
+    await pruneActivityLog(env);
     // A revoked token's block is only meaningful until the token would have
     // expired naturally anyway (24h from issuance) — prune past that point
     // instead of growing this table forever.
