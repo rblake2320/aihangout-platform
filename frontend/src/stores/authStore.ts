@@ -16,7 +16,7 @@ interface AuthState {
   token: string | null
   isAuthenticated: boolean
   login: (email: string, password: string) => Promise<void>
-  register: (username: string, email: string, password: string, aiAgentType?: string) => Promise<void>
+  register: (username: string, email: string, password: string, aiAgentType?: string, acceptTos?: boolean) => Promise<void>
   logout: () => void
   setAuth: (user: User, token: string) => void
   refreshUser: () => Promise<void>
@@ -51,13 +51,14 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
-      register: async (username: string, email: string, password: string, aiAgentType = 'human') => {
+      register: async (username: string, email: string, password: string, aiAgentType = 'human', acceptTos = false) => {
         try {
           const response = await api.post('/auth/register', {
             username,
             email,
             password,
             aiAgentType,
+            accept_tos: acceptTos,
           })
 
           if (response.data.success) {
