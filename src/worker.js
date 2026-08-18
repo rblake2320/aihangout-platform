@@ -133,22 +133,36 @@ function sanitizeContent(text) {
 }
 
 // ── SECURITY: KV-based rate limiter (NVIDIA fraud-pattern velocity windows) ──
-async function kvIncrement(kv, key, windowSecs) {
+//
+// KNOWN LIMITATION (Manus adversarial QA F-05, 2026-08-17), not fixed by the
+// failClosed change below: this is a plain KV get-then-put, not an atomic
+// increment. Under genuine concurrent requests, multiple isolates can read the
+// same starting count before any of them writes back, undercounting the burst
+// (reproduced: 25 simultaneous wrong-password attempts against staging, 0/25
+// triggered the configured 10/min limit). failClosed only changes behavior
+// when the KV call itself errors — it does not make the counter atomic. A
+// real fix needs a Durable Object or an edge-native rate-limit rule; deferred
+// as a larger change, tracked separately from this pass.
+async function kvIncrement(kv, key, windowSecs, failClosed = false) {
   try {
     const raw = await kv.get(key);
     const count = raw ? parseInt(raw) + 1 : 1;
     await kv.put(key, String(count), { expirationTtl: windowSecs });
     return count;
   } catch (err) {
-    // Fail OPEN (return 0 = under limit) to preserve availability during a KV outage,
-    // but never silently: a KV failure disables rate limiting, so surface it loudly
-    // for alerting/monitoring instead of masking it.
-    console.error(`[rate-limit] KV failure on key=${key}: ${err?.message || err} — failing open`);
-    return 0;
+    // Fail OPEN by default (return 0 = under limit) to preserve availability
+    // during a KV outage. Callers that pass failClosed=true (login, password
+    // reset — see F-05) get a fail-CLOSED result (Infinity = always over
+    // limit) instead, because for those two routes availability during a KV
+    // outage is a worse trade than temporarily blocking auth attempts.
+    // Never silent either way: surfaced loudly for alerting/monitoring.
+    console.error(`[rate-limit] KV failure on key=${key}: ${err?.message || err} — failing ${failClosed ? 'CLOSED' : 'open'}`);
+    return failClosed ? Infinity : 0;
   }
 }
 
-async function checkRateLimit(kv, ip, userId, action) {
+async function checkRateLimit(kv, ip, userId, action, opts = {}) {
+  const failClosed = opts.failClosed === true;
   const limits = {
     login:    { ip60: 10,  ip3600: 30,  uid60: 5,   uid3600: 20  },
     register: { ip60: 5,   ip3600: 20,  uid60: 999, uid3600: 999 },  // 5/min burst, 20/hour per IP
@@ -166,7 +180,7 @@ async function checkRateLimit(kv, ip, userId, action) {
     keys.push([`rl:uid:${userId}:${action}:3600`, 3600, lim.uid3600]);
   }
   for (const [key, ttl, max] of keys) {
-    const count = await kvIncrement(kv, key, ttl);
+    const count = await kvIncrement(kv, key, ttl, failClosed);
     if (count > max) return { limited: true, key, count, max };
   }
   return { limited: false };
@@ -899,9 +913,16 @@ async function getJWTKey(env) {
 
 async function createJWT(payload, env) {
   const secret = await getJWTKey(env);
+  // jti (Manus adversarial QA F-04, 2026-08-17): a random per-token identifier so
+  // logout can revoke this specific token early instead of leaving it valid for
+  // its full 24h lifetime after the user signs out. See authenticate()'s
+  // revocation check and /api/auth/logout.
+  const jti = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
   return await new EncryptJWT(payload)
     .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
     .setIssuedAt()
+    .setJti(jti)
     .setExpirationTime('24h')
     .encrypt(secret);
 }
@@ -1154,6 +1175,17 @@ async function authenticate(request, env) {
   // --- JWT path ---
   const payload = await verifyJWT(token, env);
   if (!payload) return null;
+
+  // Revocation check (Manus adversarial QA F-04, 2026-08-17): logout inserts this
+  // token's jti into revoked_tokens. Tokens issued before this feature existed
+  // have no jti and skip the check unaffected (they still expire within 24h).
+  if (payload.jti) {
+    const revoked = await env.AIHANGOUT_DB
+      .prepare('SELECT 1 FROM revoked_tokens WHERE jti = ?')
+      .bind(payload.jti)
+      .first();
+    if (revoked) return null;
+  }
 
   const user = await env.AIHANGOUT_DB
     .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin FROM users WHERE id = ?')
@@ -1550,7 +1582,7 @@ router.post('/api/auth/email/resend', async (request, env, ctx) => {
 router.post('/api/auth/password/forgot', async (request, env, ctx) => {
   try {
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'login');
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'login', { failClosed: true });
     if (rl.limited) return rateLimitResponse(rl);
     const { email } = await request.json();
     const normalizedEmail = String(email || '').trim().toLowerCase();
@@ -1608,7 +1640,7 @@ router.post('/api/auth/password/reset', async (request, env) => {
 router.post('/api/auth/login', async (request, env) => {
   try {
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'login');
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'login', { failClosed: true });
     if (rl.limited) return rateLimitResponse(rl);
 
     const body = await request.json();
@@ -10051,12 +10083,69 @@ router.post('/api/chat/message', async (request, env) => {
   }
 });
 
+// SECURITY (Manus adversarial QA F-02, 2026-08-17): the browser EventSource API
+// cannot set an Authorization header, so the SSE route below cannot gate on one
+// directly without breaking chat for every real logged-in user. Instead, an
+// authenticated caller mints a short-lived, single-use ticket here (normal
+// Authorization header, normal authenticate() check) and passes the ticket in
+// the SSE URL's query string. The SSE route below consumes (deletes) the ticket
+// on first use, so it cannot be replayed, and derives clientId/channel
+// authorization from the ticket instead of trusting caller-supplied values.
+router.post('/api/chat/events/ticket', async (request, env) => {
+  const user = await authenticate(request, env);
+  if (!user) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'Authentication required'
+    }), {
+      status: 401,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+  const { channelId } = await request.json().catch(() => ({ channelId: 1 }));
+  const ticket = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(24)))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  await env.AIHANGOUT_KV?.put(
+    `sse_ticket_${ticket}`,
+    JSON.stringify({ userId: user.id, username: user.username, channelId: parseInt(channelId) || 1 }),
+    { expirationTtl: 60 }
+  );
+  return new Response(JSON.stringify({ success: true, ticket }), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
+});
+
 // Server-Sent Events endpoint for real-time chat updates
 router.get('/api/chat/events/:channelId', async (request, env) => {
   try {
     const { channelId } = request.params;
     const url = new URL(request.url);
-    const clientId = sseFieldSafe(url.searchParams.get('clientId') || `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+    const ticketId = sseFieldSafe(url.searchParams.get('ticket') || '', 64);
+    if (!ticketId) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Authentication required'
+      }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    const ticketKey = `sse_ticket_${ticketId}`;
+    const ticketRaw = await env.AIHANGOUT_KV?.get(ticketKey);
+    if (!ticketRaw) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Invalid or expired connection ticket'
+      }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    // Single-use: consume immediately so the ticket cannot be replayed to open
+    // a second stream.
+    await env.AIHANGOUT_KV.delete(ticketKey);
+    const ticketData = JSON.parse(ticketRaw);
+    const clientId = sseFieldSafe(`user_${ticketData.userId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
 
     // Create SSE response with proper headers
     const stream = new ReadableStream({
@@ -10242,7 +10331,13 @@ router.post('/api/sessions/heartbeat', async (request, env) => {
       });
     }
 
-    const sessionToken = request.headers.get('Authorization')?.replace('Bearer ', '') || 'default';
+    const rawSessionToken = request.headers.get('Authorization')?.replace('Bearer ', '') || 'default';
+    // SECURITY (Manus adversarial QA F-03, 2026-08-17): the raw 24h bearer JWE
+    // used to be bound directly into enhanced_sessions.session_token and
+    // analytics_events.session_id — a D1 export/leak would hand out a still-valid
+    // credential. Store only the non-reversible hash, matching the pattern
+    // already used for analytics session correlation elsewhere in this file.
+    const sessionToken = await hashSessionId(rawSessionToken);
     const userAgent = request.headers.get('User-Agent') || '';
     const ipAddress = request.headers.get('CF-Connecting-IP') ||
                      request.headers.get('X-Forwarded-For') ||
@@ -10472,6 +10567,20 @@ router.post('/api/heartbeat/simple', async (request, env) => {
 // AI-to-AI Collaboration Engine (Flywheel Extension)
 router.post('/api/ai-collaboration/join-session', async (request, env) => {
   try {
+    // SECURITY (Manus adversarial QA F-01, 2026-08-17): this route performed DB
+    // writes and an outbound AI Army notification for any anonymous caller. Gate it
+    // like every other state-changing route in this file.
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Authentication required'
+      }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     const { problem_id, agent_name, agent_type, capabilities, approach_preference } = await request.json();
 
     if (!problem_id || !agent_name) {
@@ -16357,10 +16466,25 @@ router.post('/api/problems/:problemId/solutions/:solutionId/accept', async (requ
   }
 });
 
-// JWTs are stateless; logout is a client-side credential discard. This endpoint
-// exists so clients can complete the session contract without an avoidable 404/415.
+// Revokes this specific token (Manus adversarial QA F-04, 2026-08-17) — logout
+// used to be a pure client-side credential discard, so a saved/stolen token
+// stayed valid for its full 24h lifetime after "logging out". Real JWT-path
+// tokens carry a jti (see createJWT); revoking it here makes authenticate()
+// reject any further use of this exact token immediately. Service tokens have
+// their own separate revoked_at column and are unaffected by this route.
 router.post('/api/auth/logout', async (request, env) => {
   const user = await authenticate(request, env).catch(() => null);
+  if (user) {
+    const token = request.headers.get('Authorization')?.replace('Bearer ', '');
+    const payload = token ? await verifyJWT(token, env) : null;
+    if (payload?.jti) {
+      await env.AIHANGOUT_DB
+        .prepare('INSERT OR IGNORE INTO revoked_tokens (jti, user_id, expires_at) VALUES (?, ?, datetime(?, "unixepoch"))')
+        .bind(payload.jti, user.id, payload.exp)
+        .run()
+        .catch((err) => console.error('[Logout] failed to revoke token (non-fatal):', err?.message || err));
+    }
+  }
   return jsonResponse({
     success: true,
     message: 'Logged out successfully',
@@ -17986,6 +18110,12 @@ async function runDailyHarvest(env) {
     ).run();
     await env.AIHANGOUT_DB.prepare(
       "DELETE FROM guest_sessions WHERE last_seen < datetime('now', '-1 day')"
+    ).run();
+    // A revoked token's block is only meaningful until the token would have
+    // expired naturally anyway (24h from issuance) — prune past that point
+    // instead of growing this table forever.
+    await env.AIHANGOUT_DB.prepare(
+      "DELETE FROM revoked_tokens WHERE expires_at < datetime('now')"
     ).run();
     const allSites = ['stackoverflow', 'github_issues', 'reddit_programming', 'dev_to', 'hackernews', 'arxiv'];
     const result = await initializeMultiSiteHarvesting(env, {
