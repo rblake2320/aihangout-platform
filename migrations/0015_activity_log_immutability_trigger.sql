@@ -21,31 +21,14 @@
 -- when an attacker "changed" a NULL column to another NULL-adjacent value.
 -- `IS NOT` treats NULL as a comparable value and has no such blind spot.
 
-CREATE TRIGGER IF NOT EXISTS activity_log_no_delete
-BEFORE DELETE ON activity_log
-BEGIN
-  SELECT RAISE(ABORT, 'activity_log is append-only: delete is not permitted');
-END;
+-- Each CREATE TRIGGER below is deliberately kept on a SINGLE physical line.
+-- D1's remote migration executor (unlike local SQLite) has a known bug where
+-- a multi-line CREATE TRIGGER ... BEGIN ... END statement gets mis-split and
+-- fails with "incomplete input: SQLITE_ERROR [code: 7500]", even though the
+-- identical statement works fine locally and via `d1 execute` one-off runs.
+-- See cloudflare/workers-sdk#9133, #10998, #4998. One line per statement
+-- sidesteps whatever newline-sensitive splitting causes it.
 
-CREATE TRIGGER IF NOT EXISTS activity_log_immutable_fields
-BEFORE UPDATE ON activity_log
-WHEN
-     NEW.id            IS NOT OLD.id
-  OR NEW.occurred_at   IS NOT OLD.occurred_at
-  OR NEW.method        IS NOT OLD.method
-  OR NEW.path          IS NOT OLD.path
-  OR NEW.action        IS NOT OLD.action
-  OR NEW.user_id       IS NOT OLD.user_id
-  OR NEW.username      IS NOT OLD.username
-  OR NEW.agent_type    IS NOT OLD.agent_type
-  OR NEW.ip_hash       IS NOT OLD.ip_hash
-  OR NEW.outcome       IS NOT OLD.outcome
-  OR NEW.http_status   IS NOT OLD.http_status
-  OR NEW.reason        IS NOT OLD.reason
-  OR NEW.target_type   IS NOT OLD.target_type
-  OR NEW.target_id     IS NOT OLD.target_id
-  OR NEW.payload       IS NOT OLD.payload
-  OR NEW.payload_bytes IS NOT OLD.payload_bytes
-BEGIN
-  SELECT RAISE(ABORT, 'activity_log is append-only: only quarantined, quarantine_reason, reviewed_at, reviewed_by may be updated');
-END;
+CREATE TRIGGER IF NOT EXISTS activity_log_no_delete BEFORE DELETE ON activity_log BEGIN SELECT RAISE(ABORT, 'activity_log is append-only: delete is not permitted'); END;
+
+CREATE TRIGGER IF NOT EXISTS activity_log_immutable_fields BEFORE UPDATE ON activity_log WHEN NEW.id IS NOT OLD.id OR NEW.occurred_at IS NOT OLD.occurred_at OR NEW.method IS NOT OLD.method OR NEW.path IS NOT OLD.path OR NEW.action IS NOT OLD.action OR NEW.user_id IS NOT OLD.user_id OR NEW.username IS NOT OLD.username OR NEW.agent_type IS NOT OLD.agent_type OR NEW.ip_hash IS NOT OLD.ip_hash OR NEW.outcome IS NOT OLD.outcome OR NEW.http_status IS NOT OLD.http_status OR NEW.reason IS NOT OLD.reason OR NEW.target_type IS NOT OLD.target_type OR NEW.target_id IS NOT OLD.target_id OR NEW.payload IS NOT OLD.payload OR NEW.payload_bytes IS NOT OLD.payload_bytes BEGIN SELECT RAISE(ABORT, 'activity_log is append-only: only quarantined, quarantine_reason, reviewed_at, reviewed_by may be updated'); END;
