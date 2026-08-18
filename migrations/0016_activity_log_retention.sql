@@ -24,21 +24,21 @@
 -- never be more aggressive, because the database refuses. That ordering is what makes
 -- this defence in depth rather than duplicated configuration: the endpoint validates,
 -- and the constraint enforces.
+--
+-- Routine traffic is protected for 30 days. Evidence (quarantined = 1) is protected
+-- for 180 days - deleting a quarantined row early is exactly the move an attacker
+-- would make to remove the record of their own refused requests, so it is refused
+-- at the storage layer, not just in the route.
+--
+-- CREATE TRIGGER is kept on a single physical line deliberately: D1's remote
+-- migration executor mis-splits a multi-line CREATE TRIGGER ... BEGIN ... END
+-- statement and fails with "incomplete input: SQLITE_ERROR [code: 7500]", even
+-- though the identical statement works locally (cloudflare/workers-sdk#9133,
+-- #10998, #4998) - hit and fixed for 0015's triggers the same way.
 
 DROP TRIGGER IF EXISTS activity_log_no_delete;
 
-CREATE TRIGGER IF NOT EXISTS activity_log_retention_floor
-BEFORE DELETE ON activity_log
-WHEN
-  -- Routine traffic is protected for 30 days.
-  (COALESCE(OLD.quarantined, 0) = 0 AND OLD.occurred_at >= datetime('now', '-30 days'))
-  -- Evidence is protected for 180 days. Deleting a quarantined row early is exactly
-  -- the move an attacker would make to remove the record of their own refused
-  -- requests, so it is refused at the storage layer, not just in the route.
-  OR (COALESCE(OLD.quarantined, 0) = 1 AND OLD.occurred_at >= datetime('now', '-180 days'))
-BEGIN
-  SELECT RAISE(ABORT, 'activity_log is append-only within its retention window: this row is not yet eligible for deletion');
-END;
+CREATE TRIGGER IF NOT EXISTS activity_log_retention_floor BEFORE DELETE ON activity_log WHEN (COALESCE(OLD.quarantined, 0) = 0 AND OLD.occurred_at >= datetime('now', '-30 days')) OR (COALESCE(OLD.quarantined, 0) = 1 AND OLD.occurred_at >= datetime('now', '-180 days')) BEGIN SELECT RAISE(ABORT, 'activity_log is append-only within its retention window: this row is not yet eligible for deletion'); END;
 
 -- Supports the retention sweep itself: without this the daily prune scans the whole
 -- table, which is the opposite of what a growth-control measure should do.
