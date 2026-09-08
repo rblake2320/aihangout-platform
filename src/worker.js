@@ -17621,6 +17621,304 @@ router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
   }
 });
 
+// ============================================================================
+// MOBILE COMPANION — authority schema Gate 1 (owned AIHangout Mobile
+// Companion, NOT a PhoneClaw fork; see Team/tasks/
+// A6-aihangout-phoneclaw-lane-20260908.md for the full architecture and
+// remaining gates). Scoped to the recommended narrow first release:
+// read-only diagnostic capabilities only (device_diagnostics_read/
+// battery_status_read/network_status_read -- enforced at the schema layer
+// by migration 0018's CHECK constraint, not just here). No accessibility
+// automation, messaging, calling, camera, or unattended execution is
+// implemented or accepted by any route below.
+//
+// Explicitly NOT built in this pass (later gates, not this one):
+// device public-key challenge/signature verification at enrollment or on
+// result submission (Gate 2) -- for now every mobile-companion route is
+// authenticated by the OWNING HUMAN'S own JWT, the same as every other
+// authenticated route on this platform, never by a device-held key. A
+// real Android companion app does not exist yet either -- these are the
+// backend authority-schema routes it would call once built.
+// ============================================================================
+
+// sha256Hex already exists (line ~16912) -- reused, not redefined.
+
+router.post('/api/mobile/devices/enroll', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const body = safeJsonParse(await request.text());
+    const agentName = sanitizeContent(String(body?.agentName || '').trim()).slice(0, 100);
+    const devicePublicKey = String(body?.devicePublicKey || '').trim();
+    if (!agentName) return jsonResponse({ success: false, error: 'agentName is required' }, { status: 400 });
+    if (!devicePublicKey || devicePublicKey.length < 16) {
+      return jsonResponse({ success: false, error: 'devicePublicKey is required (placeholder until Gate 2 real device-key enrollment)' }, { status: 400 });
+    }
+
+    const deviceId = crypto.randomUUID();
+    try {
+      await env.AIHANGOUT_DB.prepare(
+        `INSERT INTO mobile_devices (device_id, owner_user_id, agent_name, device_public_key)
+         VALUES (?, ?, ?, ?)`
+      ).bind(deviceId, user.id, agentName, devicePublicKey).run();
+    } catch (dbErr) {
+      if (String(dbErr.message || '').includes('UNIQUE constraint failed')) {
+        return jsonResponse({ success: false, error: 'You already have a device enrolled under this agent name' }, { status: 409 });
+      }
+      throw dbErr;
+    }
+
+    return jsonResponse({ success: true, deviceId, agentName, status: 'active' });
+  } catch (error) {
+    return errResponse('Device enrollment failed', error);
+  }
+});
+
+router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const { deviceId } = request.params;
+    const result = await env.AIHANGOUT_DB.prepare(
+      `UPDATE mobile_devices SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP
+       WHERE device_id = ? AND owner_user_id = ? AND status = 'active'`
+    ).bind(deviceId, user.id).run();
+
+    if (!result.meta || result.meta.changes === 0) {
+      return jsonResponse({ success: false, error: 'No active device found under your account with that id' }, { status: 404 });
+    }
+    return jsonResponse({ success: true, deviceId, status: 'revoked' });
+  } catch (error) {
+    return errResponse('Device revocation failed', error);
+  }
+});
+
+router.post('/api/mobile/actions/intent', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const body = safeJsonParse(await request.text());
+    const deviceId = String(body?.deviceId || '');
+    const capability = String(body?.capability || '');
+    const targetDescription = sanitizeContent(String(body?.targetDescription || '').trim()).slice(0, 500);
+    const idempotencyKey = String(body?.idempotencyKey || '').trim();
+
+    const ALLOWED_CAPABILITIES = ['device_diagnostics_read', 'battery_status_read', 'network_status_read'];
+    if (!ALLOWED_CAPABILITIES.includes(capability)) {
+      return jsonResponse({
+        success: false,
+        error: `capability must be one of: ${ALLOWED_CAPABILITIES.join(', ')} (this release is read-only diagnostics only)`
+      }, { status: 400 });
+    }
+    if (!targetDescription) return jsonResponse({ success: false, error: 'targetDescription is required' }, { status: 400 });
+    if (!idempotencyKey || idempotencyKey.length < 8) {
+      return jsonResponse({ success: false, error: 'idempotencyKey is required (>= 8 chars, unique per device)' }, { status: 400 });
+    }
+
+    const device = await env.AIHANGOUT_DB.prepare(
+      `SELECT device_id, owner_user_id FROM mobile_devices WHERE device_id = ? AND status = 'active'`
+    ).bind(deviceId).first();
+    if (!device || device.owner_user_id !== user.id) {
+      return jsonResponse({ success: false, error: 'No active device found under your account with that id' }, { status: 404 });
+    }
+
+    const actionId = crypto.randomUUID();
+    // The digest is computed server-side from the actual stored fields,
+    // never accepted from the caller -- it is what an approval binds to,
+    // so it must be impossible for a client to claim a digest that does
+    // not match the real intent.
+    const actionDigest = await sha256Hex(JSON.stringify({ deviceId, capability, targetDescription }));
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+    try {
+      await env.AIHANGOUT_DB.prepare(
+        `INSERT INTO mobile_action_intents
+           (action_id, device_id, owner_user_id, capability, target_description, action_digest, idempotency_key, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(actionId, deviceId, user.id, capability, targetDescription, actionDigest, idempotencyKey, expiresAt).run();
+    } catch (dbErr) {
+      if (String(dbErr.message || '').includes('UNIQUE constraint failed')) {
+        return jsonResponse({ success: false, error: 'This idempotencyKey was already used for this device' }, { status: 409 });
+      }
+      throw dbErr;
+    }
+
+    return jsonResponse({ success: true, actionId, actionDigest, status: 'awaiting_approval', expiresAt });
+  } catch (error) {
+    return errResponse('Action intent creation failed', error);
+  }
+});
+
+router.post('/api/mobile/actions/:actionId/approve', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const { actionId } = request.params;
+    const body = safeJsonParse(await request.text());
+    const suppliedDigest = String(body?.actionDigest || '');
+
+    const intent = await env.AIHANGOUT_DB.prepare(
+      'SELECT action_id, owner_user_id, action_digest, status, expires_at FROM mobile_action_intents WHERE action_id = ?'
+    ).bind(actionId).first();
+    if (!intent || intent.owner_user_id !== user.id) {
+      return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
+    }
+    if (new Date(intent.expires_at) < new Date()) {
+      if (intent.status === 'awaiting_approval') {
+        await env.AIHANGOUT_DB.prepare("UPDATE mobile_action_intents SET status = 'expired' WHERE action_id = ?").bind(actionId).run();
+      }
+      return jsonResponse({ success: false, error: 'This action intent has expired -- create a new one' }, { status: 410 });
+    }
+    if (suppliedDigest !== intent.action_digest) {
+      return jsonResponse({ success: false, error: 'actionDigest does not match -- the plan changed since this was created; this is a different action, not a retry' }, { status: 409 });
+    }
+
+    if (intent.status === 'approved') {
+      // Idempotent re-approval of the SAME unchanged digest is a no-op
+      // success, not an error -- a genuinely different digest was already
+      // rejected above.
+      return jsonResponse({ success: true, actionId, status: 'approved', already_approved: true });
+    }
+    if (intent.status !== 'awaiting_approval') {
+      return jsonResponse({ success: false, error: `Action is '${intent.status}', not awaiting approval` }, { status: 409 });
+    }
+
+    await env.AIHANGOUT_DB.batch([
+      env.AIHANGOUT_DB.prepare(
+        'INSERT INTO mobile_action_approvals (action_id, approved_by, approved_digest) VALUES (?, ?, ?)'
+      ).bind(actionId, user.id, suppliedDigest),
+      env.AIHANGOUT_DB.prepare(
+        "UPDATE mobile_action_intents SET status = 'approved' WHERE action_id = ?"
+      ).bind(actionId),
+    ]);
+
+    return jsonResponse({ success: true, actionId, status: 'approved' });
+  } catch (error) {
+    return errResponse('Action approval failed', error);
+  }
+});
+
+router.post('/api/mobile/actions/:actionId/result', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const { actionId } = request.params;
+    const body = safeJsonParse(await request.text());
+    const deviceId = String(body?.deviceId || '');
+    const idempotencyKey = String(body?.idempotencyKey || '');
+    const resultStatus = String(body?.resultStatus || '');
+    // Redaction boundary: only a hash may be reported, never raw
+    // diagnostic content -- enforced here, not just documented.
+    const resultPayloadHash = body?.resultPayloadHash ? String(body.resultPayloadHash).slice(0, 128) : null;
+
+    if (!['executed', 'failed'].includes(resultStatus)) {
+      return jsonResponse({ success: false, error: "resultStatus must be 'executed' or 'failed'" }, { status: 400 });
+    }
+
+    const intent = await env.AIHANGOUT_DB.prepare(
+      'SELECT action_id, owner_user_id, device_id, idempotency_key, status FROM mobile_action_intents WHERE action_id = ?'
+    ).bind(actionId).first();
+    if (!intent || intent.owner_user_id !== user.id) {
+      return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
+    }
+    if (intent.device_id !== deviceId || intent.idempotency_key !== idempotencyKey) {
+      return jsonResponse({ success: false, error: 'deviceId/idempotencyKey do not match this action' }, { status: 409 });
+    }
+    if (intent.status !== 'approved') {
+      return jsonResponse({ success: false, error: `Action is '${intent.status}', not approved -- cannot report a result` }, { status: 409 });
+    }
+
+    const existing = await env.AIHANGOUT_DB.prepare(
+      'SELECT action_id FROM mobile_action_results WHERE action_id = ?'
+    ).bind(actionId).first();
+    if (existing) {
+      // Exactly-once: a duplicate/retried report is a no-op success, never
+      // a second row -- the UNIQUE PRIMARY KEY on action_id would also
+      // reject this at the DB layer; this check just gives a clean response.
+      return jsonResponse({ success: true, actionId, already_reported: true });
+    }
+
+    await env.AIHANGOUT_DB.prepare(
+      `INSERT INTO mobile_action_results (action_id, device_id, idempotency_key, result_status, result_payload_hash)
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(actionId, deviceId, idempotencyKey, resultStatus, resultPayloadHash).run();
+    await env.AIHANGOUT_DB.prepare(
+      `INSERT INTO mobile_action_effects (action_id, effect_status) VALUES (?, 'unconfirmed')
+       ON CONFLICT(action_id) DO NOTHING`
+    ).bind(actionId).run();
+
+    return jsonResponse({ success: true, actionId, resultStatus, effect_status: 'unconfirmed' });
+  } catch (error) {
+    return errResponse('Action result reporting failed', error);
+  }
+});
+
+router.post('/api/mobile/actions/:actionId/verify-effect', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const { actionId } = request.params;
+    const body = safeJsonParse(await request.text());
+    const note = sanitizeContent(String(body?.note || '').trim()).slice(0, 500) || null;
+
+    const intent = await env.AIHANGOUT_DB.prepare(
+      'SELECT owner_user_id FROM mobile_action_intents WHERE action_id = ?'
+    ).bind(actionId).first();
+    if (!intent || intent.owner_user_id !== user.id) {
+      return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
+    }
+    const result = await env.AIHANGOUT_DB.prepare(
+      `UPDATE mobile_action_effects SET effect_status = 'effect_verified', verification_note = ?, verified_at = CURRENT_TIMESTAMP
+       WHERE action_id = ?`
+    ).bind(note, actionId).run();
+    if (!result.meta || result.meta.changes === 0) {
+      return jsonResponse({ success: false, error: 'No result has been reported for this action yet' }, { status: 409 });
+    }
+
+    return jsonResponse({ success: true, actionId, effect_status: 'effect_verified' });
+  } catch (error) {
+    return errResponse('Effect verification failed', error);
+  }
+});
+
+router.get('/api/mobile/actions/:actionId', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const { actionId } = request.params;
+    const intent = await env.AIHANGOUT_DB.prepare(
+      `SELECT action_id, device_id, owner_user_id, capability, target_description, action_digest, status, created_at, expires_at
+       FROM mobile_action_intents WHERE action_id = ?`
+    ).bind(actionId).first();
+    if (!intent || intent.owner_user_id !== user.id) {
+      return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
+    }
+
+    const [approval, result, effect] = await Promise.all([
+      env.AIHANGOUT_DB.prepare('SELECT approved_by, approved_digest, approved_at FROM mobile_action_approvals WHERE action_id = ?').bind(actionId).first(),
+      env.AIHANGOUT_DB.prepare('SELECT result_status, result_payload_hash, reported_at FROM mobile_action_results WHERE action_id = ?').bind(actionId).first(),
+      env.AIHANGOUT_DB.prepare('SELECT effect_status, verification_note, verified_at FROM mobile_action_effects WHERE action_id = ?').bind(actionId).first(),
+    ]);
+
+    return jsonResponse({
+      success: true,
+      intent,
+      approval: approval || null,
+      result: result || null,
+      effect: effect || null,
+    });
+  } catch (error) {
+    return errResponse('Action readback failed', error);
+  }
+});
+
 router.get('*', async (request, env) => {
   try {
     const url = new URL(request.url);
