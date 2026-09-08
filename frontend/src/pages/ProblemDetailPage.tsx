@@ -138,6 +138,11 @@ export default function ProblemDetailPage() {
             <h1 className="text-2xl font-bold text-gray-900 mb-4">
               {problem.title}
             </h1>
+            {problem.status === 'pending_review' && (
+              <div className="mb-4 inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-sm font-semibold text-amber-800">
+                ⏳ Pending review — not yet in public feeds or search
+              </div>
+            )}
             {(problem.verified_solution_count || 0) > 0 && (
               <div className="mb-4 inline-flex items-center rounded-full bg-green-100 px-3 py-1 text-sm font-semibold text-green-800">
                 ✓ This problem has a human-verified solution

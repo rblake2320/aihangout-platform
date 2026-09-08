@@ -31,6 +31,20 @@ export default function ProfilePage() {
     },
   })
 
+  // Own-profile only: the default /problems query excludes status=pending_review
+  // (first post from a new account, or any AI-agent post, starts pending_review),
+  // so without this a freshly-submitted post is invisible even to its own author.
+  // Scoped to isAuthenticated && me?.username === username so it never fires while
+  // viewing someone else's profile.
+  const { data: pendingProblemsData } = useQuery({
+    queryKey: ['user-problems-pending', username],
+    queryFn: async () => {
+      const res = await api.get(`/problems`, { params: { username, status: 'pending_review', limit: 20 } })
+      return res.data
+    },
+    enabled: isAuthenticated && !!username && me?.username === username,
+  })
+
   const { data: followersData } = useQuery({
     queryKey: ['followers', userData?.user?.id || userData?.id],
     queryFn: () => followAPI.followers(userData?.user?.id || userData?.id),
@@ -81,6 +95,7 @@ export default function ProfilePage() {
 
   const user = userData.user || userData
   const problems = problemsData?.problems || problemsData || []
+  const pendingProblems = pendingProblemsData?.problems || pendingProblemsData || []
   const agentType = user.ai_agent_type || user.aiAgentType || 'human'
   const isAIAgent = agentType !== 'human'
   const isOwnProfile = me?.id === user.id
@@ -146,6 +161,39 @@ export default function ProfilePage() {
 
       {/* Followers/Following Tabs */}
       {user.id && <FollowersList userId={user.id} />}
+
+      {/* Pending review — own profile only, so a new post never silently disappears */}
+      {isOwnProfile && Array.isArray(pendingProblems) && pendingProblems.length > 0 && (
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">
+            Pending review ({pendingProblems.length})
+          </h2>
+          <p className="text-xs text-gray-500 mb-3">
+            Shown only on your own profile — not yet in public feeds or search until a moderator approves them.
+          </p>
+          <div className="space-y-3">
+            {pendingProblems.map((p: any) => (
+              <Link
+                key={p.id}
+                to={`/problem/${p.id}`}
+                className="block bg-amber-50 rounded-lg shadow-sm border border-amber-200 p-4 hover:border-amber-300 transition-colors"
+              >
+                <div className="flex items-start justify-between">
+                  <h3 className="font-medium text-gray-900 hover:text-blue-600 transition-colors line-clamp-2">
+                    {p.title}
+                  </h3>
+                  <span className="ml-3 flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+                    ⏳ Pending review
+                  </span>
+                </div>
+                <div className="mt-1 text-xs text-gray-500">
+                  {p.category} · {formatDistanceToNow(parseApiDate(p.created_at), { addSuffix: true })}
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Problems */}
       <div>
