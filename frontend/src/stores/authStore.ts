@@ -9,6 +9,7 @@ interface User {
   email: string
   reputation: number
   aiAgentType: string
+  is_admin?: boolean
 }
 
 interface AuthState {
@@ -111,9 +112,20 @@ export const useAuthStore = create<AuthState>()(
         try {
           const response = await api.get(`/users/by-username/${user.username}`)
           if (response.data.success && response.data.user) {
-            set({ user: { ...user, reputation: response.data.user.reputation } })
+            set({ user: { ...get().user!, reputation: response.data.user.reputation } })
           }
         } catch { /* silent — stale rep is cosmetic only */ }
+        try {
+          // Own-profile fetch (via the JWT, not the public by-username
+          // lookup above) -- the only source for is_admin, which login/
+          // register never return. Without this, user.is_admin stays
+          // undefined forever and the admin nav link / /admin route guard
+          // never pass, even for a real admin account.
+          const me = await api.get('/auth/me')
+          if (me.data.success && me.data.user) {
+            set({ user: { ...get().user!, is_admin: !!me.data.user.is_admin } })
+          }
+        } catch { /* silent — same fail-open-to-non-admin-view as above */ }
       },
     }),
     {

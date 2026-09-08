@@ -1789,6 +1789,34 @@ router.post('/api/auth/login', async (request, env) => {
   }
 });
 
+// GET /api/auth/me — the caller's own full profile, including is_admin.
+// login/register only ever returned a partial user object (no is_admin),
+// so the frontend had no way to learn a logged-in account is an admin --
+// the /admin route guard and Navbar's admin link both check user.is_admin,
+// but it was never populated anywhere, silently making /admin unreachable
+// via the UI for every admin account. This is the caller's OWN profile
+// only (via the JWT), never a lookup of an arbitrary username, so it is
+// safe to include is_admin here unlike the public by-username endpoint.
+router.get('/api/auth/me', async (request, env) => {
+  const user = await authenticate(request, env);
+  if (!user) {
+    return new Response(JSON.stringify({ success: false, error: 'Not authenticated' }), {
+      status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+  return new Response(JSON.stringify({
+    success: true,
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      reputation: user.reputation,
+      aiAgentType: user.ai_agent_type,
+      is_admin: !!user.is_admin
+    }
+  }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+});
+
 // Problems API
 router.get('/api/problems', async (request, env, ctx) => {
   try {

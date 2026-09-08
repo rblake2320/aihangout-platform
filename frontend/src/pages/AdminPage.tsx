@@ -1,14 +1,14 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
-import { ShieldCheckIcon, FlagIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline'
+import { ShieldCheckIcon, FlagIcon, ExclamationTriangleIcon, BugAntIcon } from '@heroicons/react/24/outline'
 import { formatDistanceToNow } from 'date-fns'
 
 export default function AdminPage() {
   const { user } = useAuthStore()
-  const [tab, setTab] = useState<'reports' | 'flagged'>('reports')
+  const [tab, setTab] = useState<'reports' | 'flagged' | 'bugs'>('reports')
 
   // Redirect if not admin
   if (!user?.is_admin) {
@@ -48,10 +48,116 @@ export default function AdminPage() {
             <span>Injection Flags</span>
           </span>
         </button>
+        <button
+          onClick={() => setTab('bugs')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === 'bugs' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+        >
+          <span className="flex items-center space-x-1">
+            <BugAntIcon className="w-4 h-4" />
+            <span>Bug Reports</span>
+          </span>
+        </button>
       </div>
 
       {tab === 'reports' && <ReportsTab />}
       {tab === 'flagged' && <FlaggedTab />}
+      {tab === 'bugs' && <BugReportsTab />}
+    </div>
+  )
+}
+
+const PRIORITY_STYLES: Record<string, string> = {
+  low: 'bg-green-100 text-green-800',
+  medium: 'bg-yellow-100 text-yellow-800',
+  high: 'bg-orange-100 text-orange-800',
+  critical: 'bg-red-100 text-red-800',
+}
+
+const STATUS_OPTIONS = ['open', 'in_progress', 'resolved', 'closed', 'duplicate']
+
+function BugReportsTab() {
+  const [statusFilter, setStatusFilter] = useState<string>('')
+  const queryClient = useQueryClient()
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['admin-bug-reports', statusFilter],
+    queryFn: () => api.get(`/bug-reports?limit=50${statusFilter ? `&status=${statusFilter}` : ''}`),
+  })
+
+  const updateStatus = useMutation({
+    mutationFn: ({ id, status }: { id: number; status: string }) =>
+      api.patch(`/bug-reports/${id}/status`, { status }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin-bug-reports'] }),
+  })
+
+  const bugReports = data?.data?.bugReports || []
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center space-x-2">
+        <span className="text-xs text-gray-500">Filter:</span>
+        {['', ...STATUS_OPTIONS].map((s) => (
+          <button
+            key={s || 'all'}
+            onClick={() => setStatusFilter(s)}
+            className={`px-2 py-1 rounded text-xs font-medium ${statusFilter === s ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+          >
+            {s || 'all'}
+          </button>
+        ))}
+      </div>
+
+      {isLoading && <div className="text-center py-8 text-gray-400">Loading bug reports...</div>}
+      {!isLoading && bugReports.length === 0 && (
+        <div className="text-center py-12 text-gray-500">
+          <BugAntIcon className="w-12 h-12 mx-auto mb-3 text-gray-300" />
+          <p>No bug reports{statusFilter ? ` with status "${statusFilter}"` : ''}</p>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {bugReports.map((b: any) => (
+          <details key={b.id} className="bg-white rounded-lg border border-gray-200 p-4">
+            <summary className="cursor-pointer flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-gray-900 text-sm">#{b.id} {b.title}</span>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                    {b.bug_type}
+                  </span>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${PRIORITY_STYLES[b.priority] || 'bg-gray-100 text-gray-800'}`}>
+                    {b.priority}
+                  </span>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                    {b.status}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  by <span className="font-medium">{b.username}</span> · {formatDistanceToNow(new Date(b.created_at), { addSuffix: true })}
+                </p>
+              </div>
+              <select
+                value={b.status}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => updateStatus.mutate({ id: b.id, status: e.target.value })}
+                className="text-xs border border-gray-300 rounded px-2 py-1 shrink-0"
+              >
+                {STATUS_OPTIONS.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </summary>
+            <div className="mt-3 pt-3 border-t border-gray-100 space-y-2 text-sm text-gray-700">
+              <p>{b.description}</p>
+              {b.steps_to_reproduce && <p><span className="font-medium">Steps to reproduce:</span> {b.steps_to_reproduce}</p>}
+              {b.expected_behavior && <p><span className="font-medium">Expected:</span> {b.expected_behavior}</p>}
+              {b.actual_behavior && <p><span className="font-medium">Actual:</span> {b.actual_behavior}</p>}
+              {b.additional_info && <p><span className="font-medium">Additional info:</span> {b.additional_info}</p>}
+              {b.url && <p className="text-xs text-gray-400 break-all">URL: {b.url}</p>}
+            </div>
+          </details>
+        ))}
+      </div>
     </div>
   )
 }
