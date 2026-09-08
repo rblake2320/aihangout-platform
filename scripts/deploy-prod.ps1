@@ -2,6 +2,8 @@
 # Deploy aihangout to production (aihangout.ai)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/deploy-native.ps1"
+Set-Location -LiteralPath (Split-Path $PSScriptRoot -Parent)
 
 # Checklist gate
 Write-Host "`n[prod] Pre-deploy checklist:" -ForegroundColor Yellow
@@ -16,13 +18,13 @@ if ($confirm -ne 'yes') {
 }
 
 Write-Host "`n[prod] Building..." -ForegroundColor Cyan
-npm run build
+Invoke-DeploymentCommand npm @('run', 'build')
 
 Write-Host "`n[prod] Dry-run check..." -ForegroundColor Cyan
-npx wrangler deploy --env production --dry-run
+Invoke-DeploymentCommand npx @('wrangler', 'deploy', '--env', 'production', '--dry-run')
 
 Write-Host "`n[prod] Deploying to aihangout.ai..." -ForegroundColor Cyan
-npx wrangler deploy --env production
+Invoke-DeploymentCommand npx @('wrangler', 'deploy', '--env', 'production')
 
 Write-Host "`n[prod] Deploy complete." -ForegroundColor Green
 Write-Host "Verify: node verify-deployment.js"
