@@ -287,16 +287,15 @@ describe('Security-review fixes (2026-09-08): confirm-phrase secrecy, rate limit
     expect(bodyText, 'the exact required confirm phrase must never appear in an error response').not.toContain('I APPROVE THIS SEND');
   });
 
-  it('devicePublicKey is sanitized and length-capped like its sibling free-text fields', async () => {
+  it('legacy hostile placeholder keys are rejected without enrolling a device', async () => {
     const user = await registerUser('mc_secfix_sanitize');
     const res = await api('/api/mobile/devices/enroll', {
       method: 'POST', token: user.token, ip: user.ip,
       body: { agentName: 'sanitize-probe', devicePublicKey: '<script>alert(1)</script>' + 'x'.repeat(3000) }
     });
-    expect(res.status, JSON.stringify(res.json)).toBe(200);
-    const row = await env.AIHANGOUT_DB.prepare('SELECT device_public_key FROM mobile_devices WHERE device_id = ?').bind(res.json.deviceId).first();
-    expect(row.device_public_key.length, 'devicePublicKey must be length-capped').toBeLessThanOrEqual(2000);
-    expect(row.device_public_key, 'devicePublicKey must be sanitized like every sibling free-text field').not.toContain('<script>');
+    expect(res.status, JSON.stringify(res.json)).toBe(400);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT COUNT(*) n FROM mobile_devices WHERE owner_user_id = ?').bind(user.id).first();
+    expect(row.n).toBe(0);
   });
 });
 
