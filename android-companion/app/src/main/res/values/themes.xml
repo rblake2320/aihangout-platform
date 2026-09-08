@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.AIHangoutCompanion" parent="Theme.MaterialComponents.DayNight.NoActionBar" />
+</resources>

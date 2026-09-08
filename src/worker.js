@@ -17675,7 +17675,7 @@ router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
   }
 });
 
-router.post('/api/mobile/actions/intent', async (request, env) => {
+router.post('/api/mobile/actions/intent', async (request, env, ctx) => {
   try {
     const user = await authenticate(request, env);
     if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
@@ -17726,7 +17726,7 @@ router.post('/api/mobile/actions/intent', async (request, env) => {
     // create a silent IDOR. Scoped into the SQL WHERE itself instead, so
     // there is nothing to accidentally drop later.
     const device = await env.AIHANGOUT_DB.prepare(
-      `SELECT device_id FROM mobile_devices WHERE device_id = ? AND owner_user_id = ? AND status = 'active'`
+      `SELECT device_id, agent_name FROM mobile_devices WHERE device_id = ? AND owner_user_id = ? AND status = 'active'`
     ).bind(deviceId, user.id).first();
     if (!device) {
       return jsonResponse({ success: false, error: 'No active device found under your account with that id' }, { status: 404 });
@@ -17751,6 +17751,34 @@ router.post('/api/mobile/actions/intent', async (request, env) => {
         return jsonResponse({ success: false, error: 'This idempotencyKey was already used for this device' }, { status: 409 });
       }
       throw dbErr;
+    }
+
+    // Notify the owner that their OWN device is requesting approval.
+    // Deliberately NOT createNotification() -- that helper's `userId ===
+    // actorId` guard exists to suppress "you did X to your own content"
+    // noise, which is the wrong model here: this genuinely is a
+    // self-directed notification (approval UX design: "the mobile agent
+    // cannot approve itself" -- a human must act on their OWN behalf, on
+    // a device/surface distinct from the one proposing the action, per
+    // Team/tasks/A6-aihangout-phoneclaw-lane-20260908.md). Reuses the same
+    // notifications table/shape and the existing per-user
+    // notify_mobile_action_pending opt-out column convention, just without
+    // the actor-distinctness guard that doesn't apply to this case.
+    if (ctx?.waitUntil) {
+      ctx.waitUntil((async () => {
+        try {
+          const settings = await env.AIHANGOUT_DB.prepare('SELECT * FROM user_settings WHERE user_id = ?').bind(user.id).first();
+          if (settings && settings.notify_mobile_action_pending === 0) return;
+          await env.AIHANGOUT_DB.prepare(`
+            INSERT INTO notifications (user_id, actor_id, type, target_type, target_id, message, is_read, created_at)
+            VALUES (?, ?, 'mobile_action_pending', 'mobile_action', ?, ?, FALSE, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id, actor_id, type, target_type, target_id)
+            DO UPDATE SET message = excluded.message, is_read = FALSE, created_at = CURRENT_TIMESTAMP
+          `).bind(user.id, user.id, actionId, `"${device.agent_name}" wants to: ${targetDescription}`).run();
+        } catch (notifyErr) {
+          console.error('[Mobile] action-pending notification failed (non-critical):', notifyErr?.message || notifyErr);
+        }
+      })());
     }
 
     return jsonResponse({ success: true, actionId, actionDigest, riskTier, status: 'awaiting_approval', expiresAt });

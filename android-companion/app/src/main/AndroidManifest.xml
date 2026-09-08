@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Narrow first-release permission set: network only (device
+         enrollment, polling, reporting), plus BATTERY_STATS-free
+         BatteryManager reads and ConnectivityManager (no extra runtime
+         permission needed for connection-type-only reads on API 26+).
+         No SEND_SMS, CALL_PHONE, camera, accessibility-service binding,
+         or MediaProjection permission is declared: those capability
+         tiers are separate, later, and deliberately not implemented in
+         this pass even though the backend allowlist now accepts them. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.AIHangoutCompanion">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
