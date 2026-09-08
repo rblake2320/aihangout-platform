@@ -1,3 +1,4 @@
+import { enrollmentProof } from './mobile-proof-helper.js';
 import { SELF, env } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 
@@ -45,10 +46,8 @@ async function registerUser(prefix) {
 
 async function enrollDevice(user, overrides = {}) {
   unique += 1;
-  return api('/api/mobile/devices/enroll', {
-    method: 'POST', token: user.token, ip: user.ip,
-    body: { agentName: `probe-agent-${unique}`, devicePublicKey: `test-pubkey-${unique}-0123456789abcdef`, ...overrides }
-  });
+  const proof = await enrollmentProof(api, user, overrides.agentName || `probe-agent-${unique}`);
+  return api('/api/mobile/devices/enroll', {method: 'POST', token: user.token, body: proof.body});
 }
 
 async function createIntent(user, deviceId, overrides = {}) {

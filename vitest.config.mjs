@@ -29,7 +29,9 @@ export default defineConfig({
             // JWT_SECRET lives in Cloudflare secrets and is never committed.
             JWT_SECRET: 'test-only-jwt-secret-32-chars-min!',
             ENVIRONMENT: 'test',
-            BETA_MODE: 'true'
+            BETA_MODE: 'true',
+            MOBILE_APP_ID: 'ai.hangout.test',
+            MOBILE_APP_CERT_SHA256: 'a'.repeat(64)
           }
         }
       };

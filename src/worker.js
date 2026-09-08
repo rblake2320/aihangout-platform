@@ -5,6 +5,7 @@
  */
 
 import { Router } from 'itty-router';
+import { installMobileEnrollment } from './mobile-enrollment.js';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 
 const router = Router();
@@ -17643,37 +17644,7 @@ router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
 
 // sha256Hex already exists (line ~16912) -- reused, not redefined.
 
-router.post('/api/mobile/devices/enroll', async (request, env) => {
-  try {
-    const user = await authenticate(request, env);
-    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
-
-    const body = safeJsonParse(await request.text());
-    const agentName = sanitizeContent(String(body?.agentName || '').trim()).slice(0, 100);
-    const devicePublicKey = String(body?.devicePublicKey || '').trim();
-    if (!agentName) return jsonResponse({ success: false, error: 'agentName is required' }, { status: 400 });
-    if (!devicePublicKey || devicePublicKey.length < 16) {
-      return jsonResponse({ success: false, error: 'devicePublicKey is required (placeholder until Gate 2 real device-key enrollment)' }, { status: 400 });
-    }
-
-    const deviceId = crypto.randomUUID();
-    try {
-      await env.AIHANGOUT_DB.prepare(
-        `INSERT INTO mobile_devices (device_id, owner_user_id, agent_name, device_public_key)
-         VALUES (?, ?, ?, ?)`
-      ).bind(deviceId, user.id, agentName, devicePublicKey).run();
-    } catch (dbErr) {
-      if (String(dbErr.message || '').includes('UNIQUE constraint failed')) {
-        return jsonResponse({ success: false, error: 'You already have a device enrolled under this agent name' }, { status: 409 });
-      }
-      throw dbErr;
-    }
-
-    return jsonResponse({ success: true, deviceId, agentName, status: 'active' });
-  } catch (error) {
-    return errResponse('Device enrollment failed', error);
-  }
-});
+installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse });
 
 router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
   try {
@@ -17681,10 +17652,15 @@ router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
     if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
 
     const { deviceId } = request.params;
-    const result = await env.AIHANGOUT_DB.prepare(
-      `UPDATE mobile_devices SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP
-       WHERE device_id = ? AND owner_user_id = ? AND status = 'active'`
-    ).bind(deviceId, user.id).run();
+    const revoked = await env.AIHANGOUT_DB.batch([
+      env.AIHANGOUT_DB.prepare(`UPDATE mobile_devices SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP
+       WHERE device_id = ? AND owner_user_id = ? AND status = 'active'`).bind(deviceId, user.id),
+      env.AIHANGOUT_DB.prepare(`UPDATE mobile_action_intents SET status = 'revoked'
+       WHERE device_id = ? AND owner_user_id = ? AND status IN ('awaiting_approval', 'approved')
+       AND EXISTS (SELECT 1 FROM mobile_devices WHERE device_id = ? AND owner_user_id = ? AND status = 'revoked')`)
+       .bind(deviceId, user.id, deviceId, user.id)
+    ]);
+    const result = revoked[0];
 
     if (!result.meta || result.meta.changes === 0) {
       return jsonResponse({ success: false, error: 'No active device found under your account with that id' }, { status: 404 });
@@ -17765,6 +17741,7 @@ router.post('/api/mobile/actions/intent', async (request, env) => {
 
     return jsonResponse({ success: true, actionId, actionDigest, riskTier, status: 'awaiting_approval', expiresAt });
   } catch (error) {
+    if (String(error?.message || '').includes('MOBILE_DEVICE_UNAVAILABLE')) return jsonResponse({ success: false, error: 'Device or action no longer available' }, { status: 409 });
     return errResponse('Action intent creation failed', error);
   }
 });
@@ -17826,6 +17803,7 @@ router.post('/api/mobile/actions/:actionId/approve', async (request, env) => {
 
     return jsonResponse({ success: true, actionId, status: 'approved' });
   } catch (error) {
+    if (String(error?.message || '').includes('MOBILE_DEVICE_UNAVAILABLE')) return jsonResponse({ success: false, error: 'Device or action no longer available' }, { status: 409 });
     return errResponse('Action approval failed', error);
   }
 });
@@ -17882,6 +17860,7 @@ router.post('/api/mobile/actions/:actionId/result', async (request, env) => {
 
     return jsonResponse({ success: true, actionId, resultStatus, effect_status: 'unconfirmed' });
   } catch (error) {
+    if (String(error?.message || '').includes('MOBILE_DEVICE_UNAVAILABLE')) return jsonResponse({ success: false, error: 'Device or action no longer available' }, { status: 409 });
     return errResponse('Action result reporting failed', error);
   }
 });
