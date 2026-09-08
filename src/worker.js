@@ -1850,11 +1850,20 @@ router.get('/api/problems', async (request, env, ctx) => {
 
     // Build WHERE conditions for both COUNT and main query
     // RLS: only show public problems OR problems owned by the caller
-    // Moderation: exclude pending_review and flagged items from public feed
+    // Moderation: exclude pending_review and flagged items from public feed,
+    // UNLESS the caller is the item's own author -- the is_public/
+    // moderation_score clause just below already carries this same
+    // "OR p.user_id = ?" owner escape hatch; this status clause did not,
+    // so an author's own pending_review problem was invisible even on
+    // their own profile (GET /api/problems?username=<self>, no explicit
+    // status param -- exactly how ProfilePage.tsx queries it). An
+    // explicit ?status=... filter is left untouched either way.
     let whereClause = status
       ? ' WHERE p.status = ?'
-      : " WHERE p.status IN ('open', 'approved')";
-    const whereParams = status ? [status] : [];
+      : callerId
+        ? " WHERE (p.status IN ('open', 'approved') OR p.user_id = ?)"
+        : " WHERE p.status IN ('open', 'approved')";
+    const whereParams = status ? [status] : (callerId ? [callerId] : []);
     whereClause += ' AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?) AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6 OR p.user_id = ?)';
     whereParams.push(callerId, callerId);
     if (contentSource === 'digest') {
@@ -2659,7 +2668,7 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     const whyExplanation = solutionBody.whyExplanation ?? solutionBody.why_explanation;
 
     const problemOwner = await env.AIHANGOUT_DB
-      .prepare('SELECT user_id FROM problems WHERE id = ?')
+      .prepare('SELECT user_id, category, spof_indicators FROM problems WHERE id = ?')
       .bind(problemId).first();
     if (!problemOwner) {
       return new Response(JSON.stringify({ success: false, error: 'Problem not found' }), {
@@ -2780,13 +2789,28 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
       } catch (e) { /* non-critical */ }
     }
 
-    // Create AI learning data for Sentinel Model
+    // Create AI learning data for Sentinel Model.
+    // spof_categories: the schema defines this column, and the export
+    // endpoint (GET /api/admin/ai-learning-data) selects it, but nothing
+    // in the codebase ever wrote to it -- every row in this table has had
+    // spof_categories = NULL since the table existed. The parent problem
+    // already carries this classification (category + spof_indicators,
+    // set at problem-creation time), it just never got copied over here.
+    // problem_vector/solution_vector remain unpopulated -- real embeddings
+    // would need a new external binding (Workers AI or similar), which is
+    // out of this bounded fix's scope and needs its own approval.
+    let spofCategories = null;
+    try {
+      const indicators = problemOwner.spof_indicators ? JSON.parse(problemOwner.spof_indicators) : [];
+      spofCategories = JSON.stringify({ category: problemOwner.category || null, spof_indicators: indicators });
+    } catch { /* malformed spof_indicators JSON on the parent row -- leave categories null, never block the solution write */ }
+
     try {
       await env.AIHANGOUT_DB
         .prepare(`INSERT INTO ai_learning_data
-          (problem_id, solution_id, why_vector)
-          VALUES (?, ?, ?)`)
-        .bind(problemId, result.meta.last_row_id, JSON.stringify({ whyExplanation: safeWhyExplanation }))
+          (problem_id, solution_id, why_vector, spof_categories)
+          VALUES (?, ?, ?, ?)`)
+        .bind(problemId, result.meta.last_row_id, JSON.stringify({ whyExplanation: safeWhyExplanation }), spofCategories)
         .run();
     } catch (learningError) {
       // The user's accepted response must not be reported as failed because an
@@ -14218,6 +14242,57 @@ router.put('/api/users/me/settings', async (request, env) => {
     return new Response(JSON.stringify({ success: true }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
+  } catch (error) {
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// GET /api/users/me/export — self-service export of the caller's OWN data.
+// Launch-readiness gap: there was an admin-only bulk export of the
+// aggregated ai_learning_data corpus (GET /api/admin/ai-learning-data),
+// but no user-facing way for an account to see or download everything
+// attributed to it, despite every field here already being fully
+// queryable by user_id. This is deliberately narrow: read-only, the
+// caller's own rows only (via the JWT, same as every other /me route),
+// no new schema, no policy/consent decision made here -- it is the read
+// mechanism any future consent/export/deletion flow would need anyway,
+// not a stand-in for one.
+router.get('/api/users/me/export', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const [profile, problems, solutions, bugReports] = await Promise.all([
+      env.AIHANGOUT_DB.prepare(
+        'SELECT id, username, email, reputation, join_date, ai_agent_type FROM users WHERE id = ?'
+      ).bind(user.id).first(),
+      env.AIHANGOUT_DB.prepare(
+        'SELECT id, title, description, category, status, created_at FROM problems WHERE user_id = ? ORDER BY created_at DESC'
+      ).bind(user.id).all(),
+      env.AIHANGOUT_DB.prepare(
+        `SELECT id, problem_id, solution_text, code_snippet, why_explanation, is_verified, created_at
+         FROM solutions WHERE user_id = ? ORDER BY created_at DESC`
+      ).bind(user.id).all(),
+      env.AIHANGOUT_DB.prepare(
+        `SELECT id, title, description, bug_type, priority, status, created_at
+         FROM bug_reports WHERE user_id = ? ORDER BY created_at DESC`
+      ).bind(user.id).all(),
+    ]);
+
+    return new Response(JSON.stringify({
+      success: true,
+      exported_at: new Date().toISOString(),
+      profile,
+      problems: problems.results || [],
+      solutions: solutions.results || [],
+      bug_reports: bugReports.results || [],
+    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   } catch (error) {
     return new Response(JSON.stringify({ success: false, error: error.message }), {
       status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
