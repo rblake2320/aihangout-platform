@@ -17706,11 +17706,28 @@ router.post('/api/mobile/actions/intent', async (request, env) => {
     const targetDescription = sanitizeContent(String(body?.targetDescription || '').trim()).slice(0, 500);
     const idempotencyKey = String(body?.idempotencyKey || '').trim();
 
-    const ALLOWED_CAPABILITIES = ['device_diagnostics_read', 'battery_status_read', 'network_status_read'];
-    if (!ALLOWED_CAPABILITIES.includes(capability)) {
+    // Capability -> risk tier is a fixed server-side mapping, never
+    // client-supplied -- a caller cannot claim a lower risk tier than a
+    // capability actually carries. communication_send (leaves the device:
+    // real SMS/call) requires an additional confirm_phrase at approval
+    // time, on top of the exact digest match every tier already requires.
+    const CAPABILITY_RISK_TIERS = {
+      device_diagnostics_read: 'read_only',
+      battery_status_read: 'read_only',
+      network_status_read: 'read_only',
+      ui_read_screen: 'device_ui_action',
+      ui_click: 'device_ui_action',
+      ui_type: 'device_ui_action',
+      screenshot_capture: 'device_ui_action',
+      sms_send: 'communication_send',
+      call_make: 'communication_send',
+      email_send: 'communication_send',
+    };
+    const riskTier = CAPABILITY_RISK_TIERS[capability];
+    if (!riskTier) {
       return jsonResponse({
         success: false,
-        error: `capability must be one of: ${ALLOWED_CAPABILITIES.join(', ')} (this release is read-only diagnostics only)`
+        error: `capability must be one of: ${Object.keys(CAPABILITY_RISK_TIERS).join(', ')}`
       }, { status: 400 });
     }
     if (!targetDescription) return jsonResponse({ success: false, error: 'targetDescription is required' }, { status: 400 });
@@ -17726,19 +17743,19 @@ router.post('/api/mobile/actions/intent', async (request, env) => {
     }
 
     const actionId = crypto.randomUUID();
-    // The digest is computed server-side from the actual stored fields,
-    // never accepted from the caller -- it is what an approval binds to,
-    // so it must be impossible for a client to claim a digest that does
-    // not match the real intent.
-    const actionDigest = await sha256Hex(JSON.stringify({ deviceId, capability, targetDescription }));
+    // The digest is computed server-side from the actual stored fields
+    // (including risk_tier), never accepted from the caller -- it is what
+    // an approval binds to, so it must be impossible for a client to claim
+    // a digest that does not match the real intent.
+    const actionDigest = await sha256Hex(JSON.stringify({ deviceId, capability, riskTier, targetDescription }));
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
     try {
       await env.AIHANGOUT_DB.prepare(
         `INSERT INTO mobile_action_intents
-           (action_id, device_id, owner_user_id, capability, target_description, action_digest, idempotency_key, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(actionId, deviceId, user.id, capability, targetDescription, actionDigest, idempotencyKey, expiresAt).run();
+           (action_id, device_id, owner_user_id, capability, risk_tier, target_description, action_digest, idempotency_key, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(actionId, deviceId, user.id, capability, riskTier, targetDescription, actionDigest, idempotencyKey, expiresAt).run();
     } catch (dbErr) {
       if (String(dbErr.message || '').includes('UNIQUE constraint failed')) {
         return jsonResponse({ success: false, error: 'This idempotencyKey was already used for this device' }, { status: 409 });
@@ -17746,7 +17763,7 @@ router.post('/api/mobile/actions/intent', async (request, env) => {
       throw dbErr;
     }
 
-    return jsonResponse({ success: true, actionId, actionDigest, status: 'awaiting_approval', expiresAt });
+    return jsonResponse({ success: true, actionId, actionDigest, riskTier, status: 'awaiting_approval', expiresAt });
   } catch (error) {
     return errResponse('Action intent creation failed', error);
   }
@@ -17760,9 +17777,11 @@ router.post('/api/mobile/actions/:actionId/approve', async (request, env) => {
     const { actionId } = request.params;
     const body = safeJsonParse(await request.text());
     const suppliedDigest = String(body?.actionDigest || '');
+    const confirmPhrase = body?.confirmPhrase ? String(body.confirmPhrase) : null;
+    const REQUIRED_CONFIRM_PHRASE = 'I APPROVE THIS SEND';
 
     const intent = await env.AIHANGOUT_DB.prepare(
-      'SELECT action_id, owner_user_id, action_digest, status, expires_at FROM mobile_action_intents WHERE action_id = ?'
+      'SELECT action_id, owner_user_id, action_digest, risk_tier, status, expires_at FROM mobile_action_intents WHERE action_id = ?'
     ).bind(actionId).first();
     if (!intent || intent.owner_user_id !== user.id) {
       return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
@@ -17775,6 +17794,15 @@ router.post('/api/mobile/actions/:actionId/approve', async (request, env) => {
     }
     if (suppliedDigest !== intent.action_digest) {
       return jsonResponse({ success: false, error: 'actionDigest does not match -- the plan changed since this was created; this is a different action, not a retry' }, { status: 409 });
+    }
+    // communication_send (SMS/call -- leaves the device, real-world cost/
+    // irreversibility) requires an additional, deliberate confirm phrase
+    // on top of the exact digest match every tier already requires.
+    if (intent.risk_tier === 'communication_send' && confirmPhrase !== REQUIRED_CONFIRM_PHRASE) {
+      return jsonResponse({
+        success: false,
+        error: `This action sends real communication off the device. Approval requires confirmPhrase: "${REQUIRED_CONFIRM_PHRASE}"`
+      }, { status: 400 });
     }
 
     if (intent.status === 'approved') {
@@ -17789,8 +17817,8 @@ router.post('/api/mobile/actions/:actionId/approve', async (request, env) => {
 
     await env.AIHANGOUT_DB.batch([
       env.AIHANGOUT_DB.prepare(
-        'INSERT INTO mobile_action_approvals (action_id, approved_by, approved_digest) VALUES (?, ?, ?)'
-      ).bind(actionId, user.id, suppliedDigest),
+        'INSERT INTO mobile_action_approvals (action_id, approved_by, approved_digest, confirm_phrase) VALUES (?, ?, ?, ?)'
+      ).bind(actionId, user.id, suppliedDigest, confirmPhrase),
       env.AIHANGOUT_DB.prepare(
         "UPDATE mobile_action_intents SET status = 'approved' WHERE action_id = ?"
       ).bind(actionId),
@@ -17894,7 +17922,7 @@ router.get('/api/mobile/actions/:actionId', async (request, env) => {
 
     const { actionId } = request.params;
     const intent = await env.AIHANGOUT_DB.prepare(
-      `SELECT action_id, device_id, owner_user_id, capability, target_description, action_digest, status, created_at, expires_at
+      `SELECT action_id, device_id, owner_user_id, capability, risk_tier, target_description, action_digest, status, created_at, expires_at
        FROM mobile_action_intents WHERE action_id = ?`
     ).bind(actionId).first();
     if (!intent || intent.owner_user_id !== user.id) {

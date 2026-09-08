@@ -125,23 +125,41 @@ describe('Action intent capability allowlist (this release: read-only diagnostic
     expect(intent.json.actionDigest).toBeTruthy();
   });
 
-  it('rejects a write/send/call/camera-style capability outright -- not merely unimplemented, refused', async () => {
+  it('rejects a capability outside the fixed allowlist outright -- not merely unimplemented, refused', async () => {
     const user = await registerUser('mc_intent_bad');
     const enrolled = await enrollDevice(user);
-    for (const bad of ['sms_send', 'call_make', 'accessibility_action', 'camera_capture', 'screen_capture', 'email_send']) {
+    for (const bad of ['accessibility_action', 'camera_capture', 'schedule_recurring', 'clear_schedule', 'arbitrary_shell_exec']) {
       const intent = await createIntent(user, enrolled.json.deviceId, { capability: bad });
       expect(intent.status, `capability ${bad} should have been refused`).toBe(400);
     }
     // Confirm the DB-level CHECK constraint is also real, not just the API
-    // layer -- direct INSERT bypassing the route must fail too.
+    // layer -- direct INSERT bypassing the route must fail too. Autonomous
+    // scheduling stays excluded even after the 2026-09-08 capability-parity
+    // expansion (standing launch-task constraint: no autonomous recurring
+    // schedules) -- used here as the negative-control capability.
     let threw = false;
     try {
       await env.AIHANGOUT_DB.prepare(
         `INSERT INTO mobile_action_intents (action_id, device_id, owner_user_id, capability, target_description, action_digest, idempotency_key, expires_at)
-         VALUES ('bad-action-1', ?, ?, 'sms_send', 'x', 'x', 'x', datetime('now','+1 hour'))`
+         VALUES ('bad-action-1', ?, ?, 'schedule_recurring', 'x', 'x', 'x', datetime('now','+1 hour'))`
       ).bind(enrolled.json.deviceId, user.id).run();
     } catch (e) { threw = true; }
     expect(threw, 'schema CHECK constraint must reject a disallowed capability even at the DB layer').toBe(true);
+  });
+
+  it('accepts every capability-parity addition (UI automation, screenshot, SMS, call, email) with the correct risk tier', async () => {
+    const user = await registerUser('mc_intent_parity');
+    const enrolled = await enrollDevice(user);
+    const expected = {
+      ui_read_screen: 'device_ui_action', ui_click: 'device_ui_action', ui_type: 'device_ui_action',
+      screenshot_capture: 'device_ui_action',
+      sms_send: 'communication_send', call_make: 'communication_send', email_send: 'communication_send',
+    };
+    for (const [capability, riskTier] of Object.entries(expected)) {
+      const intent = await createIntent(user, enrolled.json.deviceId, { capability });
+      expect(intent.status, `capability ${capability}: ${JSON.stringify(intent.json)}`).toBe(200);
+      expect(intent.json.riskTier, `capability ${capability} should be risk tier ${riskTier}`).toBe(riskTier);
+    }
   });
 
   it('a caller cannot create an intent against a device they do not own', async () => {
@@ -215,6 +233,52 @@ describe('Approval: exact digest binding, expiry, idempotent re-approval', () =>
       method: 'POST', token: attacker.token, ip: attacker.ip, body: { actionDigest: intent.json.actionDigest }
     });
     expect(approve.status).toBe(404);
+  });
+});
+
+describe('communication_send tier (SMS/call/email -- leaves the device): extra confirm-phrase gate', () => {
+  it('refuses approval of an SMS action without the exact confirm phrase', async () => {
+    const user = await registerUser('mc_confirm_missing');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId, { capability: 'sms_send', targetDescription: 'Send "test" to +15555550100' });
+    const approve = await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+    expect(approve.status).toBe(400);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT status FROM mobile_action_intents WHERE action_id = ?').bind(intent.json.actionId).first();
+    expect(row.status).toBe('awaiting_approval');
+  });
+
+  it('refuses approval with the WRONG confirm phrase, even if close', async () => {
+    const user = await registerUser('mc_confirm_wrong');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId, { capability: 'call_make', targetDescription: 'Call +15555550100' });
+    const approve = await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip,
+      body: { actionDigest: intent.json.actionDigest, confirmPhrase: 'i approve this send' }
+    });
+    expect(approve.status).toBe(400);
+  });
+
+  it('approves an SMS action once the exact confirm phrase is supplied', async () => {
+    const user = await registerUser('mc_confirm_ok');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId, { capability: 'sms_send', targetDescription: 'Send "test" to +15555550100' });
+    const approve = await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip,
+      body: { actionDigest: intent.json.actionDigest, confirmPhrase: 'I APPROVE THIS SEND' }
+    });
+    expect(approve.status, JSON.stringify(approve.json)).toBe(200);
+  });
+
+  it('a read_only-tier action needs no confirm phrase at all', async () => {
+    const user = await registerUser('mc_confirm_readonly');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId, { capability: 'battery_status_read' });
+    const approve = await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+    expect(approve.status).toBe(200);
   });
 });
 
