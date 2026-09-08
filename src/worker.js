@@ -17644,12 +17644,16 @@ router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
 
 // sha256Hex already exists (line ~16912) -- reused, not redefined.
 
-installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse });
+installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse });
 
 router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
   try {
     const user = await authenticate(request, env);
     if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'mobile_revoke');
+    if (rl.limited) return rateLimitResponse(rl);
 
     const { deviceId } = request.params;
     const revoked = await env.AIHANGOUT_DB.batch([
@@ -17675,6 +17679,10 @@ router.post('/api/mobile/actions/intent', async (request, env) => {
   try {
     const user = await authenticate(request, env);
     if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'mobile_intent');
+    if (rl.limited) return rateLimitResponse(rl);
 
     const body = safeJsonParse(await request.text());
     const deviceId = String(body?.deviceId || '');
@@ -17711,10 +17719,16 @@ router.post('/api/mobile/actions/intent', async (request, env) => {
       return jsonResponse({ success: false, error: 'idempotencyKey is required (>= 8 chars, unique per device)' }, { status: 400 });
     }
 
+    // Adversarial review (2026-09-08): ownership was previously enforced by
+    // a JS comparison after a broader SELECT, a pattern repeated (with
+    // correct results, but fragile copy-paste) across several sibling
+    // routes -- one future edit that drops or reorders that JS check would
+    // create a silent IDOR. Scoped into the SQL WHERE itself instead, so
+    // there is nothing to accidentally drop later.
     const device = await env.AIHANGOUT_DB.prepare(
-      `SELECT device_id, owner_user_id FROM mobile_devices WHERE device_id = ? AND status = 'active'`
-    ).bind(deviceId).first();
-    if (!device || device.owner_user_id !== user.id) {
+      `SELECT device_id FROM mobile_devices WHERE device_id = ? AND owner_user_id = ? AND status = 'active'`
+    ).bind(deviceId, user.id).first();
+    if (!device) {
       return jsonResponse({ success: false, error: 'No active device found under your account with that id' }, { status: 404 });
     }
 
@@ -17751,17 +17765,30 @@ router.post('/api/mobile/actions/:actionId/approve', async (request, env) => {
     const user = await authenticate(request, env);
     if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
 
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'mobile_approve');
+    if (rl.limited) return rateLimitResponse(rl);
+
     const { actionId } = request.params;
     const body = safeJsonParse(await request.text());
     const suppliedDigest = String(body?.actionDigest || '');
-    const confirmPhrase = body?.confirmPhrase ? String(body.confirmPhrase) : null;
+    const confirmPhrase = body?.confirmPhrase ? String(body.confirmPhrase).slice(0, 200) : null;
     const REQUIRED_CONFIRM_PHRASE = 'I APPROVE THIS SEND';
 
     const intent = await env.AIHANGOUT_DB.prepare(
-      'SELECT action_id, owner_user_id, action_digest, risk_tier, status, expires_at FROM mobile_action_intents WHERE action_id = ?'
-    ).bind(actionId).first();
-    if (!intent || intent.owner_user_id !== user.id) {
+      'SELECT action_id, action_digest, risk_tier, status, expires_at FROM mobile_action_intents WHERE action_id = ? AND owner_user_id = ?'
+    ).bind(actionId, user.id).first();
+    if (!intent) {
       return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
+    }
+
+    // Adversarial review (2026-09-08): idempotent re-approval must be
+    // checked BEFORE the expiry check -- an action that was already
+    // approved before it expired must still report success on a repeated
+    // call, even if `expires_at` has since passed (expiry only matters for
+    // an action that is still awaiting approval).
+    if (intent.status === 'approved') {
+      return jsonResponse({ success: true, actionId, status: 'approved', already_approved: true });
     }
     if (new Date(intent.expires_at) < new Date()) {
       if (intent.status === 'awaiting_approval') {
@@ -17775,31 +17802,48 @@ router.post('/api/mobile/actions/:actionId/approve', async (request, env) => {
     // communication_send (SMS/call -- leaves the device, real-world cost/
     // irreversibility) requires an additional, deliberate confirm phrase
     // on top of the exact digest match every tier already requires.
+    //
+    // Adversarial review (2026-09-08): the error response previously
+    // echoed the literal required phrase back to the caller
+    // ("...confirmPhrase: \"I APPROVE THIS SEND\"") -- since every mobile
+    // route is authenticated by the same JWT a fully scripted, non-human
+    // caller already holds, that made the phrase trivially discoverable
+    // by calling approve once without it, defeating the whole point of a
+    // deliberate-human-typed gate. The error no longer states the phrase;
+    // it only names that one is required.
     if (intent.risk_tier === 'communication_send' && confirmPhrase !== REQUIRED_CONFIRM_PHRASE) {
       return jsonResponse({
         success: false,
-        error: `This action sends real communication off the device. Approval requires confirmPhrase: "${REQUIRED_CONFIRM_PHRASE}"`
+        error: 'This action sends real communication off the device and requires a confirmPhrase from the human approving it.'
       }, { status: 400 });
-    }
-
-    if (intent.status === 'approved') {
-      // Idempotent re-approval of the SAME unchanged digest is a no-op
-      // success, not an error -- a genuinely different digest was already
-      // rejected above.
-      return jsonResponse({ success: true, actionId, status: 'approved', already_approved: true });
     }
     if (intent.status !== 'awaiting_approval') {
       return jsonResponse({ success: false, error: `Action is '${intent.status}', not awaiting approval` }, { status: 409 });
     }
 
-    await env.AIHANGOUT_DB.batch([
-      env.AIHANGOUT_DB.prepare(
-        'INSERT INTO mobile_action_approvals (action_id, approved_by, approved_digest, confirm_phrase) VALUES (?, ?, ?, ?)'
-      ).bind(actionId, user.id, suppliedDigest, confirmPhrase),
-      env.AIHANGOUT_DB.prepare(
-        "UPDATE mobile_action_intents SET status = 'approved' WHERE action_id = ?"
-      ).bind(actionId),
-    ]);
+    try {
+      await env.AIHANGOUT_DB.batch([
+        env.AIHANGOUT_DB.prepare(
+          'INSERT INTO mobile_action_approvals (action_id, approved_by, approved_digest, confirm_phrase) VALUES (?, ?, ?, ?)'
+        ).bind(actionId, user.id, suppliedDigest, confirmPhrase),
+        env.AIHANGOUT_DB.prepare(
+          "UPDATE mobile_action_intents SET status = 'approved' WHERE action_id = ? AND status = 'awaiting_approval'"
+        ).bind(actionId),
+      ]);
+    } catch (dbErr) {
+      // Adversarial review (2026-09-08): two concurrent /approve calls could
+      // both pass the status check above and then race on this INSERT's
+      // action_id PRIMARY KEY -- the loser previously fell through to an
+      // unhandled 500 instead of the graceful idempotent-success response
+      // the intent-creation route already gives for its own race (a
+      // duplicate idempotencyKey). Same treatment here: a UNIQUE-constraint
+      // failure on this specific insert means someone else's concurrent
+      // call already approved it, which is success, not an error.
+      if (String(dbErr.message || '').includes('UNIQUE constraint failed')) {
+        return jsonResponse({ success: true, actionId, status: 'approved', already_approved: true });
+      }
+      throw dbErr;
+    }
 
     return jsonResponse({ success: true, actionId, status: 'approved' });
   } catch (error) {
@@ -17812,6 +17856,10 @@ router.post('/api/mobile/actions/:actionId/result', async (request, env) => {
   try {
     const user = await authenticate(request, env);
     if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'mobile_result');
+    if (rl.limited) return rateLimitResponse(rl);
 
     const { actionId } = request.params;
     const body = safeJsonParse(await request.text());
@@ -17827,9 +17875,9 @@ router.post('/api/mobile/actions/:actionId/result', async (request, env) => {
     }
 
     const intent = await env.AIHANGOUT_DB.prepare(
-      'SELECT action_id, owner_user_id, device_id, idempotency_key, status FROM mobile_action_intents WHERE action_id = ?'
-    ).bind(actionId).first();
-    if (!intent || intent.owner_user_id !== user.id) {
+      'SELECT action_id, device_id, idempotency_key, status FROM mobile_action_intents WHERE action_id = ? AND owner_user_id = ?'
+    ).bind(actionId, user.id).first();
+    if (!intent) {
       return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
     }
     if (intent.device_id !== deviceId || intent.idempotency_key !== idempotencyKey) {
@@ -17870,14 +17918,18 @@ router.post('/api/mobile/actions/:actionId/verify-effect', async (request, env) 
     const user = await authenticate(request, env);
     if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
 
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'mobile_verify_effect');
+    if (rl.limited) return rateLimitResponse(rl);
+
     const { actionId } = request.params;
     const body = safeJsonParse(await request.text());
     const note = sanitizeContent(String(body?.note || '').trim()).slice(0, 500) || null;
 
     const intent = await env.AIHANGOUT_DB.prepare(
-      'SELECT owner_user_id FROM mobile_action_intents WHERE action_id = ?'
-    ).bind(actionId).first();
-    if (!intent || intent.owner_user_id !== user.id) {
+      'SELECT action_id FROM mobile_action_intents WHERE action_id = ? AND owner_user_id = ?'
+    ).bind(actionId, user.id).first();
+    if (!intent) {
       return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
     }
     const result = await env.AIHANGOUT_DB.prepare(
@@ -17902,9 +17954,9 @@ router.get('/api/mobile/actions/:actionId', async (request, env) => {
     const { actionId } = request.params;
     const intent = await env.AIHANGOUT_DB.prepare(
       `SELECT action_id, device_id, owner_user_id, capability, risk_tier, target_description, action_digest, status, created_at, expires_at
-       FROM mobile_action_intents WHERE action_id = ?`
-    ).bind(actionId).first();
-    if (!intent || intent.owner_user_id !== user.id) {
+       FROM mobile_action_intents WHERE action_id = ? AND owner_user_id = ?`
+    ).bind(actionId, user.id).first();
+    if (!intent) {
       return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
     }
 

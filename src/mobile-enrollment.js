@@ -7,7 +7,7 @@ function decode(value, maxBytes) {
   return Uint8Array.from(raw, ch => ch.charCodeAt(0));
 }
 
-export function installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse }) {
+export function installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse }) {
   const failure = (error, status = 400) => jsonResponse({ success: false, error }, { status });
   const policy = env => typeof env.MOBILE_APP_ID === 'string' && /^[a-zA-Z][\w]*(\.[\w]+)+$/.test(env.MOBILE_APP_ID)
     && typeof env.MOBILE_APP_CERT_SHA256 === 'string' && /^[a-f0-9]{64}$/.test(env.MOBILE_APP_CERT_SHA256);
@@ -16,6 +16,8 @@ export function installMobileEnrollment(router, { authenticate, safeJsonParse, s
     try {
       const user = await authenticate(request, env);
       if (!user) return failure('Authentication required', 401);
+      const rl = await checkRateLimit(env.AIHANGOUT_KV, request.headers.get('CF-Connecting-IP') || 'unknown', user.id, 'mobile_enroll');
+      if (rl.limited) return rateLimitResponse(rl);
       if (!policy(env)) return failure('Enrollment build policy is not configured', 503);
       const body = safeJsonParse(await request.text());
       const agentName = typeof body?.agentName === 'string' ? body.agentName.trim() : '';
@@ -44,6 +46,8 @@ export function installMobileEnrollment(router, { authenticate, safeJsonParse, s
     try {
       const user = await authenticate(request, env);
       if (!user) return failure('Authentication required', 401);
+      const rl = await checkRateLimit(env.AIHANGOUT_KV, request.headers.get('CF-Connecting-IP') || 'unknown', user.id, 'mobile_enroll');
+      if (rl.limited) return rateLimitResponse(rl);
       if (!policy(env)) return failure('Enrollment build policy is not configured', 503);
       const body = safeJsonParse(await request.text());
       if (typeof body?.challengeId !== 'string' || body.challengeId.length > 64) return failure('Signed challenge required');

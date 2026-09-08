@@ -233,6 +233,71 @@ describe('Approval: exact digest binding, expiry, idempotent re-approval', () =>
     });
     expect(approve.status).toBe(404);
   });
+
+  it('an action already approved before its expiry is still idempotently reported as approved AFTER it expires (ordering fix)', async () => {
+    const user = await registerUser('mc_approve_thenexpire');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId);
+    const approve1 = await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+    expect(approve1.status).toBe(200);
+    // Force expires_at into the past AFTER approval -- a real approved
+    // action's expiry clock becoming stale should never retroactively turn
+    // a repeated approval call into a 410.
+    await env.AIHANGOUT_DB.prepare("UPDATE mobile_action_intents SET expires_at = ? WHERE action_id = ?")
+      .bind(new Date(Date.now() - 60000).toISOString(), intent.json.actionId).run();
+    const approve2 = await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+    expect(approve2.status, JSON.stringify(approve2.json)).toBe(200);
+    expect(approve2.json.already_approved).toBe(true);
+  });
+
+  it('a concurrent duplicate approval race is a graceful idempotent success, never a 500', async () => {
+    const user = await registerUser('mc_approve_race');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId);
+    // Simulate the exact race the review named: two approvals for the same
+    // action_id both reach the INSERT after the status check passed for
+    // both. Insert one directly to occupy the PRIMARY KEY, matching what a
+    // genuinely concurrent second request would collide against, then call
+    // the real route -- it must not throw a raw DB error to the caller.
+    await env.AIHANGOUT_DB.prepare(
+      'INSERT INTO mobile_action_approvals (action_id, approved_by, approved_digest) VALUES (?, ?, ?)'
+    ).bind(intent.json.actionId, user.id, intent.json.actionDigest).run();
+    const approve = await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+    expect(approve.status, JSON.stringify(approve.json)).toBe(200);
+    expect(approve.json.already_approved).toBe(true);
+  });
+});
+
+describe('Security-review fixes (2026-09-08): confirm-phrase secrecy, rate limiting, sanitization', () => {
+  it('the missing-confirm-phrase error never echoes the required phrase itself', async () => {
+    const user = await registerUser('mc_secfix_noecho');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId, { capability: 'sms_send', targetDescription: 'Send "hi" to +15555550100' });
+    const approve = await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+    expect(approve.status).toBe(400);
+    const bodyText = JSON.stringify(approve.json);
+    expect(bodyText, 'the exact required confirm phrase must never appear in an error response').not.toContain('I APPROVE THIS SEND');
+  });
+
+  it('devicePublicKey is sanitized and length-capped like its sibling free-text fields', async () => {
+    const user = await registerUser('mc_secfix_sanitize');
+    const res = await api('/api/mobile/devices/enroll', {
+      method: 'POST', token: user.token, ip: user.ip,
+      body: { agentName: 'sanitize-probe', devicePublicKey: '<script>alert(1)</script>' + 'x'.repeat(3000) }
+    });
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT device_public_key FROM mobile_devices WHERE device_id = ?').bind(res.json.deviceId).first();
+    expect(row.device_public_key.length, 'devicePublicKey must be length-capped').toBeLessThanOrEqual(2000);
+    expect(row.device_public_key, 'devicePublicKey must be sanitized like every sibling free-text field').not.toContain('<script>');
+  });
 });
 
 describe('communication_send tier (SMS/call/email -- leaves the device): extra confirm-phrase gate', () => {
