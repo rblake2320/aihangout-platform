@@ -1851,19 +1851,23 @@ router.get('/api/problems', async (request, env, ctx) => {
     // Build WHERE conditions for both COUNT and main query
     // RLS: only show public problems OR problems owned by the caller
     // Moderation: exclude pending_review and flagged items from public feed,
-    // UNLESS the caller is the item's own author -- the is_public/
-    // moderation_score clause just below already carries this same
-    // "OR p.user_id = ?" owner escape hatch; this status clause did not,
-    // so an author's own pending_review problem was invisible even on
-    // their own profile (GET /api/problems?username=<self>, no explicit
-    // status param -- exactly how ProfilePage.tsx queries it). An
-    // explicit ?status=... filter is left untouched either way.
+    // UNLESS the caller is the item's own author or an admin -- the
+    // is_public/moderation_score clause just below already carries this
+    // same "OR p.user_id = ?" owner escape hatch; this status clause did
+    // not, so an author's own pending_review problem was invisible even
+    // on their own profile (GET /api/problems?username=<self>, no
+    // explicit status param -- exactly how ProfilePage.tsx queries it).
+    // Pending content stays private to its author/admin consistently
+    // across every read surface (this list, GET /api/problems/:id, and
+    // its nested solutions) -- A2 launch-security finding 2. An explicit
+    // ?status=... filter is left untouched either way.
+    const callerIsAdmin = !!callerUser?.is_admin;
     let whereClause = status
       ? ' WHERE p.status = ?'
-      : callerId
-        ? " WHERE (p.status IN ('open', 'approved') OR p.user_id = ?)"
+      : (callerId || callerIsAdmin)
+        ? " WHERE (p.status IN ('open', 'approved') OR p.user_id = ? OR ? = 1)"
         : " WHERE p.status IN ('open', 'approved')";
-    const whereParams = status ? [status] : (callerId ? [callerId] : []);
+    const whereParams = status ? [status] : ((callerId || callerIsAdmin) ? [callerId, callerIsAdmin ? 1 : 0] : []);
     whereClause += ' AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?) AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6 OR p.user_id = ?)';
     whereParams.push(callerId, callerId);
     if (contentSource === 'digest') {
@@ -2106,6 +2110,32 @@ router.delete('/api/problems/:id', async (request, env) => {
   }
 });
 
+// Shared parent-problem visibility guard (A2 launch-security finding 3):
+// POST .../solutions and POST /api/vote each looked up their target by
+// id/user_id only, with no parent-problem visibility check at all -- an
+// unrelated authenticated account could address a guessed private/
+// pending problem id through these mutation routes even though the
+// detail GET correctly hid it. One shared predicate, reused by both, so
+// "pending private to author/admin" means the same thing on every route
+// that touches a problem, not just the ones that read it. Mirrors the
+// exact same rule as the list/detail queries above (status open/approved
+// AND is_public, OR the caller is the owner or an admin). Returns the
+// problem row (or null if it truly does not exist) separately from
+// whether THIS caller may act on it -- callers of this function must
+// still respond with the SAME generic not-found message for both
+// "does not exist" and "exists but not visible", never distinguishing
+// the two to the client.
+async function resolveProblemAccess(env, problemId, callerUser) {
+  const problem = await env.AIHANGOUT_DB
+    .prepare('SELECT id, user_id, status, is_public, category, spof_indicators FROM problems WHERE id = ?')
+    .bind(problemId).first();
+  if (!problem) return { problem: null, allowed: false };
+  const isOwnerOrAdmin = !!callerUser && (callerUser.id === problem.user_id || !!callerUser.is_admin);
+  const isPubliclyVisible = (problem.is_public === null || problem.is_public === undefined || !!problem.is_public)
+    && (problem.status === 'open' || problem.status === 'approved');
+  return { problem, allowed: isOwnerOrAdmin || isPubliclyVisible };
+}
+
 // Individual problem API
 router.get('/api/problems/:id', async (request, env) => {
   try {
@@ -2115,7 +2145,14 @@ router.get('/api/problems/:id', async (request, env) => {
     const callerUser = await authenticate(request, env).catch(() => null);
     const callerId = callerUser?.id || null;
 
-    // Get problem with full details — RLS: only if public OR owner
+    // Get problem with full details — RLS: only if public OR owner/admin.
+    // A2 launch-security finding 2: this WHERE previously checked
+    // is_public/owner only, with no status condition at all -- a
+    // pending_review (or rejected) problem was fully readable by ANY
+    // caller via direct ID even though the list endpoint correctly hid
+    // it. Same "pending private to author/admin" rule as the list query
+    // above, applied here too so the two surfaces agree.
+    const callerIsAdminDetail = !!callerUser?.is_admin;
     const problem = await env.AIHANGOUT_DB
       .prepare(`
         SELECT p.*, u.username, u.ai_agent_type,
@@ -2124,13 +2161,18 @@ router.get('/api/problems/:id', async (request, env) => {
         FROM problems p
         JOIN users u ON p.user_id = u.id
         LEFT JOIN solutions s ON p.id = s.problem_id
-        WHERE p.id = ? AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?)
+        WHERE p.id = ?
+          AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?)
+          AND (p.status IN ('open', 'approved') OR p.user_id = ? OR ? = 1)
         GROUP BY p.id, u.username, u.ai_agent_type
       `)
-      .bind(id, callerId)
+      .bind(id, callerId, callerId, callerIsAdminDetail ? 1 : 0)
       .first();
 
     if (!problem) {
+      // Same generic message whether the problem does not exist at all or
+      // exists but is not visible to this caller -- never let the error
+      // response itself reveal which case it was (A2 finding 3).
       return new Response(JSON.stringify({
         success: false,
         error: 'Problem not found'
@@ -2140,16 +2182,24 @@ router.get('/api/problems/:id', async (request, env) => {
       });
     }
 
-    // Get solutions for this problem
+    // Get solutions for this problem. A2 finding 2 (second half): this
+    // previously returned EVERY solution regardless of moderation state,
+    // even though the creation-time comment nearby claims "AI solutions
+    // are not shown ... until is_verified=TRUE". A pending (unverified)
+    // AI-authored solution is now visible only to its own author, the
+    // parent problem's owner, or an admin -- exactly mirroring the
+    // problem-level visibility rule above. Human-authored solutions are
+    // unaffected (they go live immediately, as before).
     const solutions = await env.AIHANGOUT_DB
       .prepare(`
         SELECT s.*, u.username, u.ai_agent_type
         FROM solutions s
         JOIN users u ON s.user_id = u.id
         WHERE s.problem_id = ?
+          AND (s.solver_type != 'AI' OR s.is_verified = 1 OR s.moderation_approved_at IS NOT NULL OR s.user_id = ? OR ? = 1 OR ? = 1)
         ORDER BY s.upvotes DESC, s.created_at ASC
       `)
-      .bind(id)
+      .bind(id, callerId, callerIsAdminDetail ? 1 : 0, callerId && callerId === problem.user_id ? 1 : 0)
       .all();
 
     // Strip bounty coming-soon disclaimer and normalize category on single problem fetch
@@ -2667,10 +2717,15 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     const codeSnippet = solutionBody.codeSnippet ?? solutionBody.code_snippet;
     const whyExplanation = solutionBody.whyExplanation ?? solutionBody.why_explanation;
 
-    const problemOwner = await env.AIHANGOUT_DB
-      .prepare('SELECT user_id, category, spof_indicators FROM problems WHERE id = ?')
-      .bind(problemId).first();
-    if (!problemOwner) {
+    // A2 launch-security finding 3: this previously only checked the
+    // problem existed (SELECT user_id), never whether THIS caller could
+    // actually see/address it -- an unrelated account could post a
+    // solution onto a guessed private or still-pending problem id even
+    // though the detail GET correctly hid that same problem. Same
+    // generic "Problem not found" either way, so the response itself
+    // never reveals whether the id exists but is just inaccessible.
+    const { problem: problemOwner, allowed: canContribute } = await resolveProblemAccess(env, problemId, user);
+    if (!problemOwner || !canContribute) {
       return new Response(JSON.stringify({ success: false, error: 'Problem not found' }), {
         status: 404,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -2902,10 +2957,12 @@ router.post('/api/problems/:id/vote', async (request, env, ctx) => {
     const targetId = request.params.id;
     const body = await request.json().catch(() => ({}));
     const voteType = body.vote === -1 ? 'down' : 'up';
-    const ownerRow = await env.AIHANGOUT_DB
-      .prepare('SELECT user_id FROM problems WHERE id = ?')
-      .bind(targetId).first();
-    if (!ownerRow) {
+    // A2 launch-security finding 3: this legacy problem-vote route (see
+    // also the generic POST /api/vote above, same shared guard) only
+    // checked that the problem existed, never whether this caller could
+    // see it -- fixed the same way, same generic not-found either way.
+    const { problem: ownerRow, allowed: canVoteOnProblem } = await resolveProblemAccess(env, targetId, user);
+    if (!ownerRow || !canVoteOnProblem) {
       return new Response(JSON.stringify({ success: false, error: 'Problem not found' }), {
         status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
@@ -2994,12 +3051,31 @@ router.post('/api/vote', async (request, env, ctx) => {
     }
     // Verify target exists
     const targetTable = targetType === 'problem' ? 'problems' : 'solutions';
-    const target = await env.AIHANGOUT_DB.prepare(`SELECT id, user_id FROM ${targetTable} WHERE id = ?`).bind(targetId).first();
+    const targetSelect = targetType === 'problem'
+      ? 'SELECT id, user_id FROM problems WHERE id = ?'
+      : 'SELECT id, user_id, problem_id FROM solutions WHERE id = ?';
+    const target = await env.AIHANGOUT_DB.prepare(targetSelect).bind(targetId).first();
     if (!target) {
       return new Response(JSON.stringify({ success: false, error: 'Target not found' }), {
         status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
+
+    // A2 launch-security finding 3: neither branch checked the PARENT
+    // problem's visibility at all -- an unrelated account could vote on
+    // a problem, or on a solution belonging to a problem, that is
+    // private or still pending, even though the detail GET correctly
+    // hides that problem. Same shared guard as the contribution route;
+    // same generic "Target not found" either way (never reveals whether
+    // the target exists but is just inaccessible).
+    const parentProblemId = targetType === 'problem' ? target.id : target.problem_id;
+    const { allowed: canVoteOnTarget } = await resolveProblemAccess(env, parentProblemId, user);
+    if (!canVoteOnTarget) {
+      return new Response(JSON.stringify({ success: false, error: 'Target not found' }), {
+        status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     if (target.user_id === user.id) {
       return new Response(JSON.stringify({ success: false, error: 'You cannot vote on your own content' }), {
         status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -15135,7 +15211,7 @@ router.get('/api/admin/pending-review', async (request, env) => {
       FROM solutions s
       JOIN users u ON s.user_id = u.id
       JOIN problems p ON s.problem_id = p.id
-      WHERE s.solver_type = 'AI' AND s.is_verified = FALSE
+      WHERE s.solver_type = 'AI' AND s.is_verified = FALSE AND s.moderation_approved_at IS NULL
       ORDER BY s.created_at ASC
       LIMIT ?
     `).bind(limit).all()).results || [];
@@ -15191,20 +15267,51 @@ router.post('/api/admin/approve/:content_type/:content_id', async (request, env)
       });
     }
 
+    const parsedId = parseInt(content_id);
+    let result;
     if (content_type === 'problem') {
-      await env.AIHANGOUT_DB.prepare(
+      result = await env.AIHANGOUT_DB.prepare(
         `UPDATE problems SET status = 'approved' WHERE id = ? AND status = 'pending_review'`
-      ).bind(parseInt(content_id)).run();
+      ).bind(parsedId).run();
     } else {
-      await env.AIHANGOUT_DB.prepare(
-        `UPDATE solutions SET is_verified = TRUE WHERE id = ? AND solver_type = 'AI'`
-      ).bind(parseInt(content_id)).run();
+      // A2 launch-security finding 1: this previously set is_verified=TRUE
+      // directly -- the SAME field the dedicated, controlled
+      // POST .../solutions/:id/accept handler uses to mean "a human
+      // confirmed this solution actually works" (with verified_by/
+      // verified_at/verification_type and a solution_verification_events
+      // audit row). This route is pure content moderation (is it fit to
+      // show, not self-authored spam/abuse) -- it must never grant that
+      // stronger claim, and previously could, through an is_admin=true
+      // account of ANY type including a service token (authenticate()
+      // returns synthetic admins for service tokens). Moderation
+      // approval now only records moderation_approved_at/_by (migration
+      // 0017); is_verified/verified_by/verified_at/verification_type are
+      // untouched here and remain settable only by /accept.
+      result = await env.AIHANGOUT_DB.prepare(
+        `UPDATE solutions SET moderation_approved_at = CURRENT_TIMESTAMP, moderation_approved_by = ?
+         WHERE id = ? AND solver_type = 'AI'`
+      ).bind(user.id || null, parsedId).run();
+    }
+
+    // A2 finding 1 (missing-target handling): a nonexistent or already-in-
+    // the-target-state id previously still returned success/"approved"
+    // with no indication nothing actually changed. Report the truth.
+    if (!result.meta || result.meta.changes === 0) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: `No matching pending ${content_type} was found to approve (already approved, wrong id, or wrong content type for this route)`,
+        content_type,
+        content_id: parsedId,
+      }), {
+        status: 404,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     return new Response(JSON.stringify({
       success: true,
       content_type,
-      content_id: parseInt(content_id),
+      content_id: parsedId,
       new_status: 'approved',
       approved_by: user.username,
       approved_at: new Date().toISOString(),
