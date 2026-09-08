@@ -93,7 +93,7 @@ describe('ProfilePage pending-review visibility (A1 coordination: A3 commit 1030
     expect(screen.getByText('Questions (2)')).toBeInTheDocument()
   })
 
-  it('a different authenticated viewer never sees a pending badge or section on someone else\'s profile', async () => {
+  it('a different non-admin authenticated viewer never sees a pending badge or section on someone else\'s profile', async () => {
     useAuthStore.setState({
       user: { id: 999, username: 'someone_else', email: 'y', reputation: 0, aiAgentType: 'human' },
       token: 'fake2',
@@ -101,10 +101,11 @@ describe('ProfilePage pending-review visibility (A1 coordination: A3 commit 1030
     })
     apiGetMock.mockImplementation((url: string) => {
       if (url === '/users/by-username/surface_test_agent') return Promise.resolve({ data: { user: SELF } })
-      // Real backend (A3 1030bc5) would never actually put PENDING in this response for
-      // a non-owner caller (p.user_id = callerId only matches the true owner) -- included
-      // here anyway as a defensive worst-case, to prove the FRONTEND's own badge logic is
-      // independently gated on isOwnProfile and adds no leak of its own even if it were.
+      // Real backend (A3 1030bc5 + 61066d6) would never actually put PENDING in this
+      // response for a non-owner, non-admin caller (`p.user_id = callerId OR ? = 1`
+      // with callerIsAdmin=0 only matches the true owner) -- included here anyway as a
+      // defensive worst-case, to prove the FRONTEND's own badge logic is independently
+      // gated (isOwnProfile || is_admin) and adds no leak of its own even if it were.
       if (url === '/problems') return Promise.resolve({ data: { problems: [APPROVED, PENDING] } })
       return Promise.resolve({ data: {} })
     })
@@ -114,6 +115,25 @@ describe('ProfilePage pending-review visibility (A1 coordination: A3 commit 1030
     await screen.findByText('Approved question')
     expect(screen.queryByText('⏳ Pending review')).not.toBeInTheDocument()
     expect(screen.queryByText(/^Pending review \(\d+\)$/)).not.toBeInTheDocument()
+  })
+
+  it('an admin viewing a DIFFERENT user\'s profile DOES see the pending badge (A3 commit 61066d6 extended the backend bypass to owner-OR-admin)', async () => {
+    useAuthStore.setState({
+      user: { id: 999, username: 'the_admin', email: 'z', reputation: 0, aiAgentType: 'human', is_admin: true },
+      token: 'fake3',
+      isAuthenticated: true,
+    })
+    apiGetMock.mockImplementation((url: string) => {
+      if (url === '/users/by-username/surface_test_agent') return Promise.resolve({ data: { user: SELF } })
+      // This is exactly what the real backend now legitimately returns to an admin
+      // caller for ANY profile, per 61066d6's `OR ? = 1` (callerIsAdmin) addition.
+      if (url === '/problems') return Promise.resolve({ data: { problems: [APPROVED, PENDING] } })
+      return Promise.resolve({ data: {} })
+    })
+
+    renderProfile('surface_test_agent')
+
+    expect(await screen.findByText('⏳ Pending review')).toBeInTheDocument()
   })
 
   it('status persists across a fresh mount -- driven by real response data, not one-time toast/local state', async () => {

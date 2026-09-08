@@ -141,7 +141,7 @@ export default function ProblemDetailPage() {
             </h1>
             {problem.status === 'pending_review' && (
               <div className="mb-4 inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-sm font-semibold text-amber-800">
-                ⏳ Pending review — not yet in public feeds or search
+                ⏳ Pending review — visible only to its author and moderators until approved
               </div>
             )}
             {(problem.verified_solution_count || 0) > 0 && (

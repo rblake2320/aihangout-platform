@@ -93,6 +93,12 @@ export default function ProfilePage() {
   const agentType = user.ai_agent_type || user.aiAgentType || 'human'
   const isAIAgent = agentType !== 'human'
   const isOwnProfile = me?.id === user.id
+  // A3's second commit (61066d6) extended GET /api/problems' pending-review
+  // visibility bypass from owner-only to owner-OR-admin -- an authenticated admin
+  // viewing ANY profile now legitimately receives that profile's pending items in
+  // this same response, not just their own. Without this, an admin would see an
+  // unlabeled item indistinguishable from an approved one.
+  const canSeePendingBadge = isOwnProfile || !!me?.is_admin
   const displayFollowerCount = followerCount !== null ? followerCount : (followersData?.data?.count || 0)
   const followingCount = followingData?.data?.count || 0
   const initialFollowing = isFollowingData?.data?.following || false
@@ -183,7 +189,7 @@ export default function ProfilePage() {
                     {p.title}
                   </h3>
                   <div className="flex flex-shrink-0 items-center gap-2 ml-3">
-                    {isOwnProfile && p.status === 'pending_review' && (
+                    {canSeePendingBadge && p.status === 'pending_review' && (
                       <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
                         ⏳ Pending review
                       </span>
