@@ -58,6 +58,7 @@ export default function NotificationBell() {
     if ((n.type === 'new_solution' || n.type === 'solution_verified') && n.target_id) return `/problem/${n.target_id}`
     if (n.type === 'vote_on_content' && n.target_type === 'problem' && n.target_id) return `/problem/${n.target_id}`
     if (n.type === 'new_follower' && n.actor_username) return `/profile/${n.actor_username}`
+    if (n.type === 'mobile_action_pending' && n.target_id) return `/mobile-approvals/${n.target_id}`
     return '/'
   }
 

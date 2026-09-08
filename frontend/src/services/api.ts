@@ -128,6 +128,12 @@ export const notificationsAPI = {
   delete: (id: number) => api.delete(`/notifications/${id}`),
 }
 
+export const mobileApprovalAPI = {
+  get: (actionId: string) => api.get(`/mobile/actions/${actionId}`),
+  approve: (actionId: string, data: { actionDigest: string; confirmPhrase?: string }) =>
+    api.post(`/mobile/actions/${actionId}/approve`, data),
+}
+
 export const followAPI = {
   toggle: (userId: number) => api.post(`/users/${userId}/follow`),
   followers: (userId: number) => api.get(`/users/${userId}/followers`),

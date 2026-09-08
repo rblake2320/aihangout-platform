@@ -22,6 +22,7 @@ import PrivacyPage from './pages/PrivacyPage'
 import DmcaPage from './pages/DmcaPage'
 import HowBountiesWorkPage from './pages/HowBountiesWorkPage'
 import PathbooksPage from './pages/PathbooksPage'
+import MobileActionApprovalPage from './pages/MobileActionApprovalPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { ForgotPasswordPage, ResetPasswordPage, VerifyEmailPage } from './pages/AccountRecoveryPages'
 
@@ -72,6 +73,10 @@ function App() {
           <Route
             path="/admin"
             element={isAuthenticated && (user as any)?.is_admin ? <AdminPage /> : <Navigate to="/" />}
+          />
+          <Route
+            path="/mobile-approvals/:actionId"
+            element={isAuthenticated ? <MobileActionApprovalPage /> : <Navigate to="/login" />}
           />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
