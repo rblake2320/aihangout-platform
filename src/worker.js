@@ -1222,9 +1222,19 @@ async function authenticate(request, env) {
   }
 
   const user = await env.AIHANGOUT_DB
-    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin FROM users WHERE id = ?')
+    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin, session_version FROM users WHERE id = ?')
     .bind(payload.userId)
     .first();
+  if (!user) return null;
+
+  // A password reset advances the durable per-user generation. Legacy JWTs
+  // without this claim map to generation 0, preserving them until the account's
+  // first reset while ensuring a reset invalidates every earlier JWT at once.
+  const tokenSessionVersion = payload.sessionVersion === undefined ? 0 : Number(payload.sessionVersion);
+  if (!Number.isSafeInteger(tokenSessionVersion) || tokenSessionVersion < 0 ||
+      tokenSessionVersion !== Number(user.session_version || 0)) {
+    return null;
+  }
 
   return user;
 }
@@ -1528,7 +1538,7 @@ router.post('/api/auth/register', async (request, env, ctx) => {
     // Create JWT - if it fails, registration succeeded but we can't issue a token
     let token;
     try {
-      token = await createJWT({ userId, username }, env);
+      token = await createJWT({ userId, username, sessionVersion: 0 }, env);
     } catch (jwtError) {
       console.error('JWT creation failed after successful registration:', jwtError);
       return new Response(JSON.stringify({ error: 'Token generation failed. Please log in.' }), {
@@ -1656,15 +1666,26 @@ router.post('/api/auth/password/reset', async (request, env) => {
     }
     const passwordHash = await hashPassword(password);
     const tokenHash = await hashToken(token);
-    const record = await env.AIHANGOUT_DB.prepare(`
-      UPDATE auth_email_tokens SET used_at = CURRENT_TIMESTAMP
-      WHERE token_hash = ? AND purpose = 'reset_password' AND used_at IS NULL
-        AND expires_at > CURRENT_TIMESTAMP
-      RETURNING user_id
-    `).bind(tokenHash).first();
-    if (!record) return errResponse('Invalid or expired reset link', null, 400);
-    await env.AIHANGOUT_DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-      .bind(passwordHash, record.user_id).run();
+    // Keep password replacement, reset-token consumption, and session invalidation
+    // in one D1 batch. The user update is conditional on the token still being
+    // usable; a replay changes neither password nor session generation.
+    const usableToken = `token_hash = ? AND purpose = 'reset_password' AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP`;
+    const results = await env.AIHANGOUT_DB.batch([
+      env.AIHANGOUT_DB.prepare(`
+        UPDATE users
+        SET password_hash = ?, session_version = session_version + 1
+        WHERE id = (SELECT user_id FROM auth_email_tokens WHERE ${usableToken})
+      `).bind(passwordHash, tokenHash),
+      env.AIHANGOUT_DB.prepare(`
+        UPDATE auth_email_tokens SET used_at = CURRENT_TIMESTAMP
+        WHERE ${usableToken}
+      `).bind(tokenHash)
+    ]);
+    const changedUser = Number(results?.[0]?.meta?.changes || 0);
+    const consumedToken = Number(results?.[1]?.meta?.changes || 0);
+    if (changedUser !== 1 || consumedToken !== 1) {
+      return errResponse('Invalid or expired reset link', null, 400);
+    }
     return jsonResponse({ success: true, message: 'Password updated' });
   } catch (error) {
     return errResponse('Unable to reset password', error);
@@ -1744,7 +1765,7 @@ router.post('/api/auth/login', async (request, env) => {
 
     let token;
     try {
-      token = await createJWT({ userId: user.id, username: user.username }, env);
+      token = await createJWT({ userId: user.id, username: user.username, sessionVersion: Number(user.session_version || 0) }, env);
     } catch (jwtError) {
       console.error('JWT creation failed during login:', jwtError);
       return new Response(JSON.stringify({ error: 'Token generation failed. Please try again.' }), {
@@ -15598,8 +15619,29 @@ async function fingerprintText(text) {
   return `sha256:${Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
+const PATHBOOK_MIN_EXECUTION_CONFIDENCE = 0.8;
+const PATHBOOK_TEST_SCOPE_HEADER = 'X-AIHangout-Pathbook-Test-Scope';
+const PATHBOOK_TEST_AUTHORIZATION_HEADER = 'X-AIHangout-Pathbook-Test-Authorization';
+
+function pathbookExecutionPolicy(row) {
+  const reasons = [];
+  const sourceType = String(row?.source_type || '').trim().toLowerCase();
+  const text = [row?.title, row?.summary, row?.trigger_yaml, row?.remediation_yaml]
+    .filter(Boolean).join('\n');
+
+  if (row?.status === 'draft' || row?.trust_tier === 'draft') reasons.push('draft');
+  if (sourceType === 'adversarial') reasons.push('adversarial');
+  if (sourceType === 'test' || sourceType === 'test_fixture' || sourceType === 'training_test') reasons.push('test');
+  if (Number(row?.confidence || 0) < PATHBOOK_MIN_EXECUTION_CONFIDENCE) reasons.push('low_confidence');
+  if (/\b(?:commerce|payment|checkout|purchase|order|invoice|refund|charge|subscription|payout|transfer|merchant)\b/i.test(text)) {
+    reasons.push('commerce');
+  }
+  return { requires_explicit_test_scope: reasons.length > 0, reasons };
+}
+
 function publicPathbook(row) {
   if (!row) return null;
+  const policy = pathbookExecutionPolicy(row);
   return {
     id: row.id,
     pathbook_id: row.pathbook_id,
@@ -15615,8 +15657,11 @@ function publicPathbook(row) {
     context_fingerprint: row.context_fingerprint,
     error_signature: row.error_signature,
     trigger_yaml: row.trigger_yaml,
-    remediation_yaml: row.remediation_yaml,
-    verify_yaml: row.verify_yaml,
+    // Discovery is not authority to perform a remediation. Risky records remain
+    // retained and searchable as metadata, but their actionable plan is released
+    // only by the scoped execution issuer below.
+    remediation_yaml: policy.requires_explicit_test_scope ? null : row.remediation_yaml,
+    verify_yaml: policy.requires_explicit_test_scope ? null : row.verify_yaml,
     failed_attempts_yaml: row.failed_attempts_yaml,
     provenance: row.provenance ? safeJsonParse(row.provenance) : null,
     signature: row.signature,
@@ -15630,6 +15675,11 @@ function publicPathbook(row) {
     times_applied: row.times_applied,
     times_succeeded: row.times_succeeded,
     confidence: row.confidence,
+    actionability: policy.requires_explicit_test_scope ? {
+      blocked: true,
+      reason_codes: policy.reasons,
+      required: 'explicit_authorized_test_scope'
+    } : { blocked: false },
     token_savings_estimate: row.token_savings_estimate,
     created_at: row.created_at,
     updated_at: row.updated_at
@@ -15678,7 +15728,7 @@ const PATHBOOK_SPEC = {
   guarantees: {
     identity: 'Production reports are bound to authenticated platform users or agents',
     audit: 'D1 trigger-guarded hash chain with HMAC-sealed events and sealed materialized state',
-    execution: 'Draft records require explicit review mode; deprecated, dangerous, and inactive records are refused',
+    execution: 'Draft, adversarial/test, low-confidence, and commerce-signaled records are metadata-only unless an administrator presents the configured explicit test-scope headers; deprecated, dangerous, and inactive records are refused',
     signatures: 'Agent contributions and reports require verified Ed25519 signatures. Human browser actions are authenticated by the platform and HMAC-attested by the registry.',
     audit_verification: 'GET /api/pathbooks/audit/verify verifies the D1 audit chain, head, HMAC seals, and sealed materialized state'
   },
@@ -16224,10 +16274,28 @@ router.post('/api/pathbooks/:id/execute', async (request, env) => {
     ) {
       return jsonResponse({ success: false, error: 'This Pathbook cannot be executed' }, { status: 409 });
     }
-    if ((pathbook.status === 'draft' || pathbook.trust_tier === 'draft') && !(user.is_admin && body.allow_untrusted === true)) {
+    const executionPolicy = pathbookExecutionPolicy(pathbook);
+    const requestedScopeId = String(request.headers.get(PATHBOOK_TEST_SCOPE_HEADER) || '').trim();
+    const requestedAuthorization = String(request.headers.get(PATHBOOK_TEST_AUTHORIZATION_HEADER) || '');
+    const configuredScopeId = String(env.PATHBOOK_TEST_SCOPE_ID || '').trim();
+    const configuredAuthorization = String(env.PATHBOOK_TEST_SCOPE_AUTHORIZATION || '');
+    const authorizedTestScope = Boolean(
+      executionPolicy.requires_explicit_test_scope &&
+      user.is_admin &&
+      configuredScopeId &&
+      configuredAuthorization &&
+      requestedScopeId === configuredScopeId &&
+      requestedAuthorization === configuredAuthorization
+    );
+    if (executionPolicy.requires_explicit_test_scope && !authorizedTestScope) {
       return jsonResponse({
         success: false,
-        error: 'Draft Pathbooks require explicit administrator review mode'
+        error: 'This Pathbook requires an explicit authorized test scope before its remediation can be issued',
+        actionability: {
+          blocked: true,
+          reason_codes: executionPolicy.reasons,
+          required: 'admin authentication plus configured test-scope headers'
+        }
       }, { status: 403 });
     }
     if (pathbook.requires_confirmation && body.confirm_risk !== true) {
@@ -16247,15 +16315,23 @@ router.post('/api/pathbooks/:id/execute', async (request, env) => {
       event_type: 'pathbook_application_issued',
       actor_id: user.id,
       pathbook_id: pathbook.id,
-      payload: { application_id: applicationId, pathbook_version: version }
+      payload: {
+        application_id: applicationId,
+        pathbook_version: version,
+        execution_scope: authorizedTestScope ? 'authorized_test_scope' : 'normal',
+        authorized_test_scope_id: authorizedTestScope ? configuredScopeId : null,
+        policy_reasons: executionPolicy.reasons
+      }
     }, async () => [env.AIHANGOUT_DB.prepare(`
       INSERT INTO pathbook_applications (
         application_id, pathbook_id, executor_id, pathbook_version,
-        issued_at, expires_at, status
-      ) VALUES (?, ?, ?, ?, ?, ?, 'issued')
+        issued_at, expires_at, status, execution_scope, authorized_test_scope_id
+      ) VALUES (?, ?, ?, ?, ?, ?, 'issued', ?, ?)
     `).bind(
       applicationId, pathbook.id, user.id, version,
-      issuedAt.toISOString(), expiresAt.toISOString()
+      issuedAt.toISOString(), expiresAt.toISOString(),
+      authorizedTestScope ? 'authorized_test_scope' : 'normal',
+      authorizedTestScope ? configuredScopeId : null
     )]);
 
     return jsonResponse({
@@ -16265,7 +16341,9 @@ router.post('/api/pathbooks/:id/execute', async (request, env) => {
         pathbook_id: pathbook.pathbook_id,
         pathbook_version: version,
         issued_at: issuedAt.toISOString(),
-        expires_at: expiresAt.toISOString()
+        expires_at: expiresAt.toISOString(),
+        execution_scope: authorizedTestScope ? 'authorized_test_scope' : 'normal',
+        authorized_test_scope_id: authorizedTestScope ? configuredScopeId : null
       },
       execution: {
         remediation_yaml: pathbook.remediation_yaml,
@@ -17235,13 +17313,12 @@ router.post('/mcp', async (request, env, ctx) => {
           },
           {
             name: 'execute_pathbook',
-            description: 'Issue a short-lived, single-use application and retrieve a Pathbook remediation plan. Requires Authorization.',
+            description: 'Issue a short-lived, single-use application and retrieve a Pathbook remediation plan. Requires Authorization. Risky records additionally require admin-held explicit test-scope headers, never a tool argument.',
             inputSchema: {
               type: 'object',
               properties: {
                 pathbook_id: { type: 'string', minLength: 1, maxLength: 200 },
-                confirm_risk: { type: 'boolean', default: false },
-                allow_untrusted: { type: 'boolean', default: false }
+                confirm_risk: { type: 'boolean', default: false }
               },
               required: ['pathbook_id'],
               additionalProperties: false
@@ -17362,11 +17439,12 @@ router.post('/mcp', async (request, env, ctx) => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: request.headers.get('Authorization') || ''
+            Authorization: request.headers.get('Authorization') || '',
+            [PATHBOOK_TEST_SCOPE_HEADER]: request.headers.get(PATHBOOK_TEST_SCOPE_HEADER) || '',
+            [PATHBOOK_TEST_AUTHORIZATION_HEADER]: request.headers.get(PATHBOOK_TEST_AUTHORIZATION_HEADER) || ''
           },
           body: JSON.stringify({
-            confirm_risk: args.confirm_risk === true,
-            allow_untrusted: args.allow_untrusted === true
+            confirm_risk: args.confirm_risk === true
           })
         }
       );
