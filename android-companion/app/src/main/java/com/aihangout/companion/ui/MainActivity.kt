@@ -71,6 +71,10 @@ class MainActivity : AppCompatActivity() {
         val toggleDiagnosticsButton = Button(this).apply { text = "Toggle companion diagnostics preference (manual)" }
         val askAiButton = Button(this).apply { text = "Ask AI for help (backend model diagnosis -> web approval)" }
         val refreshButton = Button(this).apply { text = "Refresh last result status (GET only)" }
+        val cameraNotesButton = Button(this).apply { text = "Camera notes (on-device OCR, private)" }
+        cameraNotesButton.setOnClickListener {
+            startActivity(android.content.Intent(this, CameraNotesActivity::class.java))
+        }
         statusView = TextView(this).apply {
             tokenStore.repairProof?.let { statusLog.append(it) }
             val initial = tokenStore.lastResultSnapshot?.let { com.aihangout.companion.data.ResultSnapshot.fromJson(it).render() }
@@ -116,6 +120,7 @@ class MainActivity : AppCompatActivity() {
             addView(runButton)
             addView(archiveButton)
             addView(refreshButton)
+            addView(cameraNotesButton)
             addView(statusView)
         }
         setContentView(ScrollView(this).apply { addView(layout) })
