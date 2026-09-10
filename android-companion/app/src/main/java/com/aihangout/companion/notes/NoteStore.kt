@@ -70,13 +70,29 @@ class NoteStore(private val dir: File) {
         val target = fileFor(id)
         if (target.exists()) throw IllegalStateException("note id already exists")
         val tmp = File(dir, "$id.json.tmp")
-        tmp.writeText(note.toJson().toString(), Charsets.UTF_8)
+        val bytes = note.toJson().toString().toByteArray(Charsets.UTF_8)
+        java.io.FileOutputStream(tmp).use { out ->
+            out.write(bytes)
+            out.flush()
+            out.fd.sync() // durable before the rename makes it visible (crash / power loss safe)
+        }
         if (!tmp.renameTo(target)) {
             // Windows/exotic FS fallback: copy then delete; still never leaves a partial target.
-            target.writeText(tmp.readText(Charsets.UTF_8), Charsets.UTF_8)
+            target.writeBytes(tmp.readBytes())
             tmp.delete()
         }
         return note
+    }
+
+    /**
+     * Remove `.json.tmp` leftovers from a save interrupted before its rename.
+     * They are never read as notes (list/load only see `.json`), so this is
+     * hygiene, not recovery: an interrupted save produced no note by design.
+     * Returns how many were removed.
+     */
+    fun sweepStaleTemp(): Int {
+        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".json.tmp") } ?: return 0
+        return files.count { it.delete() }
     }
 
     /** All readable notes, newest first. Corrupt files are ignored, not deleted. */

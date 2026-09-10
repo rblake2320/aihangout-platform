@@ -16,6 +16,7 @@ import com.aihangout.companion.notes.CameraNote
 import com.aihangout.companion.notes.CameraNoteDraft
 import com.aihangout.companion.notes.MlKitTextRecognizer
 import com.aihangout.companion.notes.NoteStore
+import com.aihangout.companion.notes.NoteText
 import com.aihangout.companion.notes.TextRecognizer
 import java.io.File
 import java.security.MessageDigest
@@ -32,6 +33,13 @@ import java.util.Locale
  * cache file exposed only through this app's FileProvider; after recognition
  * or cancel/discard the image file is deleted -- only the text is kept.
  * No CAMERA permission is declared or requested (see manifest comment).
+ *
+ * Recreation (rotation, or the OS killing this process while the camera app is
+ * in front -- the common case on low-memory phones): the pending capture file
+ * name and the draft are kept in the saved-instance Bundle, so the camera result
+ * delivered to the recreated Activity still binds to the right file and the
+ * right draft, and an edited-but-unsaved text survives rotation. Capture files
+ * that belong to no live draft are swept on create so nothing lingers in cache.
  */
 class CameraNotesActivity : AppCompatActivity() {
 
@@ -48,12 +56,17 @@ class CameraNotesActivity : AppCompatActivity() {
     private var pendingImage: File? = null
 
     private val takePicture = registerForActivityResult(ActivityResultContracts.TakePicture()) { captured ->
+        // If the process died while the camera app was open, onCreate has already
+        // restored pendingImage + the AwaitingCapture draft from the Bundle. If even
+        // that is missing (Bundle lost), fall back to a fresh AwaitingCapture so the
+        // result is classified instead of crashing on an out-of-state transition.
+        if (draft.state !is CameraNoteDraft.State.AwaitingCapture) draft.restore(AWAITING_SNAPSHOT)
         val image = pendingImage
         val sha = if (captured && image != null && image.isFile && image.length() > 0) sha256(image) else null
         draft.captureResult(captured = sha != null, imageSha256 = sha)
         if (sha == null) {
             image?.delete(); pendingImage = null
-            status("Capture cancelled -- no note created.")
+            status(if (captured) "Capture could not be read -- no note created." else "Capture cancelled -- no note created.")
             render(); return@registerForActivityResult
         }
         draft.startRecognition()
@@ -61,6 +74,7 @@ class CameraNotesActivity : AppCompatActivity() {
         render()
         recognizer.recognize(image!!) { result ->
             image.delete(); pendingImage = null // photo is never retained
+            if (draft.state !is CameraNoteDraft.State.Recognizing) { render(); return@recognize } // discarded meanwhile
             result.fold(
                 onSuccess = { text ->
                     draft.recognized(recognizer.engine, text)
@@ -125,13 +139,55 @@ class CameraNotesActivity : AppCompatActivity() {
             addView(viewer)
         }
         setContentView(ScrollView(this).apply { addView(layout) })
+
+        // --- recreation: restore before any camera result can be delivered ---
+        val swept = store.sweepStaleTemp()
+        restoreFrom(savedInstanceState)
+        val orphans = sweepOrphanCaptures()
+        if (swept > 0 || orphans > 0) status("Cleaned up: $orphans stray capture file(s), $swept interrupted save(s). Nothing was saved from them.")
         render()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        // The draft's own snapshot is the source of truth for what is in flight; the
+        // EditText is read here so the human's latest keystrokes travel with it.
+        if (draft.state is CameraNoteDraft.State.Recognized) draft.edit(textInput.text.toString())
+        outState.putString(KEY_DRAFT, draft.snapshot())
+        outState.putString(KEY_PENDING_IMAGE, pendingImage?.name)
+    }
+
+    private fun restoreFrom(saved: Bundle?) {
+        if (saved == null) return
+        draft.restore(saved.getString(KEY_DRAFT)) // malformed -> Idle, never throws
+        val name = saved.getString(KEY_PENDING_IMAGE)
+        pendingImage = if (name != null && CAPTURE_NAME_RE.matches(name)) File(captureDir(), name) else null
+        when (val s = draft.state) {
+            is CameraNoteDraft.State.AwaitingCapture -> {
+                if (pendingImage == null) { draft.permissionDenied(); status("Capture state lost -- no note created.") }
+                else status("Waiting for the camera app...")
+            }
+            is CameraNoteDraft.State.Recognized -> {
+                pendingImage = null
+                textInput.setText(s.text)
+                status("Restored your unsaved draft (${s.text.length} chars). Edit it, then Save.")
+            }
+            else -> pendingImage = null
+        }
+    }
+
+    /** Delete capture files that belong to no live capture (left by a process death). Returns the count. */
+    private fun sweepOrphanCaptures(): Int {
+        val keep = pendingImage?.name
+        val files = captureDir().listFiles { f -> f.isFile && f.name != keep } ?: return 0
+        return files.count { it.delete() }
+    }
+
+    private fun captureDir(): File = File(cacheDir, "camera-notes-capture").apply { mkdirs() }
+
     private fun startCapture() {
         if (!draft.startCapture()) { status("Busy: finish or discard the current draft first."); return }
-        val dir = File(cacheDir, "camera-notes-capture").apply { mkdirs() }
-        val image = File(dir, "capture-${System.currentTimeMillis()}.jpg")
+        val image = File(captureDir(), "capture-${System.currentTimeMillis()}.jpg")
         pendingImage = image
         val uri = FileProvider.getUriForFile(this, "${BuildConfig.APPLICATION_ID}.camera-notes.fileprovider", image)
         try {
@@ -179,7 +235,7 @@ class CameraNotesActivity : AppCompatActivity() {
         val fresh = store.load(note.id) ?: note
         viewer.text = "Note ${fresh.id}\nsaved ${fmt(fresh.createdAtEpochMs)} via ${fresh.ocrEngine}" +
             (fresh.sourceImageSha256?.let { "\nsource image sha256 $it" } ?: "") +
-            (if (fresh.truncated) "\n(text was truncated at ${com.aihangout.companion.notes.NoteText.MAX_CHARS} chars)" else "") +
+            (if (fresh.truncated) "\n(text was truncated at ${NoteText.MAX_CHARS} chars)" else "") +
             "\n\n${fresh.text}"
     }
 
@@ -194,5 +250,12 @@ class CameraNotesActivity : AppCompatActivity() {
             while (true) { val n = input.read(buf); if (n < 0) break; md.update(buf, 0, n) }
         }
         return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    companion object {
+        private const val KEY_DRAFT = "camera_notes_draft"
+        private const val KEY_PENDING_IMAGE = "camera_notes_pending_image"
+        private val CAPTURE_NAME_RE = Regex("^capture-[0-9]{1,20}\\.jpg$")
+        private const val AWAITING_SNAPSHOT = "{\"schema\":\"${CameraNoteDraft.SNAPSHOT_SCHEMA}\",\"kind\":\"awaiting\"}"
     }
 }

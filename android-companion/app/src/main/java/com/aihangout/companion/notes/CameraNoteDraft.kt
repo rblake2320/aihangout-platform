@@ -89,4 +89,46 @@ class CameraNoteDraft(private val store: NoteStore) {
             else -> State.NoNote("discarded by the user")
         }
     }
+
+    /**
+     * Recreation support (rotation / process death while the camera app is open
+     * or while the human is editing). Only the states that carry unsaved human
+     * work or an in-flight capture are snapshotted; everything else restores to
+     * Idle. Pure JSON so the round-trip is unit-tested.
+     */
+    fun snapshot(): String {
+        val o = org.json.JSONObject().put("schema", SNAPSHOT_SCHEMA)
+        when (val s = state) {
+            is State.AwaitingCapture -> o.put("kind", "awaiting")
+            is State.Recognized -> o.put("kind", "recognized").put("sha", s.imageSha256).put("engine", s.engine).put("ocrText", s.ocrText).put("text", s.text)
+            else -> o.put("kind", "idle")
+        }
+        return o.toString()
+    }
+
+    /** Restore from [snapshot]; malformed or unknown input is contained and yields Idle (never throws). */
+    fun restore(json: String?) {
+        state = try {
+            val o = org.json.JSONObject(json ?: "")
+            if (o.optString("schema") != SNAPSHOT_SCHEMA) State.Idle
+            else when (o.optString("kind")) {
+                "awaiting" -> State.AwaitingCapture
+                "recognized" -> {
+                    val sha = o.getString("sha"); val engine = o.getString("engine")
+                    val ocr = NoteText.normalize(o.getString("ocrText")).text
+                    val text = o.getString("text")
+                    if (!SHA256_RE.matches(sha) || engine.isBlank() || text.length > NoteText.MAX_CHARS * 2) State.Idle
+                    else State.Recognized(sha, engine, ocr, text, edited = text != ocr)
+                }
+                else -> State.Idle
+            }
+        } catch (e: Exception) {
+            State.Idle
+        }
+    }
+
+    companion object {
+        const val SNAPSHOT_SCHEMA = "aihangout-camera-draft-v1"
+        val SHA256_RE = Regex("^[0-9a-f]{64}$")
+    }
 }
