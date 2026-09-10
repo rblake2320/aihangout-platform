@@ -125,7 +125,7 @@ class AihangoutApiTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(
             JSONObject().put("success", false).put("error", "something went wrong server-side").toString()
         ))
-        val ex = assertThrows(AihangoutApiException::class.java) {
+        val ex = assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
             api.getAction("jwt", "act-1")
         }
         assertTrue(ex.message!!.contains("something went wrong server-side"))
@@ -134,7 +134,7 @@ class AihangoutApiTest {
     @Test
     fun `malformedSuccessMustRefuse -- a non-JSON 2xx body is refused, never silently treated as empty success`() {
         server.enqueue(MockResponse().setResponseCode(200).setBody("not json at all"))
-        assertThrows(AihangoutApiException::class.java) {
+        assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
             api.getAction("jwt", "act-1")
         }
     }
@@ -160,5 +160,40 @@ class AihangoutApiTest {
         assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
             api.reportResult("jwt", "act-1", "dev-1", "idem-1", "executed", null)
         }
+    }
+
+    @Test
+    fun `successStringMustNotBeCredited -- a 2xx body whose success is the STRING true is refused`() {
+        // The value here is the String "true", not the JSON boolean literal;
+        // optBoolean() used to coerce it to true and credit the call.
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            JSONObject().put("success", "true").put("actionId", "act-1").toString()
+        ))
+        val ex = assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.reportResult("jwt", "act-1", "dev-1", "idem-1", "executed", null)
+        }
+        assertTrue(ex.message!!.contains("HTTP 200"))
+        assertTrue(ex.message!!.contains("not a literal boolean true"))
+    }
+
+    @Test
+    fun `successNumericMustNotBeCredited -- a 2xx body whose success is the number 1 is refused`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            JSONObject().put("success", 1).put("actionId", "act-1").toString()
+        ))
+        val ex = assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.reportResult("jwt", "act-1", "dev-1", "idem-1", "executed", null)
+        }
+        assertTrue(ex.message!!.contains("HTTP 200"))
+        assertTrue(ex.message!!.contains("not a literal boolean true"))
+    }
+
+    @Test
+    fun `successLiteralBooleanIsCredited -- control a 2xx body with a real boolean true is accepted`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            JSONObject().put("success", true).put("actionId", "act-1").toString()
+        ))
+        val result = api.reportResult("jwt", "act-1", "dev-1", "idem-1", "executed", null)
+        assertEquals("act-1", result.getString("actionId"))
     }
 }

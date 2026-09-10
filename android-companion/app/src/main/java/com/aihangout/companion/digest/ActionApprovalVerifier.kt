@@ -35,6 +35,15 @@ object ActionApprovalVerifier {
         val intent = actionReadback.optJSONObject("intent")
             ?: throw RefusedException("Action readback has no intent object -- refusing to execute")
 
+        // A2 review finding (2026-09-10): a readback that already carries a result
+        // object means this action ALREADY executed. Refuse regardless of status, and
+        // before any other check, so both callers (polling path + restart branch)
+        // are covered by this shared gate. optJSONObject returns null for an absent
+        // key AND for JSON null, so a not-yet-reported result still passes here.
+        if (actionReadback.optJSONObject("result") != null) {
+            throw RefusedException("A result has already been reported for this action -- it already executed; refusing to execute it again")
+        }
+
         val actualActionId = intent.optString("action_id")
         if (actualActionId != expected.actionId) {
             throw RefusedException("Action readback is for actionId='$actualActionId', expected '${expected.actionId}' -- refusing to execute")

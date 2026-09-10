@@ -5,6 +5,7 @@ import com.aihangout.companion.digest.ActionApprovalVerifier.ExpectedAction
 import com.aihangout.companion.digest.ActionDigest
 import org.json.JSONObject
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 
@@ -23,7 +24,19 @@ class ActionApprovalVerifierTest {
         riskTier = riskTier, targetDescription = targetDescription, createdDigest = digest
     )
 
-    private fun readback(overrides: Map<String, Any?> = emptyMap(), includeApproval: Boolean = true): JSONObject {
+    /** The server's readback `result` object for an action that has already executed. */
+    private val executedResult = JSONObject()
+        .put("result_status", "executed")
+        .put("result_payload_hash", "sha256:done")
+        .put("reported_at", "2026-09-10T10:00:00Z")
+
+    /** [result] is put under the `result` key verbatim when non-null -- pass a JSONObject
+     * for an executed action, or JSONObject.NULL to model the server's explicit JSON null. */
+    private fun readback(
+        overrides: Map<String, Any?> = emptyMap(),
+        includeApproval: Boolean = true,
+        result: Any? = null
+    ): JSONObject {
         val intent = JSONObject()
             .put("action_id", overrides["action_id"] ?: actionId)
             .put("status", overrides["status"] ?: "approved")
@@ -36,6 +49,9 @@ class ActionApprovalVerifierTest {
         val obj = JSONObject().put("intent", intent)
         if (includeApproval) {
             obj.put("approval", JSONObject().put("approved_digest", overrides["approved_digest"] ?: digest))
+        }
+        if (result != null) {
+            obj.put("result", result)
         }
         return obj
     }
@@ -118,5 +134,39 @@ class ActionApprovalVerifierTest {
         assertThrows(ActionApprovalVerifier.RefusedException::class.java) {
             ActionApprovalVerifier.verifyApprovedForExecution(expected, JSONObject())
         }
+    }
+
+    // --- A2 finding (2026-09-10): a readback carrying a result already executed ---
+
+    @Test
+    fun completedReadbackMustNotAuthorizeAnotherRead() {
+        // Otherwise fully valid approved readback; only the presence of `result` differs.
+        val ex = assertThrows(ActionApprovalVerifier.RefusedException::class.java) {
+            ActionApprovalVerifier.verifyApprovedForExecution(expected, readback(result = executedResult))
+        }
+        assertTrue("wrong refusal reason: ${ex.message}", ex.message!!.contains("A result has already been reported"))
+    }
+
+    @Test
+    fun unreportedApprovalStillAuthorizesExactlyOnce() {
+        // Control for the JSON-null case: the server serialises a not-yet-reported result as
+        // `"result": null`, i.e. the key IS present. Verify (not assume) that org.json's
+        // optJSONObject treats JSONObject.NULL as "no result" and the verifier lets it through.
+        val rb = readback(result = JSONObject.NULL)
+        assertTrue("fixture must carry an explicit result key", rb.has("result"))
+        assertTrue("fixture's result must be JSON null, not an object", rb.isNull("result"))
+        ActionApprovalVerifier.verifyApprovedForExecution(expected, rb) // must not throw
+    }
+
+    @Test
+    fun resultPresentIsRefusedEvenBeforeOtherChecksWouldPass() {
+        // A wrong device_id is refused on its own, so the message is what proves the
+        // result check fired first and is unconditional on every other field.
+        val ex = assertThrows(ActionApprovalVerifier.RefusedException::class.java) {
+            ActionApprovalVerifier.verifyApprovedForExecution(
+                expected, readback(mapOf("device_id" to "dev-ATTACKER"), result = executedResult)
+            )
+        }
+        assertTrue("wrong refusal reason: ${ex.message}", ex.message!!.contains("A result has already been reported"))
     }
 }

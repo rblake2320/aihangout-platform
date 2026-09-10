@@ -3,6 +3,14 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+val aihangoutBaseUrl = providers.gradleProperty("aihangoutBaseUrl")
+    .orElse("https://aihangout-staging.rblake2320.workers.dev")
+    .get()
+if (!(aihangoutBaseUrl.startsWith("https://") ||
+      aihangoutBaseUrl.matches(Regex("^http://127\\.0\\.0\\.1(:[0-9]{1,5})?(/.*)?$")))) {
+    throw GradleException("aihangoutBaseUrl must be HTTPS or loopback HTTP")
+}
+
 android {
     namespace = "com.aihangout.companion"
     compileSdk = 35
@@ -15,10 +23,7 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        // AIHangout backend base URL -- staging by default for this first
-        // build-and-test pass; never production without an explicit,
-        // separate build variant decision.
-        buildConfigField("String", "AIHANGOUT_BASE_URL", "\"https://aihangout-staging.rblake2320.workers.dev\"")
+        buildConfigField("String", "AIHANGOUT_BASE_URL", "\"$aihangoutBaseUrl\"")
     }
 
     buildTypes {

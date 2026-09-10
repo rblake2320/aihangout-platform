@@ -1,6 +1,7 @@
 package com.aihangout.companion.data
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
@@ -31,18 +32,27 @@ class TokenStore(context: Context) {
 
     var deviceId: String?
         get() = prefs.getString("device_id", null)
-        set(value) = prefs.edit().putString("device_id", value).apply()
+        set(value) { check(prefs.edit().putString("device_id", value).commit()) { "Failed to persist enrolled device identity" } }
 
-    /** Everything needed to resume or reconcile an in-flight action across
-     * a process death/restart -- actionId, its idempotencyKey, and the
-     * exact locally-known fields ActionApprovalVerifier needs, as one JSON
-     * blob. Per Team/tasks/A2-to-A3-mobile-client-blockers-20260908.md:
-     * previously only jwt/deviceId persisted, so a restart mid-flow lost
-     * all track of a pending action and the next run silently minted a
-     * fresh idempotencyKey instead of reconciling the old one. */
-    var pendingActionJson: String?
-        get() = prefs.getString("pending_action", null)
-        set(value) = prefs.edit().putString("pending_action", value).apply()
+    var lastResult: String?
+        get() = prefs.getString("last_result", null)
+        set(value) { check(prefs.edit().putString("last_result", value).commit()) { "Failed to persist verified result" } }
+
+    /** Write-ahead phase storage for [ActionJournal] (the in-flight action
+     * and the enrollment-unknown lock), backed by the same encrypted prefs
+     * but with `commit()` so each write's success is known synchronously.
+     * Replaces the former `pendingActionJson` blob, which was written with
+     * `apply()` and only AFTER the create POST -- rejected by A2 as not
+     * durable. */
+    val phaseStore: PhaseStore = SharedPreferencesPhaseStore(prefs)
 
     fun clear() = prefs.edit().clear().apply()
+}
+
+/** [PhaseStore] over [SharedPreferences] using `commit()` (synchronous,
+ * returns whether the write reached disk) -- never `apply()`. */
+class SharedPreferencesPhaseStore(private val prefs: SharedPreferences) : PhaseStore {
+    override fun put(key: String, value: String): Boolean = prefs.edit().putString(key, value).commit()
+    override fun get(key: String): String? = prefs.getString(key, null)
+    override fun remove(key: String): Boolean = prefs.edit().remove(key).commit()
 }

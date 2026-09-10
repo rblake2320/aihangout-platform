@@ -50,13 +50,27 @@ class AihangoutApi(
             // status -- it used to silently become {} and fall through as
             // "success" whenever the status code also happened to be < 400.
             val json = try { JSONObject(text) } catch (e: Exception) {
-                throw AihangoutApiException(resp.code, "Response body was not valid JSON (HTTP ${resp.code})")
+                throw ResponseIntegrityException("Response body was not valid JSON (HTTP ${resp.code}); operation outcome is unknown")
             }
             // success:true is required unconditionally, not only checked
             // together with resp.code >= 400 -- a 2xx response with
             // success:false must still be treated as a failure.
-            if (!resp.isSuccessful || !json.optBoolean("success", false)) {
-                throw AihangoutApiException(resp.code, json.optString("error", "HTTP ${resp.code}"))
+            //
+            // Compare the RAW value to the literal Boolean true only. org.json's
+            // optBoolean() coerces the STRING "true" to true, so a 200 body of
+            // {"success":"true"} used to be credited as success (reviewer A2,
+            // reproduced over a real loopback socket). A JSON `true` literal
+            // parses to java.lang.Boolean.TRUE, so `== true` (equals) accepts
+            // only that; a String, a number, JSON null or a missing key all fail.
+            val success: Any? = json.opt("success")
+            if (!resp.isSuccessful || success != true) {
+                val serverError = json.optString("error", "HTTP ${resp.code}")
+                val detail = if (success is Boolean) serverError
+                    else "$serverError -- success flag was not a literal boolean true (got ${if (success == null) "missing" else "${success.javaClass.simpleName} $success"})"
+                if (resp.code in 400..499 && success == false) {
+                    throw AihangoutApiException(resp.code, detail)
+                }
+                throw ResponseIntegrityException("$detail; operation outcome is unknown (HTTP ${resp.code})")
             }
             return json
         }

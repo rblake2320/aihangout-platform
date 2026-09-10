@@ -66,3 +66,7 @@ release after deployment and readback; an unreleased candidate is not a released
 ## Integration checkpoint 2026-09-10
 Participation repairs, pending-content UX, password reset revocation, Pathbook candidate, mobile deny route and Deny UI composed into the mobile integration branch. Android and Pathbook independent HOLD findings remain open; no deployment claimed. Completed action results are retained when a device is revoked. Combined Worker test receipt: merged-participation-20260910.json; frontend 19/19 and build passed.
 
+
+### Phone recovery candidate — 2026-09-10
+Preserve ambiguous POST outcomes and conflicting result evidence; stop terminal-action output resubmission. Integrate synchronous phase journal, checked enrollment identity persistence, and retained verified result display. Local device acceptance remains pending; no production deployment.
+
