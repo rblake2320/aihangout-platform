@@ -7,7 +7,7 @@ function decode(value, maxBytes) {
   return Uint8Array.from(raw, ch => ch.charCodeAt(0));
 }
 
-export function installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse }) {
+export function installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse, consumeArmedMobileFault }) {
   const failure = (error, status = 400) => jsonResponse({ success: false, error }, { status });
   const policy = env => typeof env.MOBILE_APP_ID === 'string' && /^[a-zA-Z][\w]*(\.[\w]+)+$/.test(env.MOBILE_APP_ID)
     && typeof env.MOBILE_APP_CERT_SHA256 === 'string' && /^[a-f0-9]{64}$/.test(env.MOBILE_APP_CERT_SHA256);
@@ -84,6 +84,10 @@ export function installMobileEnrollment(router, { authenticate, safeJsonParse, s
           .bind(now, body.challengeId, deviceId, body.challengeId)
       ]);
       if (result[0].meta.changes !== 1) return failure('Challenge unavailable', 409);
+      // Local/test-only ambiguous-POST fault: the device row above is already
+      // committed; the response is deliberately lost. Inert unless armed.
+      const injectedFault = consumeArmedMobileFault ? await consumeArmedMobileFault(env, 'enroll_lost_response') : null;
+      if (injectedFault) return injectedFault;
       return jsonResponse({ success: true, deviceId, agentName: signed.agentName, status: 'active',
         assurance: 'key_possession_only', keySecurityLevel: 'unknown' });
     } catch (error) {

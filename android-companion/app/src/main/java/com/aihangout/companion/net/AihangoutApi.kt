@@ -124,6 +124,46 @@ class AihangoutApi(
         return json
     }
 
+    /**
+     * Identity-bound recovery lookup for a create whose response was lost.
+     * Returns null ONLY on the server's definitive 404 (owner-scoped miss on
+     * UNIQUE(device_id, idempotency_key) -- authoritative "not committed").
+     * Any ambiguous outcome (network, 5xx, malformed) propagates as before so
+     * the caller keeps its journal. A hit bound to a different device or key
+     * is refused, never adopted.
+     */
+    fun lookupAction(jwt: String, deviceId: String, idempotencyKey: String): JSONObject? {
+        val path = "/api/mobile/action-lookup?deviceId=${enc(deviceId)}&idempotencyKey=${enc(idempotencyKey)}"
+        val json = try {
+            request(path, "GET", null, jwt)
+        } catch (e: AihangoutApiException) {
+            if (e.httpStatus == 404) return null
+            throw e
+        }
+        val intent = json.optJSONObject("intent")
+        if (intent == null || intent.optString("device_id") != deviceId || intent.optString("idempotency_key") != idempotencyKey) {
+            throw ResponseIntegrityException("lookupAction($deviceId, $idempotencyKey) returned an action bound to a different device/key -- refusing to use it")
+        }
+        return json
+    }
+
+    /** Identity-bound recovery lookup for an enrollment whose response was lost; null only on the definitive 404. */
+    fun lookupDevice(jwt: String, agentName: String): JSONObject? {
+        val json = try {
+            request("/api/mobile/device-lookup?agentName=${enc(agentName)}", "GET", null, jwt)
+        } catch (e: AihangoutApiException) {
+            if (e.httpStatus == 404) return null
+            throw e
+        }
+        val device = json.optJSONObject("device")
+        if (device == null || device.optString("agent_name") != agentName) {
+            throw ResponseIntegrityException("lookupDevice($agentName) returned a device with a different agent_name -- refusing to use it")
+        }
+        return json
+    }
+
+    private fun enc(s: String): String = java.net.URLEncoder.encode(s, "UTF-8")
+
     fun reportResult(jwt: String, actionId: String, deviceId: String, idempotencyKey: String, resultStatus: String, resultPayloadHash: String?): JSONObject {
         val body = JSONObject()
             .put("deviceId", deviceId)

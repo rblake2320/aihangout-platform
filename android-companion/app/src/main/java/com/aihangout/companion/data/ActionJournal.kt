@@ -137,6 +137,51 @@ class ActionJournal(
         if (!store.remove(JOURNAL_KEY)) throw PhaseWriteException("Failed to clear the action journal.")
     }
 
+    /**
+     * Operator/reconciliation exit for a journal that must not simply be
+     * cleared: the full journal plus the stated reason is appended to an
+     * append-only history FIRST (a failed append throws and leaves the active
+     * journal untouched), and only then is the active journal removed. Evidence
+     * is never deleted, only moved.
+     */
+    fun archive(reason: String) {
+        val s = load() ?: throw IllegalStateException("No action journal exists to archive.")
+        appendHistory(JOURNAL_HISTORY_KEY, JSONObject()
+            .put("journal", JSONObject(s.toJson()))
+            .put("reason", reason)
+            .put("archivedAtEpochMs", System.currentTimeMillis()))
+        clear()
+    }
+
+    fun history(): List<JSONObject> = readHistory(JOURNAL_HISTORY_KEY)
+
+    fun enrollmentLock(): JSONObject? = store.get(ENROLLMENT_UNKNOWN_KEY)?.let { JSONObject(it) }
+
+    /** Same discipline as [archive] for the enrollment-unknown lock. */
+    fun archiveEnrollmentLock(reason: String) {
+        val lock = enrollmentLock() ?: throw IllegalStateException("No enrollment lock exists to archive.")
+        appendHistory(ENROLLMENT_HISTORY_KEY, JSONObject()
+            .put("lock", lock)
+            .put("reason", reason)
+            .put("archivedAtEpochMs", System.currentTimeMillis()))
+        clearEnrollmentUnknown()
+    }
+
+    fun enrollmentHistory(): List<JSONObject> = readHistory(ENROLLMENT_HISTORY_KEY)
+
+    private fun appendHistory(key: String, entry: JSONObject) {
+        val arr = store.get(key)?.let { org.json.JSONArray(it) } ?: org.json.JSONArray()
+        arr.put(entry)
+        if (!store.put(key, arr.toString())) {
+            throw PhaseWriteException("Failed to append to $key; evidence was NOT archived and the active record is left in place.")
+        }
+    }
+
+    private fun readHistory(key: String): List<JSONObject> {
+        val arr = store.get(key)?.let { org.json.JSONArray(it) } ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+    }
+
     fun decide(journal: JournalState, serverReadbackOrNull: JSONObject?): ReopenDecision =
         decide(journal, serverReadbackOrNull, currentOwnerUserId, currentBaseUrl)
 
@@ -171,6 +216,8 @@ class ActionJournal(
     companion object {
         const val JOURNAL_KEY = "action_journal"
         const val ENROLLMENT_UNKNOWN_KEY = "enrollment_unknown"
+        const val JOURNAL_HISTORY_KEY = "action_journal_history"
+        const val ENROLLMENT_HISTORY_KEY = "enrollment_lock_history"
         private val TERMINAL_STATUSES = setOf("expired", "denied", "revoked")
 
         /**

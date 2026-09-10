@@ -32,6 +32,10 @@ export default defineConfig({
             BETA_MODE: 'true',
             MOBILE_APP_ID: 'ai.hangout.test',
             MOBILE_APP_CERT_SHA256: 'a'.repeat(64),
+            // Enables the one-shot ambiguous-POST fault injector for recovery
+            // tests only (armed per test via POST /api/mobile/fault-arm). Never
+            // set in any wrangler.toml environment.
+            MOBILE_FAULT_INJECT_ENABLED: '1',
             // Isolated test scope only; not production configuration.
             PATHBOOK_TEST_SCOPE_ID: 'vitest-isolated-pathbook-scope',
             PATHBOOK_TEST_SCOPE_AUTHORIZATION: 'vitest-only-pathbook-scope-capability' 

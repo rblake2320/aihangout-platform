@@ -17793,7 +17793,7 @@ router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
 
 // sha256Hex already exists (line ~16912) -- reused, not redefined.
 
-installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse });
+installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse, consumeArmedMobileFault });
 
 router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
   try {
@@ -17824,6 +17824,29 @@ router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
     return errResponse('Device revocation failed', error);
   }
 });
+
+// Ambiguous-POST fault injection for local/test acceptance ONLY. Inert unless
+// the MOBILE_FAULT_INJECT_ENABLED binding is exactly '1' (never set in
+// production wrangler config); even then a fault fires only once per arming
+// (POST /api/mobile/fault-arm) and only AFTER the route has committed its
+// database work -- so it reproduces "the server committed, the client never
+// saw the response", the exact recovery case the companion must reconcile.
+const MOBILE_FAULTS = new Set(['create_lost_response', 'enroll_lost_response']);
+async function consumeArmedMobileFault(env, name) {
+  if (env.MOBILE_FAULT_INJECT_ENABLED !== '1' || !MOBILE_FAULTS.has(name)) return null;
+  const key = `mobile_fault_armed:${name}`;
+  const armed = await env.AIHANGOUT_KV.get(key);
+  if (!armed) return null;
+  await env.AIHANGOUT_KV.delete(key);
+  // Answered as 502; the top-level fetch handler's error sanitizer then
+  // rewrites any /api 5xx into its generic 503 body, so the client receives
+  // exactly what a real backend failure looks like (non-4xx -> the companion
+  // classifies it as "outcome unknown", never as a definitive refusal).
+  return jsonResponse({
+    success: false,
+    error: `injected fault: ${name} -- the server committed this request but the response was deliberately lost`,
+  }, { status: 502 });
+}
 
 router.post('/api/mobile/actions/intent', async (request, env, ctx) => {
   try {
@@ -17930,6 +17953,9 @@ router.post('/api/mobile/actions/intent', async (request, env, ctx) => {
         }
       })());
     }
+
+    const injectedFault = await consumeArmedMobileFault(env, 'create_lost_response');
+    if (injectedFault) return injectedFault;
 
     return jsonResponse({ success: true, actionId, actionDigest, riskTier, status: 'awaiting_approval', expiresAt });
   } catch (error) {
@@ -18201,6 +18227,94 @@ router.get('/api/mobile/actions/:actionId', async (request, env) => {
     });
   } catch (error) {
     return errResponse('Action readback failed', error);
+  }
+});
+
+// Recovery lookups (Team/tasks/A1-to-A3-phone-final-recovery-20260910.md): a
+// companion whose create/enroll POST got an ambiguous outcome must be able to
+// ask "did that commit?" by the identity it already holds, instead of
+// replaying the POST or discarding its journal. Both are owner-scoped in SQL
+// and return the same generic 404 as every other mobile route, so a
+// non-owner learns nothing. Distinct base paths (not /api/mobile/actions/...)
+// so the :actionId route above can never capture them.
+router.get('/api/mobile/action-lookup', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const params = new URL(request.url).searchParams;
+    const deviceId = String(params.get('deviceId') || '').slice(0, 64);
+    const idempotencyKey = String(params.get('idempotencyKey') || '').slice(0, 200);
+    if (!deviceId || !idempotencyKey) {
+      return jsonResponse({ success: false, error: 'deviceId and idempotencyKey are required' }, { status: 400 });
+    }
+
+    // UNIQUE(device_id, idempotency_key) makes this lookup authoritative: a
+    // committed create is always visible here, so a miss is real evidence
+    // that nothing was committed under that key.
+    const intent = await env.AIHANGOUT_DB.prepare(
+      `SELECT action_id, device_id, owner_user_id, capability, risk_tier, target_description, action_digest, idempotency_key, status, created_at, expires_at
+       FROM mobile_action_intents WHERE device_id = ? AND idempotency_key = ? AND owner_user_id = ?`
+    ).bind(deviceId, idempotencyKey, user.id).first();
+    if (!intent) {
+      return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
+    }
+
+    const [approval, result, effect] = await Promise.all([
+      env.AIHANGOUT_DB.prepare('SELECT approved_by, approved_digest, approved_at FROM mobile_action_approvals WHERE action_id = ?').bind(intent.action_id).first(),
+      env.AIHANGOUT_DB.prepare('SELECT result_status, result_payload_hash, reported_at FROM mobile_action_results WHERE action_id = ?').bind(intent.action_id).first(),
+      env.AIHANGOUT_DB.prepare('SELECT effect_status, verification_note, verified_at FROM mobile_action_effects WHERE action_id = ?').bind(intent.action_id).first(),
+    ]);
+    return jsonResponse({ success: true, intent, approval: approval || null, result: result || null, effect: effect || null });
+  } catch (error) {
+    return errResponse('Action lookup failed', error);
+  }
+});
+
+router.get('/api/mobile/device-lookup', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const agentName = String(new URL(request.url).searchParams.get('agentName') || '').trim().slice(0, 100);
+    if (!agentName) return jsonResponse({ success: false, error: 'agentName is required' }, { status: 400 });
+
+    // UNIQUE(owner_user_id, agent_name) makes this authoritative for "did my
+    // enrollment under this name commit?". The public key is returned so the
+    // companion can bind the row to ITS OWN key before adopting the deviceId;
+    // a different key under the same name is a conflict, never an adoption.
+    const device = await env.AIHANGOUT_DB.prepare(
+      `SELECT device_id, agent_name, status, public_key_spki, key_security_level, enrolled_at, revoked_at
+       FROM mobile_devices WHERE owner_user_id = ? AND agent_name = ?`
+    ).bind(user.id, agentName).first();
+    if (!device) {
+      return jsonResponse({ success: false, error: 'No device found under your account with that agent name' }, { status: 404 });
+    }
+    return jsonResponse({ success: true, device });
+  } catch (error) {
+    return errResponse('Device lookup failed', error);
+  }
+});
+
+// Arms a one-shot ambiguous-POST fault (see consumeArmedMobileFault). Exists
+// only when MOBILE_FAULT_INJECT_ENABLED === '1'; otherwise it is
+// indistinguishable from an unknown API path.
+router.post('/api/mobile/fault-arm', async (request, env) => {
+  try {
+    if (env.MOBILE_FAULT_INJECT_ENABLED !== '1') {
+      return new Response('API endpoint not found', { status: 404, headers: corsHeaders });
+    }
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    const body = safeJsonParse(await request.text());
+    const fault = String(body?.fault || '');
+    if (!MOBILE_FAULTS.has(fault)) {
+      return jsonResponse({ success: false, error: `fault must be one of: ${[...MOBILE_FAULTS].join(', ')}` }, { status: 400 });
+    }
+    await env.AIHANGOUT_KV.put(`mobile_fault_armed:${fault}`, String(user.id), { expirationTtl: 3600 });
+    return jsonResponse({ success: true, fault, armed: true, oneShot: true });
+  } catch (error) {
+    return errResponse('Fault arming failed', error);
   }
 });
 

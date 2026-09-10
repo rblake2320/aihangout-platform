@@ -196,4 +196,63 @@ class AihangoutApiTest {
         val result = api.reportResult("jwt", "act-1", "dev-1", "idem-1", "executed", null)
         assertEquals("act-1", result.getString("actionId"))
     }
+
+    // ---- recovery lookups (Team/tasks/A1-to-A3-phone-final-recovery-20260910.md) ----
+
+    private fun lookupBody(deviceId: String, key: String): String = JSONObject().put("success", true)
+        .put("intent", JSONObject().put("action_id", "act-9").put("device_id", deviceId).put("idempotency_key", key).put("status", "awaiting_approval"))
+        .put("approval", JSONObject.NULL).put("result", JSONObject.NULL).put("effect", JSONObject.NULL).toString()
+
+    @Test
+    fun `lookupAction sends both identifiers URL-encoded and returns the bound action`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(lookupBody("dev-1", "android-a b")))
+        val found = api.lookupAction("jwt", "dev-1", "android-a b")!!
+        assertEquals("act-9", found.getJSONObject("intent").getString("action_id"))
+        val recorded = server.takeRequest()
+        assertEquals("GET", recorded.method)
+        assertEquals("/api/mobile/action-lookup?deviceId=dev-1&idempotencyKey=android-a+b", recorded.path)
+    }
+
+    @Test
+    fun `lookupAction returns null only on the definitive 404`() {
+        server.enqueue(MockResponse().setResponseCode(404).setBody(JSONObject().put("success", false).put("error", "No action found").toString()))
+        assertEquals(null, api.lookupAction("jwt", "dev-1", "idem-1"))
+    }
+
+    @Test
+    fun `lookupAction propagates an ambiguous outcome instead of returning null`() {
+        server.enqueue(MockResponse().setResponseCode(502).setBody("injected fault: response lost"))
+        assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.lookupAction("jwt", "dev-1", "idem-1")
+        }
+    }
+
+    @Test
+    fun `lookupAction refuses a hit bound to a different device or key`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(lookupBody("dev-OTHER", "idem-1")))
+        assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.lookupAction("jwt", "dev-1", "idem-1")
+        }
+        server.enqueue(MockResponse().setResponseCode(200).setBody(lookupBody("dev-1", "other-key")))
+        assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.lookupAction("jwt", "dev-1", "idem-1")
+        }
+    }
+
+    @Test
+    fun `lookupDevice returns the bound device, null on 404, and refuses an agent name mismatch`() {
+        val body = { agent: String -> JSONObject().put("success", true)
+            .put("device", JSONObject().put("device_id", "dev-7").put("agent_name", agent).put("status", "active").put("public_key_spki", "SPKI")).toString() }
+        server.enqueue(MockResponse().setResponseCode(200).setBody(body("agent-1")))
+        assertEquals("dev-7", api.lookupDevice("jwt", "agent-1")!!.getJSONObject("device").getString("device_id"))
+        assertEquals("/api/mobile/device-lookup?agentName=agent-1", server.takeRequest().path)
+
+        server.enqueue(MockResponse().setResponseCode(404).setBody(JSONObject().put("success", false).put("error", "No device found").toString()))
+        assertEquals(null, api.lookupDevice("jwt", "agent-1"))
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody(body("agent-OTHER")))
+        assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.lookupDevice("jwt", "agent-1")
+        }
+    }
 }
