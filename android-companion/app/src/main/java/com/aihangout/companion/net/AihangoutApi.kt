@@ -7,7 +7,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-class AihangoutApiException(val httpStatus: Int, message: String) : Exception(message)
+/** [body] is the parsed JSON error body when the server sent one (e.g. the
+ * assistance route's 424/409 carry `status` and `requestId`) -- callers that
+ * must distinguish "unknown" from "failed" read it instead of guessing. */
+class AihangoutApiException(val httpStatus: Int, message: String, val body: JSONObject? = null) : Exception(message)
 
 /** Thrown when a response is well-formed JSON with success:true but is
  * bound to a different identity than what was requested (e.g. an
@@ -68,7 +71,7 @@ class AihangoutApi(
                 val detail = if (success is Boolean) serverError
                     else "$serverError -- success flag was not a literal boolean true (got ${if (success == null) "missing" else "${success.javaClass.simpleName} $success"})"
                 if (resp.code in 400..499 && success == false) {
-                    throw AihangoutApiException(resp.code, detail)
+                    throw AihangoutApiException(resp.code, detail, json)
                 }
                 throw ResponseIntegrityException("$detail; operation outcome is unknown (HTTP ${resp.code})")
             }
@@ -179,6 +182,20 @@ class AihangoutApi(
         val json = request("/api/mobile/assistance", "POST", body, jwt)
         if (json.optString("requestId") != requestId) {
             throw ResponseIntegrityException("assistance response echoed requestId '${json.optString("requestId")}', expected '$requestId' -- refusing to use it")
+        }
+        return json
+    }
+
+    /** Owner readback of a stored assistance outcome; null only on the definitive 404 (server never saw it). */
+    fun getAssistance(jwt: String, requestId: String): JSONObject? {
+        val json = try {
+            request("/api/mobile/assistance/${enc(requestId)}", "GET", null, jwt)
+        } catch (e: AihangoutApiException) {
+            if (e.httpStatus == 404) return null
+            throw e
+        }
+        if (json.optString("requestId") != requestId) {
+            throw ResponseIntegrityException("getAssistance($requestId) returned requestId '${json.optString("requestId")}' -- refusing to use it")
         }
         return json
     }
