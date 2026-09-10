@@ -77,8 +77,12 @@ class MainActivity : AppCompatActivity() {
         }
         statusView = TextView(this).apply {
             tokenStore.repairProof?.let { statusLog.append(it) }
-            val initial = tokenStore.lastResultSnapshot?.let { com.aihangout.companion.data.ResultSnapshot.fromJson(it).render() }
-                ?: tokenStore.lastResult ?: "Idle."
+            // A malformed persisted snapshot must never crash onCreate: fall back to
+            // the legacy line, visibly marked, and leave the bad blob for the operator.
+            val initial = tokenStore.lastResultSnapshot?.let { raw ->
+                try { com.aihangout.companion.data.ResultSnapshot.fromJson(raw).render() }
+                catch (e: Exception) { "${tokenStore.lastResult ?: "Idle."} [CACHED snapshot unreadable: ${e.javaClass.simpleName}]" }
+            } ?: tokenStore.lastResult?.let { "$it [legacy display; will refresh by GET on resume]" } ?: "Idle."
             text = statusLog.append(initial)
         }
         refreshButton.setOnClickListener { refreshLastResult("manual") }
@@ -908,38 +912,92 @@ class MainActivity : AppCompatActivity() {
      * screen clearly marked (offline / server unknown / foreign).
      */
     private fun refreshLastResult(trigger: String) {
-        val raw = tokenStore.lastResultSnapshot ?: return
-        val jwt = tokenStore.jwt ?: run { log("Status refresh ($trigger): no session token; cached result shown as-is."); return }
-        val cached = com.aihangout.companion.data.ResultSnapshot.fromJson(raw)
+        // Shares the non-queuing gate with Run/Ask/Archive: a refresh never runs
+        // beside a flow that may be producing a NEWER result, and two refreshes
+        // never race each other.
+        if (!flowGate.tryAcquire("refresh")) { log("Status refresh ($trigger) skipped: '${flowGate.activeOwner()}' is active."); return }
         Thread {
             try {
-                val (readback, offline) = try {
-                    Pair(api.getAction(jwt, cached.actionId), false)
-                } catch (e: IOException) { Pair(null, true) }
-                catch (e: AihangoutApiException) {
-                    if (e.httpStatus == 404) Pair(null, false)
-                    else { log("Status refresh ($trigger) refused by server (HTTP ${e.httpStatus}); cached result kept."); return@Thread }
-                }
-                // Owner binding: the JWT's owner is whoever logged in last; the snapshot
-                // carries the owner it was produced for. A mismatch is refused, not merged.
-                val owner = cached.ownerUserId
-                val outcome = com.aihangout.companion.data.StatusRefresh.merge(
-                    cached, readback, offline, owner, BuildConfig.AIHANGOUT_BASE_URL, System.currentTimeMillis()
-                )
-                val shown = when (outcome) {
-                    is com.aihangout.companion.data.StatusRefresh.Outcome.Updated -> { log("Status refresh ($trigger): ${outcome.whatChanged}."); outcome.snapshot }
-                    is com.aihangout.companion.data.StatusRefresh.Outcome.Unchanged -> outcome.snapshot
-                    is com.aihangout.companion.data.StatusRefresh.Outcome.OfflinePreserved -> outcome.snapshot
-                    is com.aihangout.companion.data.StatusRefresh.Outcome.ServerUnknownPreserved -> outcome.snapshot
-                    is com.aihangout.companion.data.StatusRefresh.Outcome.ForeignRefused -> outcome.snapshot
-                }
-                tokenStore.lastResultSnapshot = shown.toJson()
-                tokenStore.lastResult = shown.render()
-                log("Last result ($trigger): ${shown.render()}")
+                refreshLastResultBody(trigger)
             } catch (e: Exception) {
-                log("Status refresh ($trigger) not applied (${e.javaClass.simpleName}: ${e.message}); cached result kept.")
+                markCachedVisibly("refresh failed (${e.javaClass.simpleName})", trigger)
+            } finally {
+                flowGate.release("refresh")
             }
         }.start()
+    }
+
+    /** Persist + show the cached snapshot with an explicit not-refreshed note (never a silent stale line). */
+    private fun markCachedVisibly(why: String, trigger: String) {
+        val raw = tokenStore.lastResultSnapshot ?: run { log("Status refresh ($trigger): $why; legacy result shown as-is [CACHED, NOT REFRESHED]."); return }
+        val cached = try { com.aihangout.companion.data.ResultSnapshot.fromJson(raw) } catch (e: Exception) { log("Cached snapshot unreadable; not refreshed."); return }
+        val marked = cached.copy(staleNote = why)
+        tokenStore.lastResultSnapshot = marked.toJson()
+        tokenStore.lastResult = marked.render()
+        log("Last result ($trigger): ${marked.render()}")
+    }
+
+    private fun refreshLastResultBody(trigger: String) {
+        val binding = com.aihangout.companion.data.DeviceBinding(tokenStore.phaseStore).current()
+        val jwt = tokenStore.jwt ?: run { markCachedVisibly("no session token", trigger); return }
+
+        // One-time GET-only migration of the legacy string (A1 closure check):
+        // strict action-id extraction + the existing bound identity, authenticated
+        // against the readback before anything is saved. No new action, no model.
+        if (tokenStore.lastResultSnapshot == null) {
+            when (val plan = com.aihangout.companion.data.LegacyResultMigration.plan(
+                tokenStore.lastResult, false, binding, BuildConfig.AIHANGOUT_BASE_URL)) {
+                is com.aihangout.companion.data.LegacyResultMigration.Plan.None -> { log("Status refresh ($trigger): nothing to migrate (${plan.reason})."); return }
+                is com.aihangout.companion.data.LegacyResultMigration.Plan.Fetch -> {
+                    val rb = try { api.getAction(jwt, plan.actionId) }
+                        catch (e: IOException) { log("Legacy result migration ($trigger): offline; legacy line kept [CACHED, NOT REFRESHED]."); return }
+                        catch (e: AihangoutApiException) { log("Legacy result migration ($trigger): server said HTTP ${e.httpStatus}; legacy line kept [CACHED, NOT REFRESHED]."); return }
+                    if (!com.aihangout.companion.data.LegacyResultMigration.bind(rb, plan)) {
+                        log("Legacy result migration ($trigger): readback identity did not match the bound device/action; NOT migrated.")
+                        return
+                    }
+                    val migrated = com.aihangout.companion.data.ResultSnapshot.fromReadback(rb, plan.ownerUserId, plan.baseUrl, "refreshed", System.currentTimeMillis())
+                    tokenStore.lastResultSnapshot = migrated.toJson()
+                    tokenStore.lastResult = migrated.render()
+                    log("Legacy result migrated by GET ($trigger): ${migrated.render()}")
+                    return
+                }
+            }
+        }
+
+        val raw = checkNotNull(tokenStore.lastResultSnapshot)
+        val cached = try { com.aihangout.companion.data.ResultSnapshot.fromJson(raw) } catch (e: Exception) {
+            log("Cached snapshot unreadable (${e.javaClass.simpleName}); left untouched, not refreshed."); return
+        }
+        // Current owner is the BOUND owner for this backend (never the snapshot's own claim).
+        val currentOwner = binding?.optString("ownerUserId")?.takeIf { it.isNotEmpty() }
+            ?: run { markCachedVisibly("no device binding for this backend", trigger); return }
+
+        val (readback, offline) = try {
+            Pair(api.getAction(jwt, cached.actionId), false)
+        } catch (e: IOException) { Pair(null, true) }
+        catch (e: AihangoutApiException) {
+            if (e.httpStatus == 404) Pair(null, false)
+            else { markCachedVisibly("server refused refresh (HTTP ${e.httpStatus})", trigger); return }
+        }
+        val outcome = com.aihangout.companion.data.StatusRefresh.merge(
+            cached, readback, offline, currentOwner, BuildConfig.AIHANGOUT_BASE_URL, System.currentTimeMillis()
+        )
+        val shown = when (outcome) {
+            is com.aihangout.companion.data.StatusRefresh.Outcome.Updated -> { log("Status refresh ($trigger): ${outcome.whatChanged}."); outcome.snapshot }
+            is com.aihangout.companion.data.StatusRefresh.Outcome.Unchanged -> outcome.snapshot
+            is com.aihangout.companion.data.StatusRefresh.Outcome.OfflinePreserved -> outcome.snapshot
+            is com.aihangout.companion.data.StatusRefresh.Outcome.ServerUnknownPreserved -> outcome.snapshot
+            is com.aihangout.companion.data.StatusRefresh.Outcome.ForeignRefused -> outcome.snapshot
+        }
+        // Stale-write guard: only save if the persisted snapshot is still the one
+        // we refreshed (a flow could not have run meanwhile -- gate -- but the
+        // check costs nothing and makes the invariant explicit).
+        val stillSame = tokenStore.lastResultSnapshot?.let { com.aihangout.companion.data.ResultSnapshot.fromJson(it).actionId == cached.actionId } ?: false
+        if (!stillSame) { log("Status refresh ($trigger): a newer result replaced the one refreshed; discarding this response."); return }
+        tokenStore.lastResultSnapshot = shown.toJson()
+        tokenStore.lastResult = shown.render()
+        log("Last result ($trigger): ${shown.render()}")
     }
 
     override fun onResume() {
