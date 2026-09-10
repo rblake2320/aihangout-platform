@@ -1,0 +1,13 @@
+{
+  "action_id": "[existing-action-redacted]",
+  "started_at": "2026-09-10T23:51:22.046609+00:00",
+  "status": "PASS_DISPLAY_REFRESH_AFTER_RESTART",
+  "observations": [
+    {
+      "elapsed_observation": 0,
+      "text": "Companion diagnostics preference: ENABLED\nConnection: not attempted yet\nRepair proof: diagnostics before=false after=true, battery=100% charging=true (action [existing-action-redacted], hash reported)\nAction [existing-action-redacted]: Final state: status=approved resultStatus=executed effectStatus=unconfirmed [legacy display; will refresh by GET on resume]\nLegacy result migrated by GET (resume): Action [existing-action-redacted]: status=approved resultStatus=executed effectStatus=effect_verified [refreshed from server]"
+    }
+  ],
+  "verified_line": "Legacy result migrated by GET (resume): Action [existing-action-redacted]: status=approved resultStatus=executed effectStatus=effect_verified [refreshed from server]",
+  "ended_at": "2026-09-10T23:51:27.191592+00:00"
+}
