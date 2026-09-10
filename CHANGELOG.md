@@ -1,5 +1,12 @@
 # Changelog
 
+## Device acceptance — status refresh and camera preparation, 2026-09-10
+
+- Both installed Motos migrated their existing saved results by GET after restart and displayed `effect_verified`. Original action identities were retained; no repair, approval or model call was repeated.
+- Integrated Android suite passed 160 tests before the final camera-only patch; its changed classes then passed 24 tests and the APK rebuilt successfully.
+- Installed final camera candidate `e279a2994672898d39cae39a81b9f3ae747cbfcc16e88c5dccf2418162e96dcf` on both Motos. Camera save failures retain the draft; failed rename no longer falls back to a partial direct write.
+- Camera lens-to-OCR-to-saved-note acceptance remains pending a readable physical page. Installation and JVM tests do not close that gate. PhoneClaw comparison and read-only network diagnostics remain sequenced afterward.
+
 ## Staging — real OpenAI phone repair, 2026-09-10
 
 - Both Moto test phones completed the supervised flow: disabled companion diagnostics → real GPT-5.6 Sol proposal → exact-action web approval → preference enabled → fresh battery read → result report → process restart with proof retained.
