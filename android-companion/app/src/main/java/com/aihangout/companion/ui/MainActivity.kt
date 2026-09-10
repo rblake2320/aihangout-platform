@@ -70,7 +70,11 @@ class MainActivity : AppCompatActivity() {
         diagnosticsView = TextView(this).apply { text = renderDiagnosticsPreference() }
         val toggleDiagnosticsButton = Button(this).apply { text = "Toggle companion diagnostics preference (manual)" }
         val askAiButton = Button(this).apply { text = "Ask AI for help (backend model diagnosis -> web approval)" }
-        statusView = TextView(this).apply { text = statusLog.append(tokenStore.lastResult ?: "Idle.") }
+        statusView = TextView(this).apply {
+            tokenStore.repairProof?.let { statusLog.append(it) }
+            text = statusLog.append(tokenStore.lastResult ?: "Idle.")
+        }
+        actionButtons = listOf(runButton, archiveButton, askAiButton)
 
         toggleDiagnosticsButton.setOnClickListener {
             try {
@@ -83,20 +87,17 @@ class MainActivity : AppCompatActivity() {
             val email = emailInput.text.toString()
             val password = passwordInput.text.toString()
             val agentName = agentNameInput.text.toString()
-            askAiButton.isEnabled = false
-            Thread { askAiForHelp(email, password, agentName, askAiButton) }.start()
+            startFlow("ask") { askAiForHelp(email, password, agentName, askAiButton) }
         }
 
         runButton.setOnClickListener {
             val email = emailInput.text.toString()
             val password = passwordInput.text.toString()
             val agentName = agentNameInput.text.toString()
-            runButton.isEnabled = false
-            Thread { runFlow(email, password, agentName, runButton) }.start()
+            startFlow("run") { runFlow(email, password, agentName, runButton) }
         }
         archiveButton.setOnClickListener {
-            archiveButton.isEnabled = false
-            Thread { archiveUnresolved(archiveButton) }.start()
+            startFlow("archive") { archiveUnresolved(archiveButton) }
         }
 
         val layout = LinearLayout(this).apply {
@@ -117,6 +118,26 @@ class MainActivity : AppCompatActivity() {
 
     /** Bounded panel model; mutated only on the main thread via [mainHandler]. */
     private val statusLog = StatusLog()
+
+    /** Run / Ask AI / Archive all mutate the same journal: one non-queuing gate,
+     * every action button disabled while any flow is active, refused (never
+     * queued) if a second tap slips through. Released in `finally`. */
+    private val flowGate = FlowGate()
+    private var actionButtons: List<Button> = emptyList()
+
+    private fun startFlow(owner: String, body: () -> Unit) {
+        if (!flowGate.tryAcquire(owner)) {
+            log("Busy: '${flowGate.activeOwner()}' is still running; this tap was refused, not queued.")
+            return
+        }
+        actionButtons.forEach { it.isEnabled = false }
+        Thread {
+            try { body() } finally {
+                flowGate.release(owner)
+                mainHandler.post { actionButtons.forEach { it.isEnabled = true } }
+            }
+        }.start()
+    }
     private lateinit var diagnosticsPreference: DiagnosticsPreference
     private lateinit var diagnosticsView: TextView
 
@@ -399,6 +420,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * A previous enroll POST's outcome was never confirmed (lock set). Ask the
+     * backend by the identity the lock recorded -- never the text field, never a
+     * replay -- and bind the answer to THIS device's key. Returns the adopted
+     * deviceId; "" when the lock was cleared and a fresh enrollment may proceed;
+     * null when the operator must act (caller stops). Shared by Run and Ask AI.
+     */
+    private fun reconcileEnrollmentLock(jwt: String, agentName: String, spki: String, journal: ActionJournal): String? {
+        val lock = checkNotNull(journal.enrollmentLock())
+        val lockedAgent = lock.optString("agentName", agentName)
+        log("Enrollment outcome unresolved for agent '$lockedAgent'. Reconciling via identity-bound lookup (no replay)...")
+        return when (val r = RecoveryResolver.resolveEnrollment(lockedAgent, spki, api.lookupDevice(jwt, lockedAgent))) {
+            is RecoveryResolver.EnrollmentResolution.Adopt -> {
+                tokenStore.deviceId = r.deviceId
+                journal.archiveEnrollmentLock("lookup: enrollment had committed as ${r.deviceId}; adopted")
+                log("Enrollment HAD committed: adopted deviceId=${r.deviceId}.")
+                r.deviceId
+            }
+            RecoveryResolver.EnrollmentResolution.NotCommitted -> {
+                journal.archiveEnrollmentLock("lookup: no device under '$lockedAgent'; enrollment never committed")
+                log("Enrollment had NOT committed (authoritative lookup miss). Enrolling now.")
+                ""
+            }
+            is RecoveryResolver.EnrollmentResolution.KeyConflict -> {
+                log("CONFLICT: agent name '$lockedAgent' is held by device ${r.deviceId} with a DIFFERENT key " +
+                    "(fingerprint ${r.existingKeyFingerprint.take(16)}…). Not adopting. Operator: revoke that device " +
+                    "on the web app or use a new agent name, then tap 'Archive unresolved' to clear this lock.")
+                null
+            }
+            is RecoveryResolver.EnrollmentResolution.Revoked -> {
+                log("This device's key is enrolled as ${r.deviceId} but REVOKED; the agent name cannot be reused. " +
+                    "Operator: choose a new agent name, then tap 'Archive unresolved' to clear this lock.")
+                null
+            }
+        }
+    }
+
     private fun persistEnrollment(deviceId: String, ownerUserId: String) {
         tokenStore.deviceId = deviceId
         com.aihangout.companion.data.DeviceBinding(tokenStore.phaseStore).bind(deviceId, ownerUserId, BuildConfig.AIHANGOUT_BASE_URL)
@@ -465,6 +523,13 @@ class MainActivity : AppCompatActivity() {
             keyManager.ensureKeyExists()
             val spki = keyManager.exportPublicKeySpkiBase64()
             var deviceId = resolveBoundDeviceId(jwt, loginResult.userId, agentName, spki, journal)
+            if (deviceId == null && journal.enrollmentUnknown()) {
+                // Same rule as Run (review of 2d4bc67): an unresolved prior enroll is
+                // reconciled by lookup; this button never overwrites the lock or
+                // blindly re-enrolls.
+                deviceId = reconcileEnrollmentLock(jwt, agentName, spki, journal) ?: return
+                if (deviceId == "") deviceId = null
+            }
             if (deviceId == null) {
                 deviceId = enrollDevice(jwt, loginResult.userId, agentName, spki,
                     keyManager.packageName(), keyManager.signingCertSha256(), journal)
@@ -598,35 +663,8 @@ class MainActivity : AppCompatActivity() {
 
             var deviceId = resolveBoundDeviceId(jwt, loginResult.userId, agentName, spki, journal)
             if (deviceId == null && journal.enrollmentUnknown()) {
-                // A previous enroll POST's outcome was never confirmed. Ask the
-                // backend by the identity the lock recorded (never the text field,
-                // never a replay) and bind the answer to THIS device's key.
-                val lock = checkNotNull(journal.enrollmentLock())
-                val lockedAgent = lock.optString("agentName", agentName)
-                log("Enrollment outcome unresolved for agent '$lockedAgent'. Reconciling via identity-bound lookup (no replay)...")
-                when (val r = RecoveryResolver.resolveEnrollment(lockedAgent, spki, api.lookupDevice(jwt, lockedAgent))) {
-                    is RecoveryResolver.EnrollmentResolution.Adopt -> {
-                        tokenStore.deviceId = r.deviceId
-                        deviceId = r.deviceId
-                        journal.archiveEnrollmentLock("lookup: enrollment had committed as ${r.deviceId}; adopted")
-                        log("Enrollment HAD committed: adopted deviceId=${r.deviceId}.")
-                    }
-                    RecoveryResolver.EnrollmentResolution.NotCommitted -> {
-                        journal.archiveEnrollmentLock("lookup: no device under '$lockedAgent'; enrollment never committed")
-                        log("Enrollment had NOT committed (authoritative lookup miss). Enrolling now.")
-                    }
-                    is RecoveryResolver.EnrollmentResolution.KeyConflict -> {
-                        log("CONFLICT: agent name '$lockedAgent' is held by device ${r.deviceId} with a DIFFERENT key " +
-                            "(fingerprint ${r.existingKeyFingerprint.take(16)}…). Not adopting. Operator: revoke that device " +
-                            "on the web app or use a new agent name, then tap 'Archive unresolved' to clear this lock.")
-                        return
-                    }
-                    is RecoveryResolver.EnrollmentResolution.Revoked -> {
-                        log("This device's key is enrolled as ${r.deviceId} but REVOKED; the agent name cannot be reused. " +
-                            "Operator: choose a new agent name, then tap 'Archive unresolved' to clear this lock.")
-                        return
-                    }
-                }
+                deviceId = reconcileEnrollmentLock(jwt, agentName, spki, journal) ?: return
+                if (deviceId == "") deviceId = null
             }
             if (deviceId == null) {
                 deviceId = enrollDevice(jwt, loginResult.userId, agentName, spki, packageName, certSha256, journal)
@@ -766,13 +804,24 @@ class MainActivity : AppCompatActivity() {
         log("Verifying the approved action matches exactly what this device proposed before executing anything...")
         ActionApprovalVerifier.verifyApprovedForExecution(expected, approvedReadback)
 
+        // Every refusal that needs no side effect happens BEFORE the journal
+        // moves to EFFECT_INTENDED (review of 2d4bc67): a disabled preference or
+        // an unsupported capability/target leaves the journal at CREATED, still
+        // resumable, instead of stranding it as an unknown effect that would be
+        // reported `failed` for something that provably never ran.
+        when (expected.capability) {
+            "battery_status_read" -> diagnosticsPreference.requireEnabled()
+            "ui_click" -> require(expected.targetDescription == AssistanceProposalValidator.TARGET) {
+                "Refusing unsupported ui_click target '${expected.targetDescription}'"
+            }
+            else -> throw IllegalStateException("Refusing to execute unsupported capability '${expected.capability}'.")
+        }
         // EFFECT_INTENDED is committed BEFORE the effect runs: a crash from
         // here on reopens as QUARANTINE_EFFECT_UNKNOWN, never as a second run.
         journal.markEffectIntended()
         val reader = AndroidDeviceReader(this)
         val contentJson = when (expected.capability) {
             "battery_status_read" -> {
-                diagnosticsPreference.requireEnabled()
                 log("Verified. Reading battery status...")
                 val battery = reader.readBatteryStatus()
                 log("Read: percent=${battery.percent} charging=${battery.isCharging}. Reporting only the hash, never the raw reading, to the backend.")
@@ -780,15 +829,15 @@ class MainActivity : AppCompatActivity() {
             }
             "ui_click" -> {
                 // The only supported repair: this app's own preference, matched
-                // literally inside RepairExecutor; never system settings or coordinates.
+                // literally (again) inside RepairExecutor; never system settings or coordinates.
                 log("Verified. Executing approved repair: enabling THIS app's diagnostics preference, then a fresh battery read...")
                 val outcome = RepairExecutor(diagnosticsPreference, reader).execute(expected.capability, expected.targetDescription)
                 refreshDiagnosticsView()
                 log("Repair done: preference before=${outcome.preferenceBefore} after=${outcome.preferenceAfter}; battery percent=${outcome.battery.percent} charging=${outcome.battery.isCharging}. Reporting the hash only.")
-                tokenStore.lastResult = "Repair proof: diagnostics before=${outcome.preferenceBefore} after=${outcome.preferenceAfter}, battery=${outcome.battery.percent}% (action $actionId)"
+                tokenStore.repairProof = "Repair proof: diagnostics before=${outcome.preferenceBefore} after=${outcome.preferenceAfter}, battery=${outcome.battery.percent}% charging=${outcome.battery.isCharging} (action $actionId, hash reported)"
                 outcome.toContentJson()
             }
-            else -> throw IllegalStateException("Refusing to execute unsupported capability '${expected.capability}'.")
+            else -> throw IllegalStateException("unreachable: capability was checked before EFFECT_INTENDED")
         }
         val hash = ResultHasher.hashStructuredResult(
             capability = expected.capability, actionId = actionId, deviceId = resolvedDeviceId,
