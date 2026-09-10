@@ -17880,6 +17880,54 @@ router.post('/api/mobile/actions/:actionId/approve', async (request, env) => {
   }
 });
 
+// Deny is the human's explicit refusal -- a distinct terminal state from
+// 'expired' (nobody acted in time). No digest is required: approval binds a
+// digest because it grants authority to one exact plan; denial grants
+// nothing, so binding would add friction without adding safety.
+router.post('/api/mobile/actions/:actionId/deny', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'mobile_deny');
+    if (rl.limited) return rateLimitResponse(rl);
+
+    const { actionId } = request.params;
+    const intent = await env.AIHANGOUT_DB.prepare(
+      'SELECT action_id, status FROM mobile_action_intents WHERE action_id = ? AND owner_user_id = ?'
+    ).bind(actionId, user.id).first();
+    if (!intent) {
+      return jsonResponse({ success: false, error: 'No action found under your account with that id' }, { status: 404 });
+    }
+    if (intent.status === 'denied') {
+      return jsonResponse({ success: true, actionId, status: 'denied', already_denied: true });
+    }
+    if (intent.status !== 'awaiting_approval') {
+      // An approved action may already be executing; denying it after the
+      // fact would misrepresent what actually happened. Expired/revoked are
+      // already terminal. Only a still-pending action can be denied.
+      return jsonResponse({ success: false, error: `Action is '${intent.status}', not awaiting approval` }, { status: 409 });
+    }
+
+    const result = await env.AIHANGOUT_DB.prepare(
+      "UPDATE mobile_action_intents SET status = 'denied' WHERE action_id = ? AND owner_user_id = ? AND status = 'awaiting_approval'"
+    ).bind(actionId, user.id).run();
+    if (!result.meta || result.meta.changes === 0) {
+      // Lost a race with a concurrent approve/expiry between the SELECT and
+      // the UPDATE -- report the state that actually won, not a 500.
+      const now = await env.AIHANGOUT_DB.prepare(
+        'SELECT status FROM mobile_action_intents WHERE action_id = ?'
+      ).bind(actionId).first();
+      return jsonResponse({ success: false, error: `Action is '${now?.status}', not awaiting approval` }, { status: 409 });
+    }
+
+    return jsonResponse({ success: true, actionId, status: 'denied' });
+  } catch (error) {
+    return errResponse('Action denial failed', error);
+  }
+});
+
 router.post('/api/mobile/actions/:actionId/result', async (request, env) => {
   try {
     const user = await authenticate(request, env);

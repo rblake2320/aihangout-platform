@@ -458,3 +458,122 @@ describe('Effect verification and readback', () => {
     expect(readback.status).toBe(404);
   });
 });
+
+describe('Deny: the human explicitly refuses -- a terminal state distinct from expiry', () => {
+  it('the owner can deny a pending action; re-denying is idempotent; readback shows denied', async () => {
+    const user = await registerUser('mc_deny');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId);
+    const actionId = intent.json.actionId;
+
+    const deny = await api(`/api/mobile/actions/${actionId}/deny`, { method: 'POST', token: user.token, ip: user.ip, body: {} });
+    expect(deny.status, JSON.stringify(deny.json)).toBe(200);
+    expect(deny.json.status).toBe('denied');
+
+    const again = await api(`/api/mobile/actions/${actionId}/deny`, { method: 'POST', token: user.token, ip: user.ip, body: {} });
+    expect(again.status).toBe(200);
+    expect(again.json.already_denied).toBe(true);
+
+    const readback = await api(`/api/mobile/actions/${actionId}`, { token: user.token, ip: user.ip });
+    expect(readback.json.intent.status).toBe('denied');
+    expect(readback.json.approval).toBeNull();
+  });
+
+  it('a denied action can no longer be approved, and no result can be reported against it', async () => {
+    const user = await registerUser('mc_deny_then_approve');
+    const enrolled = await enrollDevice(user);
+    const idempotencyKey = `idem-deny-${Date.now()}`;
+    const intent = await createIntent(user, enrolled.json.deviceId, { idempotencyKey });
+    const actionId = intent.json.actionId;
+    await api(`/api/mobile/actions/${actionId}/deny`, { method: 'POST', token: user.token, ip: user.ip, body: {} });
+
+    const approve = await api(`/api/mobile/actions/${actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+    expect(approve.status).toBe(409);
+
+    const result = await api(`/api/mobile/actions/${actionId}/result`, {
+      method: 'POST', token: user.token, ip: user.ip,
+      body: { deviceId: enrolled.json.deviceId, idempotencyKey, resultStatus: 'executed', resultPayloadHash: 'sha256:deadbeef' }
+    });
+    expect(result.status).toBe(409);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT status FROM mobile_action_intents WHERE action_id = ?').bind(actionId).first();
+    expect(row.status).toBe('denied');
+  });
+
+  it('an already-approved action cannot be denied after the fact -- it stays approved', async () => {
+    const user = await registerUser('mc_deny_after_approve');
+    const enrolled = await enrollDevice(user);
+    const intent = await createIntent(user, enrolled.json.deviceId);
+    const actionId = intent.json.actionId;
+    await api(`/api/mobile/actions/${actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+
+    const deny = await api(`/api/mobile/actions/${actionId}/deny`, { method: 'POST', token: user.token, ip: user.ip, body: {} });
+    expect(deny.status).toBe(409);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT status FROM mobile_action_intents WHERE action_id = ?').bind(actionId).first();
+    expect(row.status).toBe('approved');
+  });
+
+  it('a different account cannot deny someone else\'s action, and learns nothing about its existence', async () => {
+    const owner = await registerUser('mc_deny_owner');
+    const attacker = await registerUser('mc_deny_attacker');
+    const enrolled = await enrollDevice(owner);
+    const intent = await createIntent(owner, enrolled.json.deviceId);
+
+    const deny = await api(`/api/mobile/actions/${intent.json.actionId}/deny`, { method: 'POST', token: attacker.token, ip: attacker.ip, body: {} });
+    expect(deny.status).toBe(404);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT status FROM mobile_action_intents WHERE action_id = ?').bind(intent.json.actionId).first();
+    expect(row.status).toBe('awaiting_approval');
+  });
+});
+
+describe('Revocation cascade: fate of intents that already existed at revoke time', () => {
+  it('revoking a device marks its awaiting AND approved-but-unexecuted intents revoked, and neither can proceed afterwards', async () => {
+    const user = await registerUser('mc_revoke_cascade');
+    const enrolled = await enrollDevice(user);
+    const deviceId = enrolled.json.deviceId;
+
+    const awaiting = await createIntent(user, deviceId);
+    const approvedKey = `idem-cascade-${Date.now()}`;
+    const approved = await createIntent(user, deviceId, { idempotencyKey: approvedKey });
+    const approveRes = await api(`/api/mobile/actions/${approved.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: approved.json.actionDigest }
+    });
+    expect(approveRes.status).toBe(200);
+
+    const revoke = await api(`/api/mobile/devices/${deviceId}/revoke`, { method: 'POST', token: user.token, ip: user.ip, body: {} });
+    expect(revoke.status, JSON.stringify(revoke.json)).toBe(200);
+
+    for (const id of [awaiting.json.actionId, approved.json.actionId]) {
+      const row = await env.AIHANGOUT_DB.prepare('SELECT status FROM mobile_action_intents WHERE action_id = ?').bind(id).first();
+      expect(row.status, id).toBe('revoked');
+    }
+
+    const lateApprove = await api(`/api/mobile/actions/${awaiting.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: awaiting.json.actionDigest }
+    });
+    expect(lateApprove.status).toBe(409);
+
+    const lateResult = await api(`/api/mobile/actions/${approved.json.actionId}/result`, {
+      method: 'POST', token: user.token, ip: user.ip,
+      body: { deviceId, idempotencyKey: approvedKey, resultStatus: 'executed', resultPayloadHash: 'sha256:late' }
+    });
+    expect(lateResult.status).toBe(409);
+    const results = await env.AIHANGOUT_DB.prepare('SELECT COUNT(*) AS n FROM mobile_action_results WHERE action_id = ?').bind(approved.json.actionId).first();
+    expect(results.n).toBe(0);
+  });
+
+  it('a non-owner\'s failed revoke attempt cascades to nothing', async () => {
+    const owner = await registerUser('mc_cascade_owner');
+    const attacker = await registerUser('mc_cascade_attacker');
+    const enrolled = await enrollDevice(owner);
+    const intent = await createIntent(owner, enrolled.json.deviceId);
+
+    const revoke = await api(`/api/mobile/devices/${enrolled.json.deviceId}/revoke`, { method: 'POST', token: attacker.token, ip: attacker.ip, body: {} });
+    expect(revoke.status).toBe(404);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT status FROM mobile_action_intents WHERE action_id = ?').bind(intent.json.actionId).first();
+    expect(row.status).toBe('awaiting_approval');
+  });
+});
