@@ -89,3 +89,5 @@ Participation repairs, pending-content UX, password reset revocation, Pathbook c
 ### Phone recovery candidate — 2026-09-10
 Preserve ambiguous POST outcomes and conflicting result evidence; stop terminal-action output resubmission. Integrate synchronous phase journal, checked enrollment identity persistence, and retained verified result display. Local device acceptance remains pending; no production deployment.
 
+
+- Added phone-skills/companion-diagnostics/SKILL.md for the previously verified operation, with operation/policy references, exact APK provenance and verification procedure. Content only; runtime loading and automatic staleness enforcement are not claimed.
