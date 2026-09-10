@@ -91,3 +91,5 @@ Preserve ambiguous POST outcomes and conflicting result evidence; stop terminal-
 
 
 - Added phone-skills/companion-diagnostics/SKILL.md for the previously verified operation, with operation/policy references, exact APK provenance and verification procedure. Content only; runtime loading and automatic staleness enforcement are not claimed.
+
+- Added sourced owner-approved device-repair research: Android network limits, existing phone-assisted diagnostics/OTA, publisher-versus-owner trust, finite proposed acceptance gates. Research and recommendations only; no network changes or new operational capability claimed.
