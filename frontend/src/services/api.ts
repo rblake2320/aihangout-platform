@@ -132,6 +132,10 @@ export const mobileApprovalAPI = {
   get: (actionId: string) => api.get(`/mobile/actions/${actionId}`),
   approve: (actionId: string, data: { actionDigest: string; confirmPhrase?: string }) =>
     api.post(`/mobile/actions/${actionId}/approve`, data),
+  // The route needs no body, but the Worker's global guard 415s any POST
+  // without a JSON Content-Type, and axios drops the header on a body-less
+  // POST -- so always send an empty JSON object.
+  deny: (actionId: string) => api.post(`/mobile/actions/${actionId}/deny`, {}),
 }
 
 export const followAPI = {

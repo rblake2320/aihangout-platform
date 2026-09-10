@@ -54,7 +54,7 @@ export default function MobileActionApprovalPage() {
   const { actionId } = useParams<{ actionId: string }>()
   const queryClient = useQueryClient()
   const [confirmPhraseInput, setConfirmPhraseInput] = useState('')
-  const [submitting, setSubmitting] = useState(false)
+  const [submitting, setSubmitting] = useState<'approve' | 'deny' | null>(null)
   const [approveError, setApproveError] = useState<string | null>(null)
 
   const queryKey = ['mobile-action', actionId]
@@ -109,7 +109,7 @@ export default function MobileActionApprovalPage() {
   const confirmPhraseSatisfied = !requiresConfirmPhrase || confirmPhraseInput === REQUIRED_CONFIRM_PHRASE
 
   async function handleApprove() {
-    setSubmitting(true)
+    setSubmitting('approve')
     setApproveError(null)
     try {
       await mobileApprovalAPI.approve(actionId!, {
@@ -124,7 +124,25 @@ export default function MobileActionApprovalPage() {
       // than trusting the POST response's own echoed status. The rendered
       // outcome below always reflects this refetch, not the mutation result.
       await queryClient.refetchQueries({ queryKey })
-      setSubmitting(false)
+      setSubmitting(null)
+    }
+  }
+
+  // Deny is the safe direction: no digest, no confirm phrase (matches the
+  // server contract -- POST /api/mobile/actions/:actionId/deny, 200 with
+  // status 'denied', idempotent on repeat, 409 once no longer awaiting).
+  // Same fresh-readback rule as approve: the terminal "Denied" card is
+  // rendered from the re-fetched intent.status, never from this response.
+  async function handleDeny() {
+    setSubmitting('deny')
+    setApproveError(null)
+    try {
+      await mobileApprovalAPI.deny(actionId!)
+    } catch (err: any) {
+      setApproveError(err?.response?.data?.error || 'Deny failed -- see status below.')
+    } finally {
+      await queryClient.refetchQueries({ queryKey })
+      setSubmitting(null)
     }
   }
 
@@ -220,7 +238,7 @@ export default function MobileActionApprovalPage() {
               onChange={(e) => setConfirmPhraseInput(e.target.value)}
               placeholder={REQUIRED_CONFIRM_PHRASE}
               className="w-full rounded border border-red-300 px-3 py-2 text-sm"
-              disabled={!isActionable || submitting}
+              disabled={!isActionable || submitting !== null}
             />
           </div>
         )}
@@ -229,13 +247,22 @@ export default function MobileActionApprovalPage() {
           <p className="text-sm text-red-600 mb-3">{approveError}</p>
         )}
 
-        <button
-          onClick={handleApprove}
-          disabled={!isActionable || !confirmPhraseSatisfied || submitting}
-          className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
-        >
-          {submitting ? 'Approving…' : 'Approve'}
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={handleDeny}
+            disabled={!isActionable || submitting !== null}
+            className="w-1/3 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
+          >
+            {submitting === 'deny' ? 'Denying…' : 'Deny'}
+          </button>
+          <button
+            onClick={handleApprove}
+            disabled={!isActionable || !confirmPhraseSatisfied || submitting !== null}
+            className="flex-1 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+          >
+            {submitting === 'approve' ? 'Approving…' : 'Approve'}
+          </button>
+        </div>
       </div>
 
       <p className="text-xs text-gray-400 text-center">

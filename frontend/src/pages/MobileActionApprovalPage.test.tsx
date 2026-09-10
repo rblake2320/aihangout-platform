@@ -7,10 +7,12 @@ import MobileActionApprovalPage from './MobileActionApprovalPage'
 
 const getMock = vi.fn()
 const approveMock = vi.fn()
+const denyMock = vi.fn()
 vi.mock('../services/api', () => ({
   mobileApprovalAPI: {
     get: (...args: any[]) => getMock(...args),
     approve: (...args: any[]) => approveMock(...args),
+    deny: (...args: any[]) => denyMock(...args),
   },
 }))
 
@@ -54,6 +56,7 @@ const COMMS_INTENT = {
 beforeEach(() => {
   getMock.mockReset()
   approveMock.mockReset()
+  denyMock.mockReset()
 })
 
 describe('MobileActionApprovalPage', () => {
@@ -157,6 +160,53 @@ describe('MobileActionApprovalPage', () => {
     renderPage('a1')
     expect(await screen.findByText('Revoked')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('deny: explicit click calls the deny API with no digest/phrase; the UI then renders the RE-FETCHED denied state', async () => {
+    const user = userEvent.setup()
+    getMock.mockResolvedValueOnce({ data: { success: true, intent: COMMS_INTENT, approval: null } })
+    denyMock.mockResolvedValue({ data: { success: true, actionId: 'a2', status: 'denied' } })
+    // Post-deny refetch: the real server state (A3's route flips status to 'denied').
+    getMock.mockResolvedValueOnce({ data: { success: true, intent: { ...COMMS_INTENT, status: 'denied' }, approval: null } })
+
+    renderPage('a2')
+    const deny = await screen.findByRole('button', { name: 'Deny' })
+    // Deny must NOT be gated on the confirm phrase (that gate is approve-only).
+    expect(deny).not.toBeDisabled()
+    expect(denyMock).not.toHaveBeenCalled()
+    await user.click(deny)
+
+    expect(denyMock).toHaveBeenCalledWith('a2')
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('Denied')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+  })
+
+  it('deny 409 (already approved elsewhere): shows the server error, and the readback -- not the error -- decides the final state', async () => {
+    const user = userEvent.setup()
+    getMock.mockResolvedValueOnce({ data: { success: true, intent: READ_ONLY_INTENT, approval: null } })
+    denyMock.mockRejectedValue({ response: { status: 409, data: { success: false, error: "Action is 'approved', not awaiting approval" } } })
+    getMock.mockResolvedValueOnce({
+      data: { success: true, intent: { ...READ_ONLY_INTENT, status: 'approved' }, approval: { approved_by: 306, approved_digest: READ_ONLY_INTENT.action_digest, approved_at: '2026-09-10T10:00:00Z' } },
+    })
+
+    renderPage('a1')
+    await user.click(await screen.findByRole('button', { name: 'Deny' }))
+
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(2))
+    // The refetched state is 'approved', so the page renders the Approved terminal card.
+    expect(await screen.findByText('Approved')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+  })
+
+  it('deny never fires on mount, and is absent on every terminal state', async () => {
+    getMock.mockResolvedValue({ data: { success: true, intent: { ...READ_ONLY_INTENT, status: 'expired', expires_at: HOUR_AGO }, approval: null } })
+    renderPage('a1')
+    await screen.findByText('This request expired')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(denyMock).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
   })
 
   it('already-approved: renders the terminal approved state directly, no approve control', async () => {
