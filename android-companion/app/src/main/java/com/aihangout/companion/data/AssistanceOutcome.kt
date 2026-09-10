@@ -12,6 +12,7 @@ import org.json.JSONObject
  */
 object AssistanceOutcome {
     sealed class Kind {
+        data class SetupRequired(val serverStatus: String) : Kind()
         /** A stored answer exists (diagnosis present) -- consume it, do not POST again. */
         data class Answered(val body: JSONObject) : Kind()
         /** Provider outcome not known yet or not knowable: same requestId, no new POST, no new id. */
@@ -26,6 +27,7 @@ object AssistanceOutcome {
     fun fromError(httpStatus: Int, body: JSONObject?, message: String): Kind {
         val status = body?.optString("status", "") ?: ""
         return when {
+            httpStatus == 424 && status in setOf("disabled", "not_configured") -> Kind.SetupRequired(status)
             (httpStatus == 424 || httpStatus == 409) && status in UNKNOWN_STATUSES -> Kind.Unknown(status)
             (httpStatus == 424 || httpStatus == 409) && status == "failed" -> Kind.Failed(status, message)
             httpStatus == 409 && body?.has("diagnosis") == true && !body.isNull("diagnosis") -> Kind.Answered(body)

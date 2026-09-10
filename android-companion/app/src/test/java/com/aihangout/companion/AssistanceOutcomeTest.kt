@@ -68,6 +68,14 @@ class AssistanceOutcomeTest {
     }
 
     @Test
+    fun `disabled and unconfigured are setup requirements rather than uncertain provider outcomes`() {
+        for (status in listOf("disabled", "not_configured")) {
+            assertTrue(AssistanceOutcome.fromError(424, body(status), "setup") is Kind.SetupRequired)
+        }
+        assertTrue(AssistanceOutcome.fromError(424, body("unknown"), "timeout") is Kind.Unknown)
+    }
+
+    @Test
     fun `the API surfaces the 424 body so the classifier can read status, and getAssistance binds the requestId`() {
         val server = MockWebServer(); server.start()
         try {

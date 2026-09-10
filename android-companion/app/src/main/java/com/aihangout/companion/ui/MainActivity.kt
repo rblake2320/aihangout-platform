@@ -547,6 +547,10 @@ class MainActivity : AppCompatActivity() {
             var response: JSONObject? = if (req.status == "PENDING" && req.diagnosis == null) {
                 when (val k = AssistanceOutcome.fromReadback(api.getAssistance(jwt, req.requestId))) {
                     null -> null // server never saw this id: POST it (same id)
+                    is AssistanceOutcome.Kind.SetupRequired -> {
+                        log("AI help needs server setup (${k.serverStatus}). No model call or repair occurred. Request preserved.")
+                        return
+                    }
                     is AssistanceOutcome.Kind.Answered -> { log("Backend already holds the answer for requestId=${req.requestId}; not asking again."); k.body }
                     is AssistanceOutcome.Kind.Unknown -> {
                         log("requestId=${req.requestId} is still '${k.serverStatus}' on the backend (provider outcome not known). Keeping the same requestId; NOT sending a second request. Tap again later.")
@@ -576,6 +580,10 @@ class MainActivity : AppCompatActivity() {
                         is AssistanceOutcome.Kind.Failed -> {
                             record.markFailed("HTTP ${e.httpStatus} ${k.serverStatus}: ${e.message}")
                             throw e
+                        }
+                        is AssistanceOutcome.Kind.SetupRequired -> {
+                            log("AI help needs server setup (${k.serverStatus}). No model call or repair occurred. Request preserved.")
+                            return
                         }
                         is AssistanceOutcome.Kind.Answered -> k.body
                     }
