@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only the capture cache directory is exposed, and only to the camera app
+     the user launches, via a temporary write grant. Saved notes (filesDir)
+     are never shared. -->
+<paths>
+    <cache-path name="camera_notes_capture" path="camera-notes-capture/" />
+</paths>

@@ -50,6 +50,11 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.security.crypto)
     implementation(libs.okhttp)
+    // Camera notes: ML Kit Text Recognition v2, BUNDLED Latin model -- OCR runs
+    // entirely on-device, the model ships in the APK, no Play Services model
+    // download and no network at inference. Only the text recogniser is linked
+    // (no face detection, no other ML Kit API).
+    implementation(libs.mlkit.text.recognition)
 
     testImplementation(libs.junit)
     testImplementation(libs.okhttp.mockwebserver)
