@@ -240,6 +240,30 @@ class AihangoutApiTest {
     }
 
     @Test
+    fun `requestAssistance sends exactly the contract body and refuses a foreign requestId`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            JSONObject().put("success", true).put("requestId", "assist-1").put("diagnosis", "off").put("provider", "openai").put("model", "m").toString()))
+        api.requestAssistance("jwt", "dev-1", "assist-1", false, "0.1.0")
+        val recorded = server.takeRequest()
+        assertEquals("/api/mobile/assistance", recorded.path)
+        val body = JSONObject(recorded.body.readUtf8())
+        assertEquals("dev-1", body.getString("deviceId"))
+        assertEquals("assist-1", body.getString("requestId"))
+        val d = body.getJSONObject("diagnostics")
+        assertEquals(1, d.getInt("schemaVersion"))
+        assertEquals(false, d.getBoolean("diagnosticsEnabled"))
+        assertEquals("0.1.0", d.getString("appVersion"))
+        assertEquals(3, d.length())
+        assertEquals(3, body.length())
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            JSONObject().put("success", true).put("requestId", "assist-OTHER").put("diagnosis", "x").toString()))
+        assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.requestAssistance("jwt", "dev-1", "assist-1", false, "0.1.0")
+        }
+    }
+
+    @Test
     fun `lookupDevice returns the bound device, null on 404, and refuses an agent name mismatch`() {
         val body = { agent: String -> JSONObject().put("success", true)
             .put("device", JSONObject().put("device_id", "dev-7").put("agent_name", agent).put("status", "active").put("public_key_spki", "SPKI")).toString() }

@@ -162,6 +162,27 @@ class AihangoutApi(
         return json
     }
 
+    /**
+     * `POST /api/mobile/assistance` per A1-frontier-phone-wiring-contract-20260910.md:
+     * exactly the named diagnostic fields, nothing else. The echoed requestId
+     * must match or the response is refused. Ambiguous outcomes propagate as
+     * usual (the caller keeps the same requestId for the retry).
+     */
+    fun requestAssistance(jwt: String, deviceId: String, requestId: String, diagnosticsEnabled: Boolean, appVersion: String): JSONObject {
+        val body = JSONObject()
+            .put("deviceId", deviceId)
+            .put("requestId", requestId)
+            .put("diagnostics", JSONObject()
+                .put("schemaVersion", 1)
+                .put("diagnosticsEnabled", diagnosticsEnabled)
+                .put("appVersion", appVersion))
+        val json = request("/api/mobile/assistance", "POST", body, jwt)
+        if (json.optString("requestId") != requestId) {
+            throw ResponseIntegrityException("assistance response echoed requestId '${json.optString("requestId")}', expected '$requestId' -- refusing to use it")
+        }
+        return json
+    }
+
     private fun enc(s: String): String = java.net.URLEncoder.encode(s, "UTF-8")
 
     fun reportResult(jwt: String, actionId: String, deviceId: String, idempotencyKey: String, resultStatus: String, resultPayloadHash: String?): JSONObject {
