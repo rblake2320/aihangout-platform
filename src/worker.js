@@ -17661,7 +17661,8 @@ router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
        WHERE device_id = ? AND owner_user_id = ? AND status = 'active'`).bind(deviceId, user.id),
       env.AIHANGOUT_DB.prepare(`UPDATE mobile_action_intents SET status = 'revoked'
        WHERE device_id = ? AND owner_user_id = ? AND status IN ('awaiting_approval', 'approved')
-       AND EXISTS (SELECT 1 FROM mobile_devices WHERE device_id = ? AND owner_user_id = ? AND status = 'revoked')`)
+       AND EXISTS (SELECT 1 FROM mobile_devices WHERE device_id = ? AND owner_user_id = ? AND status = 'revoked')
+       AND NOT EXISTS (SELECT 1 FROM mobile_action_results r WHERE r.action_id = mobile_action_intents.action_id)`)
        .bind(deviceId, user.id, deviceId, user.id)
     ]);
     const result = revoked[0];

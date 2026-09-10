@@ -576,4 +576,27 @@ describe('Revocation cascade: fate of intents that already existed at revoke tim
     const row = await env.AIHANGOUT_DB.prepare('SELECT status FROM mobile_action_intents WHERE action_id = ?').bind(intent.json.actionId).first();
     expect(row.status).toBe('awaiting_approval');
   });
+
+  it('revocation leaves an intent that already executed untouched -- history is preserved', async () => {
+    const user = await registerUser('mc_revoke_history');
+    const enrolled = await enrollDevice(user);
+    const deviceId = enrolled.json.deviceId;
+    const key = `idem-history-${Date.now()}`;
+    const intent = await createIntent(user, deviceId, { idempotencyKey: key });
+    await api(`/api/mobile/actions/${intent.json.actionId}/approve`, {
+      method: 'POST', token: user.token, ip: user.ip, body: { actionDigest: intent.json.actionDigest }
+    });
+    const reported = await api(`/api/mobile/actions/${intent.json.actionId}/result`, {
+      method: 'POST', token: user.token, ip: user.ip,
+      body: { deviceId, idempotencyKey: key, resultStatus: 'executed', resultPayloadHash: 'sha256:done' }
+    });
+    expect(reported.status).toBe(200);
+
+    const revoke = await api(`/api/mobile/devices/${deviceId}/revoke`, { method: 'POST', token: user.token, ip: user.ip, body: {} });
+    expect(revoke.status).toBe(200);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT status FROM mobile_action_intents WHERE action_id = ?').bind(intent.json.actionId).first();
+    expect(row.status).toBe('approved');
+    const results = await env.AIHANGOUT_DB.prepare('SELECT COUNT(*) AS n FROM mobile_action_results WHERE action_id = ?').bind(intent.json.actionId).first();
+    expect(results.n).toBe(1);
+  });
 });
