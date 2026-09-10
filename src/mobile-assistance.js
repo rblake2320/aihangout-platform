@@ -101,6 +101,8 @@ async function callProvider(cfg, requestId, diagnostics) {
     ],
     text: { format: { type: 'json_schema', name: 'companion_assistance', strict: true, schema: RESPONSE_SCHEMA } },
     max_output_tokens: 300,
+    // This bounded preference diagnosis needs no hidden reasoning budget.
+    ...(cfg.model === 'gpt-5.6-sol' ? { reasoning: { effort: 'none' } } : {}),
   };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
@@ -231,7 +233,9 @@ export function installMobileAssistance(router, { authenticate, safeJsonParse, s
       if (!result.ok) {
         // Transport ambiguity (timeout/network) = UNKNOWN outcome: recorded, never retried here.
         const status = result.transport ? 'unknown' : 'failed';
-        const error = result.transport ? `provider ${result.transport}` : `provider HTTP ${result.status}`;
+        const code = result.json?.error?.code;
+        const safeCode = typeof code === 'string' && /^[a-zA-Z0-9_]{1,80}$/.test(code) ? ` (${code})` : '';
+        const error = result.transport ? `provider ${result.transport}` : `provider HTTP ${result.status}${safeCode}`;
         await env.AIHANGOUT_DB.prepare('UPDATE mobile_assistance_requests SET status = ?, error = ?, usage_json = ?, completed_at = CURRENT_TIMESTAMP WHERE owner_user_id = ? AND request_id = ?').bind(status, error, usageJson, user.id, requestId).run();
         return failure(status === 'unknown' ? 'Assistance outcome unknown; not retried automatically' : 'Assistance provider failed', 424, { requestId, status });
       }

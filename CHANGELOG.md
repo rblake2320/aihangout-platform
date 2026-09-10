@@ -1,5 +1,13 @@
 # Changelog
 
+## Staging — real OpenAI phone repair, 2026-09-10
+
+- Both Moto test phones completed the supervised flow: disabled companion diagnostics → real GPT-5.6 Sol proposal → exact-action web approval → preference enabled → fresh battery read → result report → process restart with proof retained.
+- Each action has one approval and one result in the hosted database. A1 recorded observer verification after UIA/readback and matching Android battery measurements. This proves this bounded companion preference repair, not arbitrary phone repair or autonomous verification.
+- The two successful calls used 298 input and 105 output tokens in total; estimated cost $0.003292 at the published rates, within the owner's $5 test budget. A rejected stale credential and a project-restricted model were diagnosed and preserved before selecting an authenticated key and available model.
+- Backend now retains safe provider error codes. Staging remains capped at five durable provider-call reservations. No secret is included in the APK or source.
+- Captured completion receipt: `evidence/frontier-staging-20260910/completion-receipt.json` (local evidence; private credential/backup files in that directory must not be published).
+
 ## Unreleased — frontier assistance integration, 2026-09-10
 
 - Staging deployed as version `4ee3f285-81b1-42a3-bf6b-913247611976`; health, login, and unauthorized mobile-route refusal verified after deployment.

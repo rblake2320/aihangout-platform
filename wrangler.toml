@@ -40,10 +40,10 @@ MOBILE_APP_CERT_SHA256 = "b709192f6a09f7c1a93addb13d766f4ad5f134747862d4b7f48143
 # every provider call requires ALL of: MOBILE_ASSISTANCE_ENABLED="1",
 # `wrangler secret put OPENAI_API_KEY --env staging`, OPENAI_MODEL set here, and
 # remaining budget under MOBILE_ASSISTANCE_MAX_CALLS (durable count, default 5).
-# Owner consent for paid calls is pending (A1) -- do not flip to "1" before that.
-MOBILE_ASSISTANCE_ENABLED = "0"
+# Owner authorized up to $5 of testing on 2026-09-10; five durable call slots.
+MOBILE_ASSISTANCE_ENABLED = "1"
 MOBILE_ASSISTANCE_MAX_CALLS = "5"
-# OPENAI_MODEL = "gpt-4.1-mini"   # set only when enabling
+OPENAI_MODEL = "gpt-5.6-sol"
 # JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env staging
 # AI_ARMY_SERVER must be set via: wrangler secret put AI_ARMY_SERVER --env staging
 
