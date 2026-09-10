@@ -33,7 +33,9 @@ async function api(path, { method = 'GET', body, token } = {}) {
   return { status: res.status, json };
 }
 function step(name, r, ok) {
-  receipt.steps.push({ name, status: r.status, ok, sample: JSON.stringify(r.json).slice(0, 200) });
+  // Responses can contain bearer tokens and account information. Retain only
+  // the assertion result here; the action readback below is the proof payload.
+  receipt.steps.push({ name, status: r.status, ok });
   console.log(`${ok ? 'OK ' : 'ERR'} ${name} -> ${r.status}`);
   if (!ok) { receipt.result = 'refused_at_' + name; finish(2); }
 }
@@ -71,8 +73,7 @@ receipt.approval_url = `${base}/mobile-approvals/${actionId}`;
 // already logged in as this account, the operator can inject this token
 // (see report) instead of typing the disposable password into a form.
 receipt.browser_token_hint = 'inject login token into the web app auth store for this origin, then open approval_url';
-console.log(`\nHUMAN STEP -> open ${receipt.approval_url} as ${op.email} and click Approve or Deny.`);
-console.log(`token (disposable test account, local/staging only): ${token}\n`);
+console.log(`\nHUMAN STEP -> sign in using the private operator file, open ${receipt.approval_url}, and click Approve or Deny.`);
 
 // 4. Poll the readback until a terminal decision (or timeout). Never decides itself.
 const deadline = Date.now() + 10 * 60 * 1000;

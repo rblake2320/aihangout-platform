@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — frontier assistance integration, 2026-09-10
+
+- Integrate the bounded OpenAI assistance endpoint and durable request records. Provider calls remain disabled pending live-test credentials and budget authorization.
+- Remove bearer-token and account-response output from the web approval acceptance driver.
+- Prepare the hosted staging database for mobile enrollment and actions, preserving a pre-migration backup and verifying the seven applied migration records and active-device triggers.
+- Android assistance integration and the real model-to-approved-device-action acceptance remain in progress; no end-to-end frontier repair claim is made by this checkpoint.
+
 ## Unreleased — composed mobile client and approval UI, 2026-09-10
 
 - Integrate Android client from 090aa95: owner-bound signing, digest verification, durable action state, and explicit API failure handling.
