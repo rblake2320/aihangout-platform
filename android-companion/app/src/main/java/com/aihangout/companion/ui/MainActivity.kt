@@ -13,6 +13,11 @@ import com.aihangout.companion.BuildConfig
 import com.aihangout.companion.crypto.DeviceKeyManager
 import com.aihangout.companion.crypto.SigningPayloadValidator
 import com.aihangout.companion.data.ActionJournal
+import com.aihangout.companion.data.AssistanceProposalValidator
+import com.aihangout.companion.data.AssistanceRecord
+import com.aihangout.companion.data.DiagnosticsDisabledException
+import com.aihangout.companion.data.DiagnosticsPreference
+import com.aihangout.companion.diagnostics.RepairExecutor
 import com.aihangout.companion.data.JournalState
 import com.aihangout.companion.data.Phase
 import com.aihangout.companion.data.RecoveryResolver
@@ -60,7 +65,26 @@ class MainActivity : AppCompatActivity() {
         val agentNameInput = EditText(this).apply { hint = "Agent name (device nickname)"; setText("android-companion-1") }
         val runButton = Button(this).apply { text = "Enroll + run one battery-status check" }
         val archiveButton = Button(this).apply { text = "Archive unresolved journal/lock (preserve evidence)" }
+        diagnosticsPreference = DiagnosticsPreference(tokenStore.phaseStore)
+        diagnosticsView = TextView(this).apply { text = renderDiagnosticsPreference() }
+        val toggleDiagnosticsButton = Button(this).apply { text = "Toggle companion diagnostics preference (manual)" }
+        val askAiButton = Button(this).apply { text = "Ask AI for help (backend model diagnosis -> web approval)" }
         statusView = TextView(this).apply { text = statusLog.append(tokenStore.lastResult ?: "Idle.") }
+
+        toggleDiagnosticsButton.setOnClickListener {
+            try {
+                diagnosticsPreference.setEnabled(!diagnosticsPreference.isEnabled())
+                diagnosticsView.text = renderDiagnosticsPreference()
+                log("Diagnostics preference set manually by the human: ${diagnosticsPreference.isEnabled()}")
+            } catch (e: Exception) { log("Preference NOT changed: ${e.message}") }
+        }
+        askAiButton.setOnClickListener {
+            val email = emailInput.text.toString()
+            val password = passwordInput.text.toString()
+            val agentName = agentNameInput.text.toString()
+            askAiButton.isEnabled = false
+            Thread { askAiForHelp(email, password, agentName, askAiButton) }.start()
+        }
 
         runButton.setOnClickListener {
             val email = emailInput.text.toString()
@@ -80,6 +104,9 @@ class MainActivity : AppCompatActivity() {
             addView(emailInput)
             addView(passwordInput)
             addView(agentNameInput)
+            addView(diagnosticsView)
+            addView(toggleDiagnosticsButton)
+            addView(askAiButton)
             addView(runButton)
             addView(archiveButton)
             addView(statusView)
@@ -89,6 +116,15 @@ class MainActivity : AppCompatActivity() {
 
     /** Bounded panel model; mutated only on the main thread via [mainHandler]. */
     private val statusLog = StatusLog()
+    private lateinit var diagnosticsPreference: DiagnosticsPreference
+    private lateinit var diagnosticsView: TextView
+
+    private fun renderDiagnosticsPreference(): String =
+        "Companion diagnostics preference: ${if (diagnosticsPreference.isEnabled()) "ENABLED" else "DISABLED (battery check will refuse)"}"
+
+    private fun refreshDiagnosticsView() {
+        mainHandler.post { diagnosticsView.text = renderDiagnosticsPreference() }
+    }
 
     private fun log(line: String) {
         mainHandler.post { statusView.text = statusLog.append(line) }
@@ -314,6 +350,190 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Endpoint-bound identity (A1 integration dependency, 2026-09-10): the cached
+     * deviceId is valid only for the owner+backend that issued it. On a different
+     * backend/owner the prior binding, any journal and any assistance record are
+     * ARCHIVED (append-only) and fresh enrollment is required. A legacy unbound id
+     * (both Motos) is adopted once for the first owner+backend it is used with.
+     */
+    private fun resolveBoundDeviceId(jwt: String, ownerUserId: String, agentName: String, spki: String, journal: ActionJournal): String? {
+        val binding = com.aihangout.companion.data.DeviceBinding(tokenStore.phaseStore)
+        return when (val r = binding.resolve(ownerUserId, BuildConfig.AIHANGOUT_BASE_URL, tokenStore.deviceId)) {
+            is com.aihangout.companion.data.DeviceBinding.Resolution.Bound -> r.deviceId
+            com.aihangout.companion.data.DeviceBinding.Resolution.None -> null
+            is com.aihangout.companion.data.DeviceBinding.Resolution.LegacyUnbound -> {
+                // Never trusted on its own (A1 review: that is the loopback-to-staging
+                // bug). Ask THIS backend, authenticated, whether it issued this id to
+                // this device's own key; anything else quarantines the id.
+                log("Cached deviceId ${r.legacyDeviceId} has no backend binding; confirming with an authenticated readback before using it...")
+                val lookup = api.lookupDevice(jwt, agentName)
+                val res = RecoveryResolver.resolveEnrollment(agentName, spki, lookup)
+                if (res is RecoveryResolver.EnrollmentResolution.Adopt && res.deviceId == r.legacyDeviceId) {
+                    binding.confirmLegacy(r.legacyDeviceId, res.deviceId, ownerUserId, BuildConfig.AIHANGOUT_BASE_URL)
+                    log("Backend confirmed deviceId ${r.legacyDeviceId} for this key and owner; bound to ${BuildConfig.AIHANGOUT_BASE_URL}.")
+                    r.legacyDeviceId
+                } else {
+                    val reason = "unbound legacy id not confirmed by ${BuildConfig.AIHANGOUT_BASE_URL} for owner $ownerUserId (readback: ${res::class.simpleName})"
+                    log("Cached deviceId ${r.legacyDeviceId} is NOT confirmed by this backend; quarantining it (evidence kept) and enrolling fresh.")
+                    if (journal.load() != null) journal.archive(reason)
+                    if (journal.enrollmentUnknown()) journal.archiveEnrollmentLock(reason)
+                    binding.archiveLegacy(r.legacyDeviceId, reason)
+                    tokenStore.deviceId = null
+                    null
+                }
+            }
+            is com.aihangout.companion.data.DeviceBinding.Resolution.Transition -> {
+                val reason = "backend/owner changed: prior owner=${r.priorOwnerUserId} baseUrl=${r.priorBaseUrl}, now owner=$ownerUserId baseUrl=${BuildConfig.AIHANGOUT_BASE_URL}"
+                log("IDENTITY TRANSITION: cached deviceId ${r.priorDeviceId} belongs to ${r.priorBaseUrl} (owner ${r.priorOwnerUserId}); it will NOT be reused here. Archiving prior binding/journal/assistance evidence, then enrolling fresh.")
+                if (journal.load() != null) journal.archive(reason)
+                if (journal.enrollmentUnknown()) journal.archiveEnrollmentLock(reason)
+                AssistanceRecord(tokenStore.phaseStore, r.priorOwnerUserId, r.priorBaseUrl).load()?.let {
+                    AssistanceRecord(tokenStore.phaseStore, r.priorOwnerUserId, r.priorBaseUrl).markFailed(reason)
+                }
+                binding.archiveForTransition(reason)
+                tokenStore.deviceId = null
+                null
+            }
+        }
+    }
+
+    private fun persistEnrollment(deviceId: String, ownerUserId: String) {
+        tokenStore.deviceId = deviceId
+        com.aihangout.companion.data.DeviceBinding(tokenStore.phaseStore).bind(deviceId, ownerUserId, BuildConfig.AIHANGOUT_BASE_URL)
+    }
+
+    /** Polls until approved (readback returned), terminal (null, journal cleared)
+     * or timed out (null). Shared by the battery flow and the AI-repair flow. */
+    private fun pollForApproval(jwt: String, actionId: String, journal: ActionJournal): JSONObject? {
+        log("Polling for approval (up to 15 minutes, checking every 5s)...")
+        var consecutiveTransientFailures = 0
+        val deadline = System.currentTimeMillis() + 15 * 60 * 1000
+        while (System.currentTimeMillis() < deadline) {
+            // A single flaky poll must not throw away an otherwise-successful
+            // wait; only a genuine auth failure, an explicit terminal status, or
+            // ten consecutive failures ends the loop early.
+            try {
+                val readback = api.getAction(jwt, actionId)
+                consecutiveTransientFailures = 0
+                val status = readback.getJSONObject("intent").getString("status")
+                if (status == "approved") return readback
+                if (status == "expired" || status == "denied" || status == "revoked") {
+                    log("Action ended with status=$status, stopping.")
+                    journal.clear()
+                    return null
+                }
+            } catch (e: AihangoutApiException) {
+                if (e.httpStatus in 401..403 || e.httpStatus == 404) throw e
+                consecutiveTransientFailures++
+                log("Poll attempt failed with a transient-looking server error (HTTP ${e.httpStatus}), retrying: ${e.message}")
+            } catch (e: IOException) {
+                consecutiveTransientFailures++
+                log("Poll attempt failed with a network error, retrying: ${e.message}")
+            }
+            if (consecutiveTransientFailures >= 10) {
+                throw IOException("Polling for approval failed $consecutiveTransientFailures times in a row -- stopping rather than retrying indefinitely.")
+            }
+            Thread.sleep(5000)
+        }
+        return null
+    }
+
+    /**
+     * First frontier workflow (A1-frontier-phone-wiring-contract-20260910.md):
+     * diagnostics disabled -> ask the backend model (server-side key, never
+     * on the phone) -> render its diagnosis as untrusted text -> accept ONLY
+     * the fixed proposal -> ordinary ui_click intent with the literal target
+     * -> existing digest-bound web approval -> RepairExecutor flips this app's
+     * preference and proves it with a fresh read -> hash reported, proof
+     * persisted. Uses the same write-ahead journal and recovery as the
+     * battery flow; a pending journal must be resolved first.
+     */
+    private fun askAiForHelp(email: String, password: String, agentName: String, button: Button) {
+        try {
+            log("Logging in...")
+            val loginResult = api.login(email, password)
+            val jwt = loginResult.jwt
+            tokenStore.jwt = jwt
+            markConnected()
+            val journal = ActionJournal(tokenStore.phaseStore, loginResult.userId, BuildConfig.AIHANGOUT_BASE_URL)
+            if (journal.load() != null) {
+                log("A pending action journal exists; tap Run to reconcile it (or Archive unresolved) before asking for help.")
+                return
+            }
+            keyManager.ensureKeyExists()
+            val spki = keyManager.exportPublicKeySpkiBase64()
+            var deviceId = resolveBoundDeviceId(jwt, loginResult.userId, agentName, spki, journal)
+            if (deviceId == null) {
+                deviceId = enrollDevice(jwt, loginResult.userId, agentName, spki,
+                    keyManager.packageName(), keyManager.signingCertSha256(), journal)
+                persistEnrollment(deviceId, loginResult.userId)
+                if (journal.enrollmentUnknown()) journal.clearEnrollmentUnknown()
+            }
+            val resolvedDeviceId = checkNotNull(deviceId)
+
+            val record = AssistanceRecord(tokenStore.phaseStore, loginResult.userId, BuildConfig.AIHANGOUT_BASE_URL)
+            val req = record.beginOrResume(resolvedDeviceId)
+            log("Asking the backend model for help (requestId=${req.requestId}, diagnosticsEnabled=${diagnosticsPreference.isEnabled()}, appVersion=${BuildConfig.VERSION_NAME}). Only those fields are sent.")
+            val response = try {
+                api.requestAssistance(jwt, resolvedDeviceId, req.requestId, diagnosticsPreference.isEnabled(), BuildConfig.VERSION_NAME)
+            } catch (e: AihangoutApiException) {
+                record.markFailed("HTTP ${e.httpStatus}: ${e.message}")
+                throw e
+            }
+            // Ambiguous outcomes propagate with the record left PENDING: the same requestId is reused next time.
+
+            val outcome = AssistanceProposalValidator.validate(response, req.requestId)
+            val diagnosis = when (outcome) {
+                is AssistanceProposalValidator.Outcome.Accepted -> outcome.diagnosis
+                is AssistanceProposalValidator.Outcome.NoAction -> outcome.diagnosis
+                is AssistanceProposalValidator.Outcome.Rejected -> outcome.diagnosis
+            }
+            record.markAnswered(diagnosis, response.optJSONObject("proposal")?.toString())
+            log("Model diagnosis (untrusted text, ${response.optString("provider", "?")}/${response.optString("model", "?")}): $diagnosis")
+
+            when (outcome) {
+                is AssistanceProposalValidator.Outcome.NoAction -> { log("Model proposed no action. Nothing to approve."); return }
+                is AssistanceProposalValidator.Outcome.Rejected -> { log("Proposal REFUSED (not the fixed contract): ${outcome.reason}. Nothing will be executed."); return }
+                is AssistanceProposalValidator.Outcome.Accepted -> Unit
+            }
+
+            log("Accepted fixed proposal. Creating a ui_click intent with the literal target '${AssistanceProposalValidator.TARGET}' for web approval...")
+            val idempotencyKey = "android-repair-${UUID.randomUUID()}"
+            journal.beginCreate(idempotencyKey, resolvedDeviceId, AssistanceProposalValidator.CAPABILITY, AssistanceProposalValidator.TARGET)
+            val intent = try {
+                api.createIntent(jwt, resolvedDeviceId, AssistanceProposalValidator.CAPABILITY, AssistanceProposalValidator.TARGET, idempotencyKey)
+            } catch (e: AihangoutApiException) { journal.clear(); throw e }
+            val actionId = intent.getString("actionId")
+            journal.markCreated(actionId, intent.getString("riskTier"), intent.getString("actionDigest"))
+            record.markConsumed()
+            log("Intent created: actionId=$actionId (riskTier=${intent.getString("riskTier")}). Approve it on the AIHangout web app now.")
+
+            val approved = pollForApproval(jwt, actionId, journal) ?: run {
+                log("Not approved (timed out or denied). Nothing executed."); return
+            }
+            val expected = ActionApprovalVerifier.ExpectedAction(
+                actionId = actionId, deviceId = resolvedDeviceId, capability = AssistanceProposalValidator.CAPABILITY,
+                riskTier = intent.getString("riskTier"), targetDescription = AssistanceProposalValidator.TARGET,
+                createdDigest = intent.getString("actionDigest")
+            )
+            executeApprovedAction(expected, approved, jwt, resolvedDeviceId, idempotencyKey, actionId, journal)
+        } catch (e: DiagnosticsDisabledException) {
+            log(e.message ?: "diagnostics disabled")
+        } catch (e: IOException) {
+            markDisconnected(e)
+            log("DISCONNECTED: the backend did not respond. Assistance request/journal preserved; tap again once reachable (same requestId, no blind replay).")
+        } catch (e: com.aihangout.companion.net.ResponseIntegrityException) {
+            log("OUTCOME UNKNOWN: ${e.message}. Record preserved; the same requestId is reused next time.")
+        } catch (e: AihangoutApiException) {
+            log("REFUSED by server (HTTP ${e.httpStatus}): ${e.message}")
+        } catch (e: Exception) {
+            log("ERROR (${e.javaClass.simpleName}): ${e.message}")
+        } finally {
+            mainHandler.post { button.isEnabled = true }
+        }
+    }
+
     /** Runs on a background thread -- all network/crypto calls here are
      * blocking, deliberately kept off the main thread. */
     private fun runFlow(email: String, password: String, agentName: String, runButton: Button) {
@@ -336,7 +556,7 @@ class MainActivity : AppCompatActivity() {
             // (FOREIGN_JOURNAL) instead of being resumed.
             val journal = ActionJournal(tokenStore.phaseStore, loginResult.userId, BuildConfig.AIHANGOUT_BASE_URL)
 
-            var deviceId = tokenStore.deviceId
+            var deviceId = resolveBoundDeviceId(jwt, loginResult.userId, agentName, spki, journal)
             if (deviceId == null && journal.enrollmentUnknown()) {
                 // A previous enroll POST's outcome was never confirmed. Ask the
                 // backend by the identity the lock recorded (never the text field,
@@ -370,10 +590,10 @@ class MainActivity : AppCompatActivity() {
             }
             if (deviceId == null) {
                 deviceId = enrollDevice(jwt, loginResult.userId, agentName, spki, packageName, certSha256, journal)
-                tokenStore.deviceId = deviceId
+                persistEnrollment(deviceId, loginResult.userId)
                 if (journal.enrollmentUnknown()) journal.clearEnrollmentUnknown()
             } else {
-                log("Already enrolled. deviceId=$deviceId")
+                log("Already enrolled on this backend. deviceId=$deviceId")
             }
 
             // Kotlin does not smart-cast a reassigned `var` across the
@@ -436,6 +656,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } else {
+                // The diagnostics preference truly gates the read: with it
+                // disabled no intent is even created -- the human either
+                // enables it manually or goes through 'Ask AI for help'.
+                diagnosticsPreference.requireEnabled()
                 log("Creating a battery_status_read action intent...")
                 val newIdempotencyKey = "android-${UUID.randomUUID()}"
                 val capability = "battery_status_read"
@@ -467,43 +691,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-            log("Polling for approval (up to 15 minutes, checking every 5s)...")
-            var approvedReadback: JSONObject? = null
-            var consecutiveTransientFailures = 0
-            val deadline = System.currentTimeMillis() + 15 * 60 * 1000
-            while (System.currentTimeMillis() < deadline) {
-                // A single flaky poll (a mobile-network blip, a transient 5xx)
-                // must not throw away an otherwise-successful 15-minute wait --
-                // only a genuine auth failure or an explicit terminal status
-                // ends the loop early. Ten consecutive transient failures (50s
-                // of total outage) is treated as a real, not transient, problem.
-                try {
-                    val readback = api.getAction(jwt, actionId)
-                    consecutiveTransientFailures = 0
-                    val status = readback.getJSONObject("intent").getString("status")
-                    if (status == "approved") { approvedReadback = readback; break }
-                    if (status == "expired" || status == "denied" || status == "revoked") {
-                        log("Action ended with status=$status, stopping.")
-                        journal.clear()
-                        break
-                    }
-                } catch (e: AihangoutApiException) {
-                    if (e.httpStatus in 401..403 || e.httpStatus == 404) {
-                        // Unrecoverable by retrying: the token/action itself is
-                        // invalid, not a transient server hiccup.
-                        throw e
-                    }
-                    consecutiveTransientFailures++
-                    log("Poll attempt failed with a transient-looking server error (HTTP ${e.httpStatus}), retrying: ${e.message}")
-                } catch (e: IOException) {
-                    consecutiveTransientFailures++
-                    log("Poll attempt failed with a network error, retrying: ${e.message}")
-                }
-                if (consecutiveTransientFailures >= 10) {
-                    throw IOException("Polling for approval failed $consecutiveTransientFailures times in a row -- stopping rather than retrying indefinitely.")
-                }
-                Thread.sleep(5000)
-            }
+            val approvedReadback = pollForApproval(jwt, actionId, journal)
 
             if (approvedReadback == null) {
                 log("Not approved (timed out or denied). Stopping without executing anything.")
@@ -538,18 +726,34 @@ class MainActivity : AppCompatActivity() {
         log("Verifying the approved action matches exactly what this device proposed before executing anything...")
         ActionApprovalVerifier.verifyApprovedForExecution(expected, approvedReadback)
 
-        // EFFECT_INTENDED is committed BEFORE the reader runs: a crash from
-        // here on reopens as QUARANTINE_EFFECT_UNKNOWN, never as a second read.
+        // EFFECT_INTENDED is committed BEFORE the effect runs: a crash from
+        // here on reopens as QUARANTINE_EFFECT_UNKNOWN, never as a second run.
         journal.markEffectIntended()
-        log("Verified. Reading battery status...")
         val reader = AndroidDeviceReader(this)
-        val battery = reader.readBatteryStatus()
-        val contentJson = ResultHasher.batteryStatusJson(battery)
+        val contentJson = when (expected.capability) {
+            "battery_status_read" -> {
+                diagnosticsPreference.requireEnabled()
+                log("Verified. Reading battery status...")
+                val battery = reader.readBatteryStatus()
+                log("Read: percent=${battery.percent} charging=${battery.isCharging}. Reporting only the hash, never the raw reading, to the backend.")
+                ResultHasher.batteryStatusJson(battery)
+            }
+            "ui_click" -> {
+                // The only supported repair: this app's own preference, matched
+                // literally inside RepairExecutor; never system settings or coordinates.
+                log("Verified. Executing approved repair: enabling THIS app's diagnostics preference, then a fresh battery read...")
+                val outcome = RepairExecutor(diagnosticsPreference, reader).execute(expected.capability, expected.targetDescription)
+                refreshDiagnosticsView()
+                log("Repair done: preference before=${outcome.preferenceBefore} after=${outcome.preferenceAfter}; battery percent=${outcome.battery.percent} charging=${outcome.battery.isCharging}. Reporting the hash only.")
+                tokenStore.lastResult = "Repair proof: diagnostics before=${outcome.preferenceBefore} after=${outcome.preferenceAfter}, battery=${outcome.battery.percent}% (action $actionId)"
+                outcome.toContentJson()
+            }
+            else -> throw IllegalStateException("Refusing to execute unsupported capability '${expected.capability}'.")
+        }
         val hash = ResultHasher.hashStructuredResult(
-            capability = "battery_status_read", actionId = actionId, deviceId = resolvedDeviceId,
+            capability = expected.capability, actionId = actionId, deviceId = resolvedDeviceId,
             redactionPolicy = ResultHasher.REDACTION_POLICY_STRUCTURED_FIELDS_V1, contentJson = contentJson
         )
-        log("Read: percent=${battery.percent} charging=${battery.isCharging}. Reporting only the hash, never the raw reading, to the backend.")
 
         // OUTPUT_RECORDED (the exact hash to be sent) is committed BEFORE the
         // report POST, so a lost response can only ever re-submit this hash.
