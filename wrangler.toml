@@ -30,6 +30,12 @@ id = "c8a1217f6f2a43028e6b8051fd2ab9d7"
 ENVIRONMENT = "staging"
 API_VERSION = "v1"
 BETA_MODE = "true"
+# Mobile companion enrollment identity (src/mobile-enrollment.js). Non-secret build
+# identity constants: the Android applicationId and the SHA-256 of the APK signing
+# certificate. Staging pins this machine's DEBUG keystore cert; production must pin a
+# release signing identity instead (owner decision) -- never copy this block to prod.
+MOBILE_APP_ID = "com.aihangout.companion"
+MOBILE_APP_CERT_SHA256 = "b709192f6a09f7c1a93addb13d766f4ad5f134747862d4b7f4814357d9fc0b4e"
 # JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env staging
 # AI_ARMY_SERVER must be set via: wrangler secret put AI_ARMY_SERVER --env staging
 
