@@ -13,6 +13,7 @@ import com.aihangout.companion.BuildConfig
 import com.aihangout.companion.crypto.DeviceKeyManager
 import com.aihangout.companion.crypto.SigningPayloadValidator
 import com.aihangout.companion.data.ActionJournal
+import com.aihangout.companion.data.AssistanceOutcome
 import com.aihangout.companion.data.AssistanceProposalValidator
 import com.aihangout.companion.data.AssistanceRecord
 import com.aihangout.companion.data.DiagnosticsDisabledException
@@ -474,23 +475,62 @@ class MainActivity : AppCompatActivity() {
 
             val record = AssistanceRecord(tokenStore.phaseStore, loginResult.userId, BuildConfig.AIHANGOUT_BASE_URL)
             val req = record.beginOrResume(resolvedDeviceId)
-            log("Asking the backend model for help (requestId=${req.requestId}, diagnosticsEnabled=${diagnosticsPreference.isEnabled()}, appVersion=${BuildConfig.VERSION_NAME}). Only those fields are sent.")
-            val response = try {
-                api.requestAssistance(jwt, resolvedDeviceId, req.requestId, diagnosticsPreference.isEnabled(), BuildConfig.VERSION_NAME)
-            } catch (e: AihangoutApiException) {
-                record.markFailed("HTTP ${e.httpStatus}: ${e.message}")
-                throw e
-            }
-            // Ambiguous outcomes propagate with the record left PENDING: the same requestId is reused next time.
 
-            val outcome = AssistanceProposalValidator.validate(response, req.requestId)
+            // Restart/timeout reconciliation (A5 contract): a PENDING record from a
+            // prior tap is read back by GET before any second POST. Only an
+            // authoritative `failed` ever leads to a new requestId.
+            var response: JSONObject? = if (req.status == "PENDING" && req.diagnosis == null) {
+                when (val k = AssistanceOutcome.fromReadback(api.getAssistance(jwt, req.requestId))) {
+                    null -> null // server never saw this id: POST it (same id)
+                    is AssistanceOutcome.Kind.Answered -> { log("Backend already holds the answer for requestId=${req.requestId}; not asking again."); k.body }
+                    is AssistanceOutcome.Kind.Unknown -> {
+                        log("requestId=${req.requestId} is still '${k.serverStatus}' on the backend (provider outcome not known). Keeping the same requestId; NOT sending a second request. Tap again later.")
+                        return
+                    }
+                    is AssistanceOutcome.Kind.Failed -> {
+                        record.markFailed("backend status ${k.serverStatus}: ${k.detail}")
+                        log("requestId=${req.requestId} FAILED on the backend (${k.detail}). Evidence kept; tap 'Ask AI for help' again to start a NEW request.")
+                        return
+                    }
+                }
+            } else if (req.status == "ANSWERED" && req.diagnosis != null) {
+                log("Reusing the stored answer for requestId=${req.requestId}.")
+                null
+            } else null
+
+            if (response == null && !(req.status == "ANSWERED" && req.diagnosis != null)) {
+                log("Asking the backend model for help (requestId=${req.requestId}, diagnosticsEnabled=${diagnosticsPreference.isEnabled()}, appVersion=${BuildConfig.VERSION_NAME}). Only those fields are sent.")
+                response = try {
+                    api.requestAssistance(jwt, resolvedDeviceId, req.requestId, diagnosticsPreference.isEnabled(), BuildConfig.VERSION_NAME)
+                } catch (e: AihangoutApiException) {
+                    when (val k = AssistanceOutcome.fromError(e.httpStatus, e.body, e.message ?: "")) {
+                        is AssistanceOutcome.Kind.Unknown -> {
+                            log("Backend reports requestId=${req.requestId} as '${k.serverStatus}' (HTTP ${e.httpStatus}): provider outcome unknown. Same requestId kept; no second request will be sent automatically. Tap again later to reconcile.")
+                            return
+                        }
+                        is AssistanceOutcome.Kind.Failed -> {
+                            record.markFailed("HTTP ${e.httpStatus} ${k.serverStatus}: ${e.message}")
+                            throw e
+                        }
+                        is AssistanceOutcome.Kind.Answered -> k.body
+                    }
+                }
+            }
+            // IOException / ResponseIntegrityException propagate with the record left PENDING: same requestId next time, GET first.
+            if (response == null) {
+                response = JSONObject().put("requestId", req.requestId).put("diagnosis", req.diagnosis)
+                    .put("proposal", req.proposalJson?.let { JSONObject(it) } ?: JSONObject.NULL)
+            }
+            val answer: JSONObject = checkNotNull(response)
+
+            val outcome = AssistanceProposalValidator.validate(answer, req.requestId)
             val diagnosis = when (outcome) {
                 is AssistanceProposalValidator.Outcome.Accepted -> outcome.diagnosis
                 is AssistanceProposalValidator.Outcome.NoAction -> outcome.diagnosis
                 is AssistanceProposalValidator.Outcome.Rejected -> outcome.diagnosis
             }
-            record.markAnswered(diagnosis, response.optJSONObject("proposal")?.toString())
-            log("Model diagnosis (untrusted text, ${response.optString("provider", "?")}/${response.optString("model", "?")}): $diagnosis")
+            record.markAnswered(diagnosis, answer.optJSONObject("proposal")?.toString())
+            log("Model diagnosis (untrusted text, ${answer.optString("provider", "?")}/${answer.optString("model", "?")}): $diagnosis")
 
             when (outcome) {
                 is AssistanceProposalValidator.Outcome.NoAction -> { log("Model proposed no action. Nothing to approve."); return }
