@@ -54,7 +54,8 @@ for index, value in enumerate([credentials['email'], credentials['password'], a.
     adb('shell', 'input', 'keycombination', '113', '29')
     adb('shell', 'input', 'text', value)
 adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
-buttons = [n for n in nodes() if n.get('class') == 'android.widget.Button' and n.get('text') == a.button]
+# Android's default Button presentation uppercases its accessibility text.
+buttons = [n for n in nodes() if n.get('class') == 'android.widget.Button' and n.get('text', '').casefold() == a.button.casefold()]
 if len(buttons) != 1:
     raise RuntimeError('Named submit button absent or ambiguous; nothing submitted')
 tap(buttons[0])
