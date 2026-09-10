@@ -1,0 +1,73 @@
+{
+  "test": "two-moto-real-openai-approved-companion-repair",
+  "status": "PASS_BOUNDED",
+  "model": "gpt-5.6-sol",
+  "successful_model_calls": 2,
+  "rejected_phone_provider_requests": 2,
+  "separate_permission_probe_http": 403,
+  "calls": [
+    {
+      "request_id": "assist-72436b1d-0bce-42c9-b9b1-54aab9762a52",
+      "status": "failed",
+      "error": "provider HTTP 401",
+      "model": "gpt-4.1-mini-2025-04-14",
+      "usage": null,
+      "estimated_usd": null
+    },
+    {
+      "request_id": "assist-6f932d39-fca8-416a-af45-b7d154fec869",
+      "status": "failed",
+      "error": "provider HTTP 403",
+      "model": "gpt-4.1-mini-2025-04-14",
+      "usage": null,
+      "estimated_usd": null
+    },
+    {
+      "request_id": "assist-7eb8d932-62c4-409e-b480-163ab2278c89",
+      "status": "completed",
+      "error": null,
+      "model": "gpt-5.6-sol",
+      "usage": {
+        "input_tokens": 149,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 53,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 202
+      },
+      "estimated_usd": 0.001656
+    },
+    {
+      "request_id": "assist-5febfc65-5d59-4fc2-b8d3-e2c76ee47359",
+      "status": "completed",
+      "error": null,
+      "model": "gpt-5.6-sol",
+      "usage": {
+        "input_tokens": 149,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 52,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 201
+      },
+      "estimated_usd": 0.001636
+    }
+  ],
+  "estimated_successful_call_cost_usd": 0.003292,
+  "budget_usd": 5,
+  "approval_rows_per_action": 1,
+  "result_rows_per_action": 1,
+  "both_restart_checks": true,
+  "scope": "enable this companion app diagnostics only; approval operated by owner-authorized A1 through actual web UI",
+  "independent_observation": "ADB UIA before/after and restart; Android dumpsys battery matches reported reading",
+  "pricing_source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+  "residual": "No general phone repair, exactly-once crash-window, or production-readiness claim. Phone final-state string is a saved snapshot; effect record not automatically verified."
+}

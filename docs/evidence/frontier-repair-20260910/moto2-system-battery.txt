@@ -1,0 +1,5 @@
+  AC powered: false
+  USB powered: true
+  Wireless powered: false
+  level: 100
+  Capacity level: 5

@@ -1,0 +1,4 @@
+Companion diagnostics preference: ENABLED
+Connection: not attempted yet
+Repair proof: diagnostics before=false after=true, battery=100% charging=true (action 83eec3d6-c365-494b-a47b-2ac0f9d7563b, hash reported)
+Action 83eec3d6-c365-494b-a47b-2ac0f9d7563b: Final state: status=approved resultStatus=executed effectStatus=unconfirmed

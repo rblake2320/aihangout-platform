@@ -1,0 +1,27 @@
+{
+  "success": true,
+  "intent": {
+    "action_id": "e2ba3dd9-a6b7-43b6-80c6-1c72dc0b9cd7",
+    "capability": "ui_click",
+    "risk_tier": "device_ui_action",
+    "target_description": "Enable AIHangout companion diagnostics",
+    "action_digest": "2e1cb0c5c17d32dab5d262e7d4e5c175f1db3393a8d30a137dbcce8377226432",
+    "status": "approved",
+    "created_at": "2026-09-10 20:48:37",
+    "expires_at": "2026-09-10T21:03:37.899Z"
+  },
+  "approval": {
+    "approved_digest": "2e1cb0c5c17d32dab5d262e7d4e5c175f1db3393a8d30a137dbcce8377226432",
+    "approved_at": "2026-09-10 20:50:14"
+  },
+  "result": {
+    "result_status": "executed",
+    "result_payload_hash": "sha256:13e35ac5281bb6fc10ccb636029478b7eafb3872ef5c8ac51013ae68c59ba3e6",
+    "reported_at": "2026-09-10 20:50:17"
+  },
+  "effect": {
+    "effect_status": "effect_verified",
+    "verification_note": "Owner-authorized A1 supervised verification: ADB UIA observed diagnostics disabled before, enabled after approval and after process restart; fresh Android system battery matched app reading (100%, USB charging). Receipt SHA256 5a667a1fc6568ebb4197100a2762015750b27010a5fcac84d5895aecf018e55e. This is bounded observer verification, not autonomous device attestation.",
+    "verified_at": "2026-09-10 20:52:46"
+  }
+}

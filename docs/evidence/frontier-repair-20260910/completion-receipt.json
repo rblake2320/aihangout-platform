@@ -1,0 +1,24 @@
+{
+  "status": "PASS_SUPERVISED_TWO_PHONE_REPAIR",
+  "proof_receipt_sha256": "5a667a1fc6568ebb4197100a2762015750b27010a5fcac84d5895aecf018e55e",
+  "effect_verification": "recorded after owner-authorized A1 observations, not self-attestation",
+  "actions": [
+    {
+      "action_id": "83eec3d6-c365-494b-a47b-2ac0f9d7563b",
+      "readback_sha256": "9685bd9a64d557ddea92b6e505a1cba0cd6756882a585e2b598588b040e541c4",
+      "result_hash": "sha256:bd992cdd8d9168014b31b33b8c945c091818fc9c365c86f2dbd19ec25933dc39"
+    },
+    {
+      "action_id": "e2ba3dd9-a6b7-43b6-80c6-1c72dc0b9cd7",
+      "readback_sha256": "5df5084e7976b9a0c1056156b2cae15338bae548cb68d2dec199fec2c02d1c1e",
+      "result_hash": "sha256:13e35ac5281bb6fc10ccb636029478b7eafb3872ef5c8ac51013ae68c59ba3e6"
+    }
+  ],
+  "estimated_successful_model_calls_usd": 0.003292,
+  "budget_usd": 5,
+  "provider_rejections": "retained separately; no token usage returned",
+  "apk_sha256": "d41db6f6fec1b0e98f3712ec49338f664a65d7d90632706be0cb0d4bbc6a76d6",
+  "worker_sha256": "5423da5388345eebcfb7fd8be60d7550888c46a78cabdd0c5a8e85cf7e7354a8",
+  "staging_version": "cc1d293f-80dd-41d7-b321-d8cc9d09c02e",
+  "phone_display_note": "Saved result text predates observer verification; server readbacks above are current."
+}
