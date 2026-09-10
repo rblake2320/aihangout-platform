@@ -1,0 +1,237 @@
+// Mobile companion "Ask AI for help" -- backend lane of the frontier phone
+// wiring contract (Team/tasks/A1-frontier-phone-wiring-contract-20260910.md).
+//
+// POST /api/mobile/assistance: the OWNER (human JWT) submits a narrow, named
+// diagnostic snapshot from an enrolled active device; the server asks the
+// OpenAI Responses API for a diagnosis and a decision constrained to exactly
+// two values (enable_companion_diagnostics | no_action) and compiles the ONLY
+// allowed proposal literally on the server. The model never supplies a
+// device, command, url, capability or target text. Assistance only proposes;
+// execution still goes through /api/mobile/actions/intent and the existing
+// digest-bound web approval.
+//
+// Provider failure / unknown / unusable answers use 424 (Failed Dependency), never
+// 5xx: the Worker's outer handler rewrites any /api/* 5xx into a generic 503 with
+// Retry-After, which would both hide requestId/status and invite the blind retry
+// the contract forbids.
+//
+// Hard gates (all server side): MOBILE_ASSISTANCE_ENABLED === '1' (explicit
+// deployment enable), OPENAI_API_KEY + OPENAI_MODEL present (no fake answers
+// when credentials are absent), a finite per-deployment call cap, request
+// identity persisted BEFORE the provider call, duplicate requestId returns the
+// stored outcome, unknown provider outcomes are recorded and never retried
+// automatically.
+
+const OPERATION = 'enable_companion_diagnostics';
+const PROPOSAL = Object.freeze({
+  operation: OPERATION,
+  capability: 'ui_click',
+  targetDescription: 'Enable AIHangout companion diagnostics',
+});
+const MAX_BODY_BYTES = 2048;
+const DEFAULT_CALL_CAP = 5;
+const REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const APP_VERSION_RE = /^[A-Za-z0-9._+-]{1,40}$/;
+
+const RESPONSE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    decision: { type: 'string', enum: [OPERATION, 'no_action'] },
+    diagnosis: { type: 'string' },
+    reason: { type: 'string' },
+  },
+  required: ['decision', 'diagnosis', 'reason'],
+};
+
+function validateDiagnostics(d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return 'diagnostics must be an object';
+  const keys = Object.keys(d).sort();
+  if (keys.join(',') !== 'appVersion,diagnosticsEnabled,schemaVersion') return 'diagnostics must contain exactly schemaVersion, diagnosticsEnabled, appVersion';
+  if (d.schemaVersion !== 1) return 'diagnostics.schemaVersion must be 1';
+  if (d.diagnosticsEnabled !== false) return 'diagnostics.diagnosticsEnabled must be the boolean false for this workflow';
+  if (typeof d.appVersion !== 'string' || !APP_VERSION_RE.test(d.appVersion)) return 'diagnostics.appVersion invalid';
+  return null;
+}
+
+function providerConfig(env) {
+  return {
+    enabled: env.MOBILE_ASSISTANCE_ENABLED === '1',
+    apiKey: typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.length >= 20 ? env.OPENAI_API_KEY : null,
+    model: typeof env.OPENAI_MODEL === 'string' && /^[A-Za-z0-9._-]{3,64}$/.test(env.OPENAI_MODEL) ? env.OPENAI_MODEL : null,
+    baseUrl: typeof env.OPENAI_BASE_URL === 'string' && env.OPENAI_BASE_URL ? env.OPENAI_BASE_URL.replace(/\/$/, '') : 'https://api.openai.com',
+    cap: Number.isInteger(Number(env.MOBILE_ASSISTANCE_MAX_CALLS)) && Number(env.MOBILE_ASSISTANCE_MAX_CALLS) > 0 ? Number(env.MOBILE_ASSISTANCE_MAX_CALLS) : DEFAULT_CALL_CAP,
+    // Test-only in-process stub. Never set in any wrangler.toml environment; it is
+    // only honoured when the test fault-injection flag is also on.
+    stub: env.MOBILE_FAULT_INJECT_ENABLED === '1' && typeof env.OPENAI_BASE_URL === 'string' && env.OPENAI_BASE_URL.startsWith('stub://'),
+  };
+}
+
+// Deterministic stand-in for the Responses API, selected by requestId prefix so
+// tests can drive every outcome without the network or a key.
+function stubProvider(requestId) {
+  if (requestId.startsWith('stub-noaction')) return { ok: true, status: 200, json: { id: 'resp_stub', model: 'stub-model', output_text: JSON.stringify({ decision: 'no_action', diagnosis: 'Diagnostics already look fine.', reason: 'nothing to change' }), usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } };
+  if (requestId.startsWith('stub-badjson')) return { ok: true, status: 200, json: { id: 'resp_stub', model: 'stub-model', output_text: '{"decision":"reboot_device","diagnosis":"x","reason":"y"}', usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } };
+  if (requestId.startsWith('stub-http500')) return { ok: false, status: 500, json: { error: { message: 'stub upstream failure' } } };
+  if (requestId.startsWith('stub-timeout')) return { ok: false, status: 0, json: null, transport: 'timeout' };
+  return { ok: true, status: 200, json: { id: 'resp_stub', model: 'stub-model', output_text: JSON.stringify({ decision: OPERATION, diagnosis: 'Companion diagnostics are disabled, which blocks the battery check.', reason: 'preference off' }), usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 } } };
+}
+
+async function callProvider(cfg, requestId, diagnostics) {
+  if (cfg.stub) return stubProvider(requestId);
+  const body = {
+    model: cfg.model,
+    input: [
+      { role: 'system', content: 'You diagnose one narrow condition for the AIHangout mobile companion app. The only permitted repair is enabling the companion app\'s own diagnostics preference. You must not propose touching system settings, other apps, coordinates, or anything else. Output JSON only.' },
+      { role: 'user', content: `Diagnostics snapshot: ${JSON.stringify(diagnostics)}. If diagnosticsEnabled is false, decide whether enabling companion diagnostics is the right repair.` },
+    ],
+    text: { format: { type: 'json_schema', name: 'companion_assistance', strict: true, schema: RESPONSE_SCHEMA } },
+    max_output_tokens: 300,
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(`${cfg.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    let json = null; try { json = await res.json(); } catch { json = null; }
+    return { ok: res.ok, status: res.status, json };
+  } catch (err) {
+    return { ok: false, status: 0, json: null, transport: err?.name === 'AbortError' ? 'timeout' : 'network' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Extract the structured text from a Responses API payload without trusting
+// anything beyond the two allowed decisions.
+function parseDecision(json) {
+  let text = typeof json?.output_text === 'string' ? json.output_text : null;
+  if (text === null && Array.isArray(json?.output)) {
+    for (const item of json.output) for (const part of (item?.content || [])) if (part?.type === 'output_text' && typeof part.text === 'string') { text = part.text; break; }
+  }
+  if (typeof text !== 'string' || text.length > 4000) return null;
+  let parsed; try { parsed = JSON.parse(text); } catch { return null; }
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (parsed.decision !== OPERATION && parsed.decision !== 'no_action') return null;
+  if (typeof parsed.diagnosis !== 'string' || !parsed.diagnosis.trim()) return null;
+  return { decision: parsed.decision, diagnosis: parsed.diagnosis.slice(0, 1000), reason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 500) : '' };
+}
+
+function storedResponse(row) {
+  const proposal = row.proposal_json ? JSON.parse(row.proposal_json) : null;
+  return { success: true, requestId: row.request_id, status: row.status, diagnosis: row.diagnosis, provider: row.provider, model: row.model, proposal, usage: row.usage_json ? JSON.parse(row.usage_json) : null, deduplicated: true };
+}
+
+export function installMobileAssistance(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse }) {
+  const failure = (error, status = 400, extra = {}) => jsonResponse({ success: false, error, ...extra }, { status });
+
+  router.post('/api/mobile/assistance', async (request, env) => {
+    try {
+      const user = await authenticate(request, env);
+      if (!user) return failure('Authentication required', 401);
+      const rl = await checkRateLimit(env.AIHANGOUT_KV, request.headers.get('CF-Connecting-IP') || 'unknown', user.id, 'mobile_assistance');
+      if (rl.limited) return rateLimitResponse(rl);
+
+      const raw = await request.text();
+      if (raw.length > MAX_BODY_BYTES) return failure('Request body too large', 413);
+      const body = safeJsonParse(raw);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return failure('JSON object body required');
+      const keys = Object.keys(body).sort();
+      if (keys.join(',') !== 'deviceId,diagnostics,requestId') return failure('Body must contain exactly deviceId, requestId, diagnostics');
+      const deviceId = String(body.deviceId || '');
+      const requestId = String(body.requestId || '');
+      if (!/^[0-9a-f-]{36}$/.test(deviceId)) return failure('deviceId invalid');
+      if (!REQUEST_ID_RE.test(requestId)) return failure('requestId must be 8-64 chars of A-Z a-z 0-9 _ -');
+      const diagError = validateDiagnostics(body.diagnostics);
+      if (diagError) return failure(diagError);
+      const diagnostics = { schemaVersion: 1, diagnosticsEnabled: false, appVersion: sanitizeContent(body.diagnostics.appVersion) };
+
+      // Ownership is in the SQL, not a JS comparison afterwards.
+      const device = await env.AIHANGOUT_DB.prepare(
+        "SELECT device_id FROM mobile_devices WHERE device_id = ? AND owner_user_id = ? AND status = 'active'"
+      ).bind(deviceId, user.id).first();
+      if (!device) return failure('No active device found under your account with that id', 404);
+
+      // Dedup / no blind retry: the stored outcome wins.
+      const existing = await env.AIHANGOUT_DB.prepare(
+        'SELECT * FROM mobile_assistance_requests WHERE owner_user_id = ? AND request_id = ?'
+      ).bind(user.id, requestId).first();
+      if (existing) {
+        if (existing.device_id !== deviceId) return failure('requestId already used for a different device', 409);
+        if (existing.status === 'completed') return jsonResponse(storedResponse(existing));
+        return failure(`Assistance request is '${existing.status}'; create a new requestId to ask again`, 409, { requestId, status: existing.status, error_detail: existing.error || null });
+      }
+
+      const cfg = providerConfig(env);
+      if (!cfg.enabled) return failure('Mobile assistance is not enabled on this deployment', 503);
+      if (!cfg.stub && (!cfg.apiKey || !cfg.model)) return failure('Assistance provider is not configured', 503);
+
+      // Persist identity BEFORE the provider call. PRIMARY KEY makes a concurrent
+      // duplicate lose here instead of double-calling the provider.
+      try {
+        await env.AIHANGOUT_DB.prepare(
+          "INSERT INTO mobile_assistance_requests (request_id, owner_user_id, device_id, status, diagnostics_json, provider, model) VALUES (?, ?, ?, 'pending', ?, 'openai', ?)"
+        ).bind(requestId, user.id, deviceId, JSON.stringify(diagnostics), cfg.stub ? 'stub-model' : cfg.model).run();
+      } catch (dbErr) {
+        if (String(dbErr.message || '').includes('UNIQUE constraint failed')) return failure('Assistance request already in progress', 409, { requestId, status: 'pending' });
+        throw dbErr;
+      }
+
+      // Finite per-deployment cap, counted from durable rows, checked after the
+      // row exists so the cap itself cannot be raced past.
+      const calls = await env.AIHANGOUT_DB.prepare('SELECT COUNT(*) AS n FROM mobile_assistance_requests WHERE provider_called_at IS NOT NULL').first();
+      if ((calls?.n || 0) >= cfg.cap) {
+        await env.AIHANGOUT_DB.prepare("UPDATE mobile_assistance_requests SET status = 'failed', error = 'call cap reached', completed_at = CURRENT_TIMESTAMP WHERE owner_user_id = ? AND request_id = ?").bind(user.id, requestId).run();
+        return failure(`Assistance call cap reached (${cfg.cap}); no provider call made`, 429, { requestId, status: 'failed' });
+      }
+      await env.AIHANGOUT_DB.prepare('UPDATE mobile_assistance_requests SET provider_called_at = CURRENT_TIMESTAMP WHERE owner_user_id = ? AND request_id = ?').bind(user.id, requestId).run();
+
+      const result = await callProvider(cfg, requestId, diagnostics);
+      const usageJson = result.json?.usage ? JSON.stringify(result.json.usage) : null; // null = unknown, never 0
+
+      if (!result.ok) {
+        // Transport ambiguity (timeout/network) = UNKNOWN outcome: recorded, never retried here.
+        const status = result.transport ? 'unknown' : 'failed';
+        const error = result.transport ? `provider ${result.transport}` : `provider HTTP ${result.status}`;
+        await env.AIHANGOUT_DB.prepare('UPDATE mobile_assistance_requests SET status = ?, error = ?, usage_json = ?, completed_at = CURRENT_TIMESTAMP WHERE owner_user_id = ? AND request_id = ?').bind(status, error, usageJson, user.id, requestId).run();
+        return failure(status === 'unknown' ? 'Assistance outcome unknown; not retried automatically' : 'Assistance provider failed', 424, { requestId, status });
+      }
+
+      const decision = parseDecision(result.json);
+      if (!decision) {
+        await env.AIHANGOUT_DB.prepare("UPDATE mobile_assistance_requests SET status = 'failed', error = 'provider output rejected by schema', usage_json = ?, completed_at = CURRENT_TIMESTAMP WHERE owner_user_id = ? AND request_id = ?").bind(usageJson, user.id, requestId).run();
+        return failure('Assistance provider returned an unusable answer', 424, { requestId, status: 'failed' });
+      }
+
+      const model = typeof result.json?.model === 'string' ? result.json.model.slice(0, 64) : (cfg.stub ? 'stub-model' : cfg.model);
+      const diagnosis = sanitizeContent(decision.diagnosis);
+      const proposal = decision.decision === OPERATION ? { ...PROPOSAL } : null; // compiled literally, never from the model
+      await env.AIHANGOUT_DB.prepare("UPDATE mobile_assistance_requests SET status = 'completed', model = ?, diagnosis = ?, proposal_json = ?, usage_json = ?, completed_at = CURRENT_TIMESTAMP WHERE owner_user_id = ? AND request_id = ?")
+        .bind(model, diagnosis, proposal ? JSON.stringify(proposal) : null, usageJson, user.id, requestId).run();
+
+      return jsonResponse({ success: true, requestId, diagnosis, provider: 'openai', model, proposal, usage: usageJson ? JSON.parse(usageJson) : null, ...(proposal ? {} : { noAction: true, reason: sanitizeContent(decision.reason) }) });
+    } catch (error) {
+      console.error('[MobileAssistance]', error?.message || error);
+      return jsonResponse({ success: false, error: 'Assistance request failed' }, { status: 500 });
+    }
+  });
+
+  router.get('/api/mobile/assistance/:requestId', async (request, env) => {
+    try {
+      const user = await authenticate(request, env);
+      if (!user) return failure('Authentication required', 401);
+      const { requestId } = request.params;
+      if (!REQUEST_ID_RE.test(requestId)) return failure('requestId invalid');
+      const row = await env.AIHANGOUT_DB.prepare('SELECT * FROM mobile_assistance_requests WHERE owner_user_id = ? AND request_id = ?').bind(user.id, requestId).first();
+      if (!row) return failure('No assistance request found under your account with that id', 404);
+      return jsonResponse({ ...storedResponse(row), deduplicated: undefined, error: row.error || null });
+    } catch (error) {
+      console.error('[MobileAssistance] readback', error?.message || error);
+      return jsonResponse({ success: false, error: 'Assistance readback failed' }, { status: 500 });
+    }
+  });
+}

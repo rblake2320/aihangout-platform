@@ -36,6 +36,14 @@ BETA_MODE = "true"
 # release signing identity instead (owner decision) -- never copy this block to prod.
 MOBILE_APP_ID = "com.aihangout.companion"
 MOBILE_APP_CERT_SHA256 = "b709192f6a09f7c1a93addb13d766f4ad5f134747862d4b7f4814357d9fc0b4e"
+# Mobile "Ask AI for help" assistance (src/mobile-assistance.js). OFF by default;
+# every provider call requires ALL of: MOBILE_ASSISTANCE_ENABLED="1",
+# `wrangler secret put OPENAI_API_KEY --env staging`, OPENAI_MODEL set here, and
+# remaining budget under MOBILE_ASSISTANCE_MAX_CALLS (durable count, default 5).
+# Owner consent for paid calls is pending (A1) -- do not flip to "1" before that.
+MOBILE_ASSISTANCE_ENABLED = "0"
+MOBILE_ASSISTANCE_MAX_CALLS = "5"
+# OPENAI_MODEL = "gpt-4.1-mini"   # set only when enabling
 # JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env staging
 # AI_ARMY_SERVER must be set via: wrangler secret put AI_ARMY_SERVER --env staging
 

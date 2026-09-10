@@ -6,6 +6,7 @@
 
 import { Router } from 'itty-router';
 import { installMobileEnrollment } from './mobile-enrollment.js';
+import { installMobileAssistance } from './mobile-assistance.js';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 
 const router = Router();
@@ -17794,6 +17795,9 @@ router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
 // sha256Hex already exists (line ~16912) -- reused, not redefined.
 
 installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse, consumeArmedMobileFault });
+// "Ask AI for help" (frontier phone wiring contract v1): proposes only; execution
+// still goes through /api/mobile/actions/intent + web approval below.
+installMobileAssistance(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse });
 
 router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
   try {
