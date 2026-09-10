@@ -9,6 +9,15 @@ import java.util.concurrent.TimeUnit
 
 class AihangoutApiException(val httpStatus: Int, message: String) : Exception(message)
 
+/** Thrown when a response is well-formed JSON with success:true but is
+ * bound to a different identity than what was requested (e.g. an
+ * actionId echoed back that doesn't match the one asked for). This is
+ * never a legitimate outcome -- refusing beats trusting a response that
+ * might belong to a different resource. */
+class ResponseIntegrityException(message: String) : Exception(message)
+
+data class LoginResult(val jwt: String, val userId: String)
+
 /**
  * Thin client for the AIHangout mobile-companion backend contract
  * (Team/tasks/A3-to-A1-current-help-20260908.md /
@@ -36,18 +45,28 @@ class AihangoutApi(
             else -> throw IllegalArgumentException("unsupported method $method")
         }
         client.newCall(builder.build()).execute().use { resp ->
-            val text = resp.body?.string() ?: "{}"
-            val json = try { JSONObject(text) } catch (e: Exception) { JSONObject() }
-            if (!resp.isSuccessful || json.optBoolean("success", false).not() && resp.code >= 400) {
+            val text = resp.body?.string() ?: ""
+            // A malformed/empty body is never a success, regardless of HTTP
+            // status -- it used to silently become {} and fall through as
+            // "success" whenever the status code also happened to be < 400.
+            val json = try { JSONObject(text) } catch (e: Exception) {
+                throw AihangoutApiException(resp.code, "Response body was not valid JSON (HTTP ${resp.code})")
+            }
+            // success:true is required unconditionally, not only checked
+            // together with resp.code >= 400 -- a 2xx response with
+            // success:false must still be treated as a failure.
+            if (!resp.isSuccessful || !json.optBoolean("success", false)) {
                 throw AihangoutApiException(resp.code, json.optString("error", "HTTP ${resp.code}"))
             }
             return json
         }
     }
 
-    fun login(email: String, password: String): String {
+    fun login(email: String, password: String): LoginResult {
         val res = request("/api/auth/login", "POST", JSONObject().put("email", email).put("password", password), null)
-        return res.getString("token")
+        val jwt = res.getString("token")
+        val userId = res.getJSONObject("user").getLong("id").toString()
+        return LoginResult(jwt, userId)
     }
 
     fun requestChallenge(jwt: String, agentName: String, publicKeySpkiBase64: String, packageName: String, signingCertSha256: String): JSONObject {
@@ -82,8 +101,14 @@ class AihangoutApi(
         return request("/api/mobile/actions/intent", "POST", body, jwt)
     }
 
-    fun getAction(jwt: String, actionId: String): JSONObject =
-        request("/api/mobile/actions/$actionId", "GET", null, jwt)
+    fun getAction(jwt: String, actionId: String): JSONObject {
+        val json = request("/api/mobile/actions/$actionId", "GET", null, jwt)
+        val returnedId = json.optJSONObject("intent")?.optString("action_id")
+        if (returnedId != actionId) {
+            throw ResponseIntegrityException("getAction($actionId) returned data for a different action_id ($returnedId) -- refusing to use it")
+        }
+        return json
+    }
 
     fun reportResult(jwt: String, actionId: String, deviceId: String, idempotencyKey: String, resultStatus: String, resultPayloadHash: String?): JSONObject {
         val body = JSONObject()
@@ -91,6 +116,11 @@ class AihangoutApi(
             .put("idempotencyKey", idempotencyKey)
             .put("resultStatus", resultStatus)
         if (resultPayloadHash != null) body.put("resultPayloadHash", resultPayloadHash)
-        return request("/api/mobile/actions/$actionId/result", "POST", body, jwt)
+        val json = request("/api/mobile/actions/$actionId/result", "POST", body, jwt)
+        val returnedId = json.optString("actionId")
+        if (returnedId != actionId) {
+            throw ResponseIntegrityException("reportResult($actionId) response echoed a different actionId ($returnedId) -- refusing to trust it")
+        }
+        return json
     }
 }

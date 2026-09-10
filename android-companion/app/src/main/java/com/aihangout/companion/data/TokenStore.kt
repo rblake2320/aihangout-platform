@@ -33,5 +33,16 @@ class TokenStore(context: Context) {
         get() = prefs.getString("device_id", null)
         set(value) = prefs.edit().putString("device_id", value).apply()
 
+    /** Everything needed to resume or reconcile an in-flight action across
+     * a process death/restart -- actionId, its idempotencyKey, and the
+     * exact locally-known fields ActionApprovalVerifier needs, as one JSON
+     * blob. Per Team/tasks/A2-to-A3-mobile-client-blockers-20260908.md:
+     * previously only jwt/deviceId persisted, so a restart mid-flow lost
+     * all track of a pending action and the next run silently minted a
+     * fresh idempotencyKey instead of reconciling the old one. */
+    var pendingActionJson: String?
+        get() = prefs.getString("pending_action", null)
+        set(value) = prefs.edit().putString("pending_action", value).apply()
+
     fun clear() = prefs.edit().clear().apply()
 }

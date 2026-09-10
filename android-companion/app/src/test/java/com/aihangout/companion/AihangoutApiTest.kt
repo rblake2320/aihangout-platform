@@ -35,14 +35,15 @@ class AihangoutApiTest {
     }
 
     @Test
-    fun `login sends the real request body and returns the token from a real response`() {
+    fun `login sends the real request body and returns the token and userId from a real response`() {
         server.enqueue(MockResponse().setResponseCode(200).setBody(
             JSONObject().put("success", true).put("token", "jwt-abc123")
                 .put("user", JSONObject().put("id", 1).put("username", "u")).toString()
         ))
 
-        val token = api.login("a@b.test", "pw12345678")
-        assertEquals("jwt-abc123", token)
+        val result = api.login("a@b.test", "pw12345678")
+        assertEquals("jwt-abc123", result.jwt)
+        assertEquals("1", result.userId)
 
         val recorded = server.takeRequest()
         assertEquals("/api/auth/login", recorded.path)
@@ -106,7 +107,7 @@ class AihangoutApiTest {
     fun `getAction is a real GET with no request body and the Authorization header`() {
         server.enqueue(MockResponse().setResponseCode(200).setBody(
             JSONObject().put("success", true)
-                .put("intent", JSONObject().put("status", "approved"))
+                .put("intent", JSONObject().put("action_id", "act-1").put("status", "approved"))
                 .put("approval", JSONObject.NULL).put("result", JSONObject.NULL).put("effect", JSONObject.NULL)
                 .toString()
         ))
@@ -117,5 +118,47 @@ class AihangoutApiTest {
         assertEquals("GET", recorded.method)
         assertEquals("/api/mobile/actions/act-1", recorded.path)
         assertEquals("Bearer jwt-abc", recorded.getHeader("Authorization"))
+    }
+
+    @Test
+    fun `falseSuccessMustRefuse -- a 2xx response with success false is still a failure`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            JSONObject().put("success", false).put("error", "something went wrong server-side").toString()
+        ))
+        val ex = assertThrows(AihangoutApiException::class.java) {
+            api.getAction("jwt", "act-1")
+        }
+        assertTrue(ex.message!!.contains("something went wrong server-side"))
+    }
+
+    @Test
+    fun `malformedSuccessMustRefuse -- a non-JSON 2xx body is refused, never silently treated as empty success`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("not json at all"))
+        assertThrows(AihangoutApiException::class.java) {
+            api.getAction("jwt", "act-1")
+        }
+    }
+
+    @Test
+    fun `foreignIdentityMustRefuse -- getAction refuses a response bound to a different action_id`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            JSONObject().put("success", true)
+                .put("intent", JSONObject().put("action_id", "act-DIFFERENT").put("status", "approved"))
+                .put("approval", JSONObject.NULL).put("result", JSONObject.NULL).put("effect", JSONObject.NULL)
+                .toString()
+        ))
+        assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.getAction("jwt", "act-1")
+        }
+    }
+
+    @Test
+    fun `foreignIdentityMustRefuse -- reportResult refuses a response echoing a different actionId`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            JSONObject().put("success", true).put("actionId", "act-DIFFERENT").toString()
+        ))
+        assertThrows(com.aihangout.companion.net.ResponseIntegrityException::class.java) {
+            api.reportResult("jwt", "act-1", "dev-1", "idem-1", "executed", null)
+        }
     }
 }
