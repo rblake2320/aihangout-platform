@@ -38,6 +38,13 @@ class TokenStore(context: Context) {
         get() = prefs.getString("last_result", null)
         set(value) { check(prefs.edit().putString("last_result", value).commit()) { "Failed to persist verified result" } }
 
+    /** Before/after preference + fresh read of the last approved repair -- its own
+     * field so the generic result summary can never overwrite it (contract:
+     * "record actual before/after ... persist proof/result"). */
+    var repairProof: String?
+        get() = prefs.getString("repair_proof", null)
+        set(value) { check(prefs.edit().putString("repair_proof", value).commit()) { "Failed to persist repair proof" } }
+
     /** Write-ahead phase storage for [ActionJournal] (the in-flight action
      * and the enrollment-unknown lock), backed by the same encrypted prefs
      * but with `commit()` so each write's success is known synchronously.
