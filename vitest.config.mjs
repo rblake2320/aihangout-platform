@@ -31,7 +31,10 @@ export default defineConfig({
             ENVIRONMENT: 'test',
             BETA_MODE: 'true',
             MOBILE_APP_ID: 'ai.hangout.test',
-            MOBILE_APP_CERT_SHA256: 'a'.repeat(64)
+            MOBILE_APP_CERT_SHA256: 'a'.repeat(64),
+            // Isolated test scope only; not production configuration.
+            PATHBOOK_TEST_SCOPE_ID: 'vitest-isolated-pathbook-scope',
+            PATHBOOK_TEST_SCOPE_AUTHORIZATION: 'vitest-only-pathbook-scope-capability' 
           }
         }
       };
