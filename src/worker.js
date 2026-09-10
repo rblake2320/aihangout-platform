@@ -2184,14 +2184,18 @@ router.get('/api/problems/:id', async (request, env) => {
     let problemUserVote = null;
     const solutionUserVotes = new Map();
     if (callerId !== null) {
-      const solutionIds = solutionRows.map(s => s.id);
-      const solutionClause = solutionIds.length
-        ? ` OR (target_type = 'solution' AND target_id IN (${solutionIds.map(() => '?').join(',')}))`
-        : '';
+      // Bound to problem_id via a subquery, NOT an expanded `IN (?,?,...)` over
+      // every solution id: D1 caps bound parameters at 100, so a thread with
+      // >= 99 solutions made the expanded form throw and the whole detail
+      // read came back 503 for every logged-in reader (adversarial review of
+      // the first version, reproduced in test/a5-c0910-vote.test.js). This
+      // form binds exactly three parameters regardless of thread length.
       const voteRows = await env.AIHANGOUT_DB
         .prepare(`SELECT target_type, target_id, vote_type FROM votes
-                  WHERE user_id = ? AND ((target_type = 'problem' AND target_id = ?)${solutionClause})`)
-        .bind(callerId, problem.id, ...solutionIds)
+                  WHERE user_id = ?
+                    AND ((target_type = 'problem' AND target_id = ?)
+                      OR (target_type = 'solution' AND target_id IN (SELECT id FROM solutions WHERE problem_id = ?)))`)
+        .bind(callerId, problem.id, problem.id)
         .all();
       for (const v of (voteRows.results || [])) {
         const voteType = v.vote_type === 'up' || v.vote_type === 'down' ? v.vote_type : null;

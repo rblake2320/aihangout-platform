@@ -1,4 +1,4 @@
-import { SELF } from 'cloudflare:test';
+import { SELF, env } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 
 // Regression: a vote appeared applied and then reverted after the feed refetch
@@ -78,6 +78,33 @@ async function setupVotedProblem() {
 }
 
 describe('GET /api/problems/:id returns the caller\'s own vote', () => {
+  it('still answers (200, user_vote intact) for a thread with 120 solutions -- D1 caps bound parameters at 100', async () => {
+    // Adversarial-review finding on the first version of this fix: the votes
+    // lookup expanded `target_id IN (?,?,...)` over EVERY solution id, so a
+    // thread with >= 99 solutions exceeded D1's documented 100-bound-parameter
+    // limit, the query threw, and the handler's catch returned 500 to every
+    // logged-in reader. The lookup now uses a subquery bound to problem_id
+    // (constant parameter count). Solutions are inserted directly (the
+    // solution route is rate-limited to 5/min/user; 120 real POSTs would
+    // take longer than the whole suite) with a real user id so the detail
+    // route's JOIN on users still matches every row.
+    const { voter, problemId } = await setupVotedProblem();
+    const stmts = [];
+    for (let i = 0; i < 120; i++) {
+      stmts.push(env.AIHANGOUT_DB
+        .prepare('INSERT INTO solutions (problem_id, user_id, solution_text) VALUES (?, ?, ?)')
+        .bind(problemId, voter.id, `bulk solution ${i}`));
+    }
+    await env.AIHANGOUT_DB.batch(stmts);
+
+    const detail = await api(`/api/problems/${problemId}`, { token: voter.token, ip: voter.ip });
+
+    expect(detail.status, JSON.stringify(detail.json).slice(0, 300)).toBe(200);
+    expect(detail.json.problem.user_vote).toBe('up');
+    expect(detail.json.solutions.length).toBeGreaterThanOrEqual(120);
+    for (const s of detail.json.solutions) expect(s.user_vote).toBeNull();
+  });
+
   it('reports user_vote "up" to the voter after they upvoted', async () => {
     const { voter, problemId } = await setupVotedProblem();
 
