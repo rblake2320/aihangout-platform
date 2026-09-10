@@ -18018,7 +18018,10 @@ export default {
         const contentType = request.headers.get('Content-Type') || '';
         const allowsBeaconPayload = url.pathname === '/api/events/batch' &&
           (contentType === '' || contentType.toLowerCase().startsWith('text/plain'));
-        const allowsEmptyBody = url.pathname === '/api/auth/logout';
+        // Body-less mutations: the follow toggle reads only the path param and
+        // the auth header; browsers/axios drop Content-Type on an empty POST.
+        const allowsEmptyBody = url.pathname === '/api/auth/logout' ||
+          /^\/api\/users\/\d+\/follow$/.test(url.pathname);
         if (!allowsBeaconPayload && !allowsEmptyBody &&
             !contentType.toLowerCase().startsWith('application/json')) {
           return jsonResponse({

@@ -129,7 +129,9 @@ export const notificationsAPI = {
 }
 
 export const followAPI = {
-  toggle: (userId: number) => api.post(`/users/${userId}/follow`),
+  // Always send a JSON body: axios drops Content-Type on body-less POSTs and the
+  // Worker's global guard rejects non-JSON mutations with 415.
+  toggle: (userId: number) => api.post(`/users/${userId}/follow`, {}),
   followers: (userId: number) => api.get(`/users/${userId}/followers`),
   following: (userId: number) => api.get(`/users/${userId}/following`),
   isFollowingBatch: (userIds: number[]) =>
