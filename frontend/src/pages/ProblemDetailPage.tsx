@@ -128,6 +128,7 @@ export default function ProblemDetailPage() {
               targetType="problem"
               targetId={problem.id}
               upvotes={problem.upvotes}
+              userVote={problem.user_vote ?? null}
               size="large"
             />
           </div>
@@ -288,6 +289,7 @@ export default function ProblemDetailPage() {
                       targetType="solution"
                       targetId={solution.id}
                       upvotes={solution.upvotes}
+                      userVote={solution.user_vote ?? null}
                     />
                   </div>
                   <div className="flex-grow min-w-0">

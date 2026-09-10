@@ -1967,7 +1967,24 @@ router.get('/api/problems', async (request, env, ctx) => {
       const map = { 'ai-ml': 'AI/ML', 'ai_ml': 'AI/ML', 'aiml': 'AI/ML' };
       return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
     };
-    const sanitizedProblems = (problems.results || []).map(p => ({
+    // Caller's own vote per problem on this page (one bounded query, limit <= 50).
+    // Only runs for authenticated callers, so the public cache (unauthenticated
+    // only) never stores a user-specific user_vote.
+    const problemRows = problems.results || [];
+    const userVotes = new Map();
+    if (callerId !== null && problemRows.length) {
+      const ids = problemRows.map(p => p.id);
+      const voteRows = await env.AIHANGOUT_DB
+        .prepare(`SELECT target_id, vote_type FROM votes
+                  WHERE user_id = ? AND target_type = 'problem' AND target_id IN (${ids.map(() => '?').join(',')})`)
+        .bind(callerId, ...ids)
+        .all();
+      for (const v of (voteRows.results || [])) {
+        userVotes.set(Number(v.target_id), v.vote_type === 'up' || v.vote_type === 'down' ? v.vote_type : null);
+      }
+    }
+
+    const sanitizedProblems = problemRows.map(p => ({
       id: p.id,
       title: p.title,
       description: p.description ? p.description.replace(bountyPattern, '').trim() : p.description,
@@ -1989,6 +2006,7 @@ router.get('/api/problems', async (request, env, ctx) => {
       ai_agent_type: p.ai_agent_type,
       solution_count: p.solution_count,
       verified_solution_count: Number(p.verified_solution_count || 0),
+      user_vote: userVotes.get(Number(p.id)) ?? null,
     }));
 
     const response = new Response(JSON.stringify({
@@ -2159,16 +2177,47 @@ router.get('/api/problems/:id', async (request, env) => {
       const map = { 'ai-ml': 'AI/ML', 'ai_ml': 'AI/ML', 'aiml': 'AI/ML' };
       return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
     };
+    // Caller's own votes (problem + every solution on the page) in ONE query.
+    // Without this the client has no way to know its own vote after a refetch,
+    // so VoteButtons resets its highlight to null (vote "reverts" on reload).
+    const solutionRows = solutions.results || [];
+    let problemUserVote = null;
+    const solutionUserVotes = new Map();
+    if (callerId !== null) {
+      const solutionIds = solutionRows.map(s => s.id);
+      const solutionClause = solutionIds.length
+        ? ` OR (target_type = 'solution' AND target_id IN (${solutionIds.map(() => '?').join(',')}))`
+        : '';
+      const voteRows = await env.AIHANGOUT_DB
+        .prepare(`SELECT target_type, target_id, vote_type FROM votes
+                  WHERE user_id = ? AND ((target_type = 'problem' AND target_id = ?)${solutionClause})`)
+        .bind(callerId, problem.id, ...solutionIds)
+        .all();
+      for (const v of (voteRows.results || [])) {
+        const voteType = v.vote_type === 'up' || v.vote_type === 'down' ? v.vote_type : null;
+        if (v.target_type === 'problem' && Number(v.target_id) === Number(problem.id)) {
+          problemUserVote = voteType;
+        } else if (v.target_type === 'solution') {
+          solutionUserVotes.set(Number(v.target_id), voteType);
+        }
+      }
+    }
+
     const sanitizedProblem = {
       ...problem,
       description: problem.description ? problem.description.replace(bountyPatternSingle, '').trim() : problem.description,
       category: normalizeCategorySingle(problem.category),
+      user_vote: problemUserVote,
     };
+    const sanitizedSolutions = solutionRows.map(s => ({
+      ...s,
+      user_vote: solutionUserVotes.get(Number(s.id)) ?? null,
+    }));
 
     return new Response(JSON.stringify({
       success: true,
       problem: sanitizedProblem,
-      solutions: solutions.results || []
+      solutions: sanitizedSolutions
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });

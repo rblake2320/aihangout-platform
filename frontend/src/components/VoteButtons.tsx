@@ -41,6 +41,9 @@ export default function VoteButtons({
       // Invalidate and refetch relevant queries
       queryClient.invalidateQueries({ queryKey: ['problems'] })
       queryClient.invalidateQueries({ queryKey: ['problem', targetId] })
+      // ProblemDetailPage keys on useParams() id, which is a string; targetId
+      // arrives as a number from the API payload, so the key above never matched.
+      queryClient.invalidateQueries({ queryKey: ['problem', String(targetId)] })
     },
     onError: (error: any) => {
       const message = error.response?.data?.error || 'Failed to vote'
