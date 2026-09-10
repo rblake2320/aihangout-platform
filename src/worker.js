@@ -14432,6 +14432,14 @@ router.get('/api/problem-bank', async (request, env) => {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
+    // impact is a closed vocabulary shared by both data sources below.
+    const VALID_BANK_IMPACTS = ['critical', 'high', 'medium'];
+    if (impact && impact !== 'all' && !VALID_BANK_IMPACTS.includes(impact)) {
+      return new Response(JSON.stringify({ success: false, error: 'impact must be critical, high, or medium' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     // First check if major_problems table has data
     const majorCount = await env.AIHANGOUT_DB
       .prepare('SELECT COUNT(*) as count FROM major_problems')
@@ -14472,14 +14480,24 @@ router.get('/api/problem-bank', async (request, env) => {
       });
     }
 
-    // Fallback: source from existing problems table
-    let whereClause = " WHERE status = 'open'";
+    // Fallback: source from existing problems table.
+    // Problems that pass the first-post gate are stored as 'approved' (see
+    // POST /api/problems effectiveStatus); legacy rows are 'open'. Both are bank-visible.
+    let whereClause = " WHERE status IN ('open','approved')";
     const whereParams = [];
     if (category && category !== 'all') {
       whereClause += ' AND category = ?';
       whereParams.push(category);
     }
-
+    // impact is synthesized from difficulty in the response mapping below
+    // (hard->critical, medium->high, else->medium), so filter with the same rule.
+    if (impact === 'critical') {
+      whereClause += " AND difficulty = 'hard'";
+    } else if (impact === 'high') {
+      whereClause += " AND difficulty = 'medium'";
+    } else if (impact === 'medium') {
+      whereClause += " AND (difficulty IS NULL OR difficulty NOT IN ('hard','medium'))";
+    }
     const countResult = await env.AIHANGOUT_DB
       .prepare('SELECT COUNT(*) as total FROM problems' + whereClause)
       .bind(...whereParams).first();
