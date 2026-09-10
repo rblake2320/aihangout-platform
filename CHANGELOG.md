@@ -62,3 +62,7 @@ These are local candidate results, not production or capacity evidence.
 Security review, combined UI/backend verification, restore testing, and measured capacity
 remain required before launch. Public version history will be updated with the actual
 release after deployment and readback; an unreleased candidate is not a released version.
+
+## Integration checkpoint 2026-09-10
+Participation repairs, pending-content UX, password reset revocation, Pathbook candidate, mobile deny route and Deny UI composed into the mobile integration branch. Android and Pathbook independent HOLD findings remain open; no deployment claimed. Completed action results are retained when a device is revoked. Combined Worker test receipt: merged-participation-20260910.json; frontend 19/19 and build passed.
+
