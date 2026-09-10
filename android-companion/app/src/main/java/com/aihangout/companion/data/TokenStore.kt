@@ -41,6 +41,11 @@ class TokenStore(context: Context) {
     /** Before/after preference + fresh read of the last approved repair -- its own
      * field so the generic result summary can never overwrite it (contract:
      * "record actual before/after ... persist proof/result"). */
+    /** Identity-bound, GET-refreshable display state of the last completed action (see ResultSnapshot). */
+    var lastResultSnapshot: String?
+        get() = prefs.getString("last_result_snapshot", null)
+        set(value) { check(prefs.edit().putString("last_result_snapshot", value).commit()) { "Failed to persist result snapshot" } }
+
     var repairProof: String?
         get() = prefs.getString("repair_proof", null)
         set(value) { check(prefs.edit().putString("repair_proof", value).commit()) { "Failed to persist repair proof" } }

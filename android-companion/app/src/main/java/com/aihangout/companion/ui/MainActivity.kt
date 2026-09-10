@@ -70,10 +70,14 @@ class MainActivity : AppCompatActivity() {
         diagnosticsView = TextView(this).apply { text = renderDiagnosticsPreference() }
         val toggleDiagnosticsButton = Button(this).apply { text = "Toggle companion diagnostics preference (manual)" }
         val askAiButton = Button(this).apply { text = "Ask AI for help (backend model diagnosis -> web approval)" }
+        val refreshButton = Button(this).apply { text = "Refresh last result status (GET only)" }
         statusView = TextView(this).apply {
             tokenStore.repairProof?.let { statusLog.append(it) }
-            text = statusLog.append(tokenStore.lastResult ?: "Idle.")
+            val initial = tokenStore.lastResultSnapshot?.let { com.aihangout.companion.data.ResultSnapshot.fromJson(it).render() }
+                ?: tokenStore.lastResult ?: "Idle."
+            text = statusLog.append(initial)
         }
+        refreshButton.setOnClickListener { refreshLastResult("manual") }
         actionButtons = listOf(runButton, archiveButton, askAiButton)
 
         toggleDiagnosticsButton.setOnClickListener {
@@ -111,6 +115,7 @@ class MainActivity : AppCompatActivity() {
             addView(askAiButton)
             addView(runButton)
             addView(archiveButton)
+            addView(refreshButton)
             addView(statusView)
         }
         setContentView(ScrollView(this).apply { addView(layout) })
@@ -880,9 +885,60 @@ class MainActivity : AppCompatActivity() {
         val finalState = api.getAction(jwt, actionId)
         val decision = journal.decide(checkNotNull(journal.load()), finalState)
         check(decision.outcome == ReopenDecision.Outcome.RECONCILE_RESULT_PRESENT) { decision.reason }
-        val summary = "Action $actionId: ${renderFinalState(finalState)}"
+        val snapshot = com.aihangout.companion.data.ResultSnapshot.fromReadback(
+            finalState, checkNotNull(journal.load()).ownerUserId, BuildConfig.AIHANGOUT_BASE_URL, "reported", System.currentTimeMillis()
+        )
+        tokenStore.lastResultSnapshot = snapshot.toJson()
+        val summary = snapshot.render()
         tokenStore.lastResult = summary
         journal.clear()
         log(summary)
+    }
+
+    /**
+     * GET-only refresh of the persisted last-result display
+     * (Team/tasks/A1-phone-completion-wave-20260910.md, A3 lane). Runs on resume
+     * and on the explicit Refresh button. Never POSTs, approves, re-executes or
+     * touches the journal; a cached value that cannot be refreshed stays on
+     * screen clearly marked (offline / server unknown / foreign).
+     */
+    private fun refreshLastResult(trigger: String) {
+        val raw = tokenStore.lastResultSnapshot ?: return
+        val jwt = tokenStore.jwt ?: run { log("Status refresh ($trigger): no session token; cached result shown as-is."); return }
+        val cached = com.aihangout.companion.data.ResultSnapshot.fromJson(raw)
+        Thread {
+            try {
+                val (readback, offline) = try {
+                    Pair(api.getAction(jwt, cached.actionId), false)
+                } catch (e: IOException) { Pair(null, true) }
+                catch (e: AihangoutApiException) {
+                    if (e.httpStatus == 404) Pair(null, false)
+                    else { log("Status refresh ($trigger) refused by server (HTTP ${e.httpStatus}); cached result kept."); return@Thread }
+                }
+                // Owner binding: the JWT's owner is whoever logged in last; the snapshot
+                // carries the owner it was produced for. A mismatch is refused, not merged.
+                val owner = cached.ownerUserId
+                val outcome = com.aihangout.companion.data.StatusRefresh.merge(
+                    cached, readback, offline, owner, BuildConfig.AIHANGOUT_BASE_URL, System.currentTimeMillis()
+                )
+                val shown = when (outcome) {
+                    is com.aihangout.companion.data.StatusRefresh.Outcome.Updated -> { log("Status refresh ($trigger): ${outcome.whatChanged}."); outcome.snapshot }
+                    is com.aihangout.companion.data.StatusRefresh.Outcome.Unchanged -> outcome.snapshot
+                    is com.aihangout.companion.data.StatusRefresh.Outcome.OfflinePreserved -> outcome.snapshot
+                    is com.aihangout.companion.data.StatusRefresh.Outcome.ServerUnknownPreserved -> outcome.snapshot
+                    is com.aihangout.companion.data.StatusRefresh.Outcome.ForeignRefused -> outcome.snapshot
+                }
+                tokenStore.lastResultSnapshot = shown.toJson()
+                tokenStore.lastResult = shown.render()
+                log("Last result ($trigger): ${shown.render()}")
+            } catch (e: Exception) {
+                log("Status refresh ($trigger) not applied (${e.javaClass.simpleName}: ${e.message}); cached result kept.")
+            }
+        }.start()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (flowGate.activeOwner() == null) refreshLastResult("resume")
     }
 }
