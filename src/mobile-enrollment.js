@@ -86,7 +86,7 @@ export function installMobileEnrollment(router, { authenticate, safeJsonParse, s
       if (result[0].meta.changes !== 1) return failure('Challenge unavailable', 409);
       // Local/test-only ambiguous-POST fault: the device row above is already
       // committed; the response is deliberately lost. Inert unless armed.
-      const injectedFault = consumeArmedMobileFault ? await consumeArmedMobileFault(env, 'enroll_lost_response') : null;
+      const injectedFault = consumeArmedMobileFault ? await consumeArmedMobileFault(env, 'enroll_lost_response', user.id) : null;
       if (injectedFault) return injectedFault;
       return jsonResponse({ success: true, deviceId, agentName: signed.agentName, status: 'active',
         assurance: 'key_possession_only', keySecurityLevel: 'unknown' });

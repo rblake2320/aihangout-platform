@@ -17832,9 +17832,11 @@ router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
 // database work -- so it reproduces "the server committed, the client never
 // saw the response", the exact recovery case the companion must reconcile.
 const MOBILE_FAULTS = new Set(['create_lost_response', 'enroll_lost_response']);
-async function consumeArmedMobileFault(env, name) {
+async function consumeArmedMobileFault(env, name, userId) {
   if (env.MOBILE_FAULT_INJECT_ENABLED !== '1' || !MOBILE_FAULTS.has(name)) return null;
-  const key = `mobile_fault_armed:${name}`;
+  // Bound to the arming user: one user's armed fault can never make another
+  // user's request lose its response (review finding, bcdcb45).
+  const key = `mobile_fault_armed:${name}:${userId}`;
   const armed = await env.AIHANGOUT_KV.get(key);
   if (!armed) return null;
   await env.AIHANGOUT_KV.delete(key);
@@ -17954,7 +17956,7 @@ router.post('/api/mobile/actions/intent', async (request, env, ctx) => {
       })());
     }
 
-    const injectedFault = await consumeArmedMobileFault(env, 'create_lost_response');
+    const injectedFault = await consumeArmedMobileFault(env, 'create_lost_response', user.id);
     if (injectedFault) return injectedFault;
 
     return jsonResponse({ success: true, actionId, actionDigest, riskTier, status: 'awaiting_approval', expiresAt });
@@ -18302,7 +18304,9 @@ router.get('/api/mobile/device-lookup', async (request, env) => {
 router.post('/api/mobile/fault-arm', async (request, env) => {
   try {
     if (env.MOBILE_FAULT_INJECT_ENABLED !== '1') {
-      return new Response('API endpoint not found', { status: 404, headers: corsHeaders });
+      // Byte-identical to the fetch handler's unknown-API response, so the
+      // route is not fingerprintable when disabled.
+      return jsonResponse({ success: false, error: 'API endpoint not found' }, { status: 404 });
     }
     const user = await authenticate(request, env);
     if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
@@ -18311,7 +18315,7 @@ router.post('/api/mobile/fault-arm', async (request, env) => {
     if (!MOBILE_FAULTS.has(fault)) {
       return jsonResponse({ success: false, error: `fault must be one of: ${[...MOBILE_FAULTS].join(', ')}` }, { status: 400 });
     }
-    await env.AIHANGOUT_KV.put(`mobile_fault_armed:${fault}`, String(user.id), { expirationTtl: 3600 });
+    await env.AIHANGOUT_KV.put(`mobile_fault_armed:${fault}:${user.id}`, '1', { expirationTtl: 3600 });
     return jsonResponse({ success: true, fault, armed: true, oneShot: true });
   } catch (error) {
     return errResponse('Fault arming failed', error);

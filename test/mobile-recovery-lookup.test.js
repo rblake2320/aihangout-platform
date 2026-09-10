@@ -142,7 +142,7 @@ describe('one-shot ambiguous-POST fault injection (local/test only)', () => {
     expect(lost.status, lost.text).toBe(503);
     expect(lost.json.success).toBe(false);
     expect(lost.json.service_status).toBe('degraded');
-    expect(await env.AIHANGOUT_KV.get('mobile_fault_armed:create_lost_response'), 'arm key must be consumed').toBeNull();
+    expect(await env.AIHANGOUT_KV.get(`mobile_fault_armed:create_lost_response:${user.id}`), 'arm key must be consumed').toBeNull();
 
     const rows = await env.AIHANGOUT_DB.prepare('SELECT COUNT(*) AS n FROM mobile_action_intents WHERE device_id = ? AND idempotency_key = ?').bind(deviceId, key).first();
     expect(rows.n).toBe(1);
@@ -170,12 +170,25 @@ describe('one-shot ambiguous-POST fault injection (local/test only)', () => {
     expect(lost.status, lost.text).toBe(503);
     expect(lost.json.success).toBe(false);
     expect(lost.json.service_status).toBe('degraded');
-    expect(await env.AIHANGOUT_KV.get('mobile_fault_armed:enroll_lost_response'), 'arm key must be consumed').toBeNull();
+    expect(await env.AIHANGOUT_KV.get(`mobile_fault_armed:enroll_lost_response:${user.id}`), 'arm key must be consumed').toBeNull();
 
     const found = await api(`/api/mobile/device-lookup?agentName=${encodeURIComponent(agent)}`, { token: user.token, ip: user.ip });
     expect(found.status, JSON.stringify(found.json)).toBe(200);
     expect(found.json.device.public_key_spki).toBe(proof.body.publicKeySpki);
     expect(found.json.device.status).toBe('active');
+  });
+
+  it('a fault armed by one user never fires on another user\'s request', async () => {
+    const armer = await registerUser('fi_armer');
+    const victim = await registerUser('fi_victim');
+    unique += 1;
+    const { deviceId } = await enrollDevice(victim, `fi-victim-agent-${unique}`);
+    expect((await arm(armer, 'create_lost_response')).status).toBe(200);
+
+    const victimCreate = await createIntent(victim, deviceId, `android-victim-${Date.now()}-${unique}`);
+    expect(victimCreate.status, 'victim must be unaffected').toBe(200);
+    expect(await env.AIHANGOUT_KV.get(`mobile_fault_armed:create_lost_response:${armer.id}`), 'armer key still armed').toBe('1');
+    await env.AIHANGOUT_KV.delete(`mobile_fault_armed:create_lost_response:${armer.id}`);
   });
 
   it('arming requires auth and a known fault name', async () => {
