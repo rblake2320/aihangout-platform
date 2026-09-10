@@ -1222,9 +1222,19 @@ async function authenticate(request, env) {
   }
 
   const user = await env.AIHANGOUT_DB
-    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin FROM users WHERE id = ?')
+    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin, session_version FROM users WHERE id = ?')
     .bind(payload.userId)
     .first();
+  if (!user) return null;
+
+  // A password reset advances the durable per-user generation. Legacy JWTs
+  // without this claim map to generation 0, preserving them until the account's
+  // first reset while ensuring a reset invalidates every earlier JWT at once.
+  const tokenSessionVersion = payload.sessionVersion === undefined ? 0 : Number(payload.sessionVersion);
+  if (!Number.isSafeInteger(tokenSessionVersion) || tokenSessionVersion < 0 ||
+      tokenSessionVersion !== Number(user.session_version || 0)) {
+    return null;
+  }
 
   return user;
 }
@@ -1528,7 +1538,7 @@ router.post('/api/auth/register', async (request, env, ctx) => {
     // Create JWT - if it fails, registration succeeded but we can't issue a token
     let token;
     try {
-      token = await createJWT({ userId, username }, env);
+      token = await createJWT({ userId, username, sessionVersion: 0 }, env);
     } catch (jwtError) {
       console.error('JWT creation failed after successful registration:', jwtError);
       return new Response(JSON.stringify({ error: 'Token generation failed. Please log in.' }), {
@@ -1656,15 +1666,26 @@ router.post('/api/auth/password/reset', async (request, env) => {
     }
     const passwordHash = await hashPassword(password);
     const tokenHash = await hashToken(token);
-    const record = await env.AIHANGOUT_DB.prepare(`
-      UPDATE auth_email_tokens SET used_at = CURRENT_TIMESTAMP
-      WHERE token_hash = ? AND purpose = 'reset_password' AND used_at IS NULL
-        AND expires_at > CURRENT_TIMESTAMP
-      RETURNING user_id
-    `).bind(tokenHash).first();
-    if (!record) return errResponse('Invalid or expired reset link', null, 400);
-    await env.AIHANGOUT_DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-      .bind(passwordHash, record.user_id).run();
+    // Keep password replacement, reset-token consumption, and session invalidation
+    // in one D1 batch. The user update is conditional on the token still being
+    // usable; a replay changes neither password nor session generation.
+    const usableToken = `token_hash = ? AND purpose = 'reset_password' AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP`;
+    const results = await env.AIHANGOUT_DB.batch([
+      env.AIHANGOUT_DB.prepare(`
+        UPDATE users
+        SET password_hash = ?, session_version = session_version + 1
+        WHERE id = (SELECT user_id FROM auth_email_tokens WHERE ${usableToken})
+      `).bind(passwordHash, tokenHash),
+      env.AIHANGOUT_DB.prepare(`
+        UPDATE auth_email_tokens SET used_at = CURRENT_TIMESTAMP
+        WHERE ${usableToken}
+      `).bind(tokenHash)
+    ]);
+    const changedUser = Number(results?.[0]?.meta?.changes || 0);
+    const consumedToken = Number(results?.[1]?.meta?.changes || 0);
+    if (changedUser !== 1 || consumedToken !== 1) {
+      return errResponse('Invalid or expired reset link', null, 400);
+    }
     return jsonResponse({ success: true, message: 'Password updated' });
   } catch (error) {
     return errResponse('Unable to reset password', error);
@@ -1744,7 +1765,7 @@ router.post('/api/auth/login', async (request, env) => {
 
     let token;
     try {
-      token = await createJWT({ userId: user.id, username: user.username }, env);
+      token = await createJWT({ userId: user.id, username: user.username, sessionVersion: Number(user.session_version || 0) }, env);
     } catch (jwtError) {
       console.error('JWT creation failed during login:', jwtError);
       return new Response(JSON.stringify({ error: 'Token generation failed. Please try again.' }), {

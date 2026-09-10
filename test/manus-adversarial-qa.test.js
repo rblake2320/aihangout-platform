@@ -208,6 +208,67 @@ describe('F-04: logout revokes the token instead of only discarding it client-si
   });
 });
 
+
+async function sha256Hex(raw) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+describe('password reset invalidates every prior user JWT', () => {
+  it('rejects saved pre-reset sessions while allowing a newly authenticated session', async () => {
+    const user = await registerUser('passwordreset');
+    const secondLogin = await api('/api/auth/login', {
+      method: 'POST', ip: user.ip, body: { email: user.email, password: user.password }
+    });
+    expect(secondLogin.status).toBe(200);
+    const resetToken = 'a'.repeat(64);
+    await env.AIHANGOUT_DB.prepare(`
+      INSERT INTO auth_email_tokens (user_id, purpose, token_hash, expires_at)
+      VALUES (?, 'reset_password', ?, datetime('now', '+30 minutes'))
+    `).bind(user.id, await sha256Hex(resetToken)).run();
+
+    // The real authenticated handler accepts both independent sessions before reset.
+    expect((await api('/api/users/me/settings', { token: user.token, ip: user.ip })).status).toBe(200);
+    expect((await api('/api/users/me/settings', { token: secondLogin.json.token, ip: user.ip })).status).toBe(200);
+
+    const replacement = 'new correct horse battery staple 84';
+    const reset = await api('/api/auth/password/reset', {
+      method: 'POST', ip: user.ip, body: { token: resetToken, password: replacement }
+    });
+    expect(reset.status).toBe(200);
+    expect(reset.json.success).toBe(true);
+
+    // The original finding: either token used to remain accepted for 24 hours.
+    expect((await api('/api/users/me/settings', { token: user.token, ip: user.ip })).status).toBe(401);
+    expect((await api('/api/users/me/settings', { token: secondLogin.json.token, ip: user.ip })).status).toBe(401);
+
+    const oldPassword = await api('/api/auth/login', {
+      method: 'POST', ip: user.ip, body: { email: user.email, password: user.password }
+    });
+    expect(oldPassword.status).toBe(401);
+    const newPassword = await api('/api/auth/login', {
+      method: 'POST', ip: user.ip, body: { email: user.email, password: replacement }
+    });
+    expect(newPassword.status).toBe(200);
+    expect((await api('/api/users/me/settings', { token: newPassword.json.token, ip: user.ip })).status).toBe(200);
+
+    const row = await env.AIHANGOUT_DB.prepare(
+      'SELECT session_version FROM users WHERE id = ?'
+    ).bind(user.id).first();
+    expect(row.session_version).toBe(1);
+
+    // A reset-token replay is refused and does not advance session state again.
+    const replay = await api('/api/auth/password/reset', {
+      method: 'POST', ip: user.ip, body: { token: resetToken, password: 'another correct horse battery 85' }
+    });
+    expect(replay.status).toBe(400);
+    const afterReplay = await env.AIHANGOUT_DB.prepare(
+      'SELECT session_version FROM users WHERE id = ?'
+    ).bind(user.id).first();
+    expect(afterReplay.session_version).toBe(1);
+  });
+});
+
 describe('F-05: login/reset rate limiting still functions after the fail-closed change', () => {
   it('still allows a normal login through (no regression on the happy path)', async () => {
     const user = await registerUser('rlhappypath');
