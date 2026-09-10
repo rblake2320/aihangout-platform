@@ -1993,7 +1993,24 @@ router.get('/api/problems', async (request, env, ctx) => {
       const map = { 'ai-ml': 'AI/ML', 'ai_ml': 'AI/ML', 'aiml': 'AI/ML' };
       return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
     };
-    const sanitizedProblems = (problems.results || []).map(p => ({
+    // Caller's own vote per problem on this page (one bounded query, limit <= 50).
+    // Only runs for authenticated callers, so the public cache (unauthenticated
+    // only) never stores a user-specific user_vote.
+    const problemRows = problems.results || [];
+    const userVotes = new Map();
+    if (callerId !== null && problemRows.length) {
+      const ids = problemRows.map(p => p.id);
+      const voteRows = await env.AIHANGOUT_DB
+        .prepare(`SELECT target_id, vote_type FROM votes
+                  WHERE user_id = ? AND target_type = 'problem' AND target_id IN (${ids.map(() => '?').join(',')})`)
+        .bind(callerId, ...ids)
+        .all();
+      for (const v of (voteRows.results || [])) {
+        userVotes.set(Number(v.target_id), v.vote_type === 'up' || v.vote_type === 'down' ? v.vote_type : null);
+      }
+    }
+
+    const sanitizedProblems = problemRows.map(p => ({
       id: p.id,
       title: p.title,
       description: p.description ? p.description.replace(bountyPattern, '').trim() : p.description,
@@ -2015,6 +2032,7 @@ router.get('/api/problems', async (request, env, ctx) => {
       ai_agent_type: p.ai_agent_type,
       solution_count: p.solution_count,
       verified_solution_count: Number(p.verified_solution_count || 0),
+      user_vote: userVotes.get(Number(p.id)) ?? null,
     }));
 
     const response = new Response(JSON.stringify({
@@ -2231,16 +2249,51 @@ router.get('/api/problems/:id', async (request, env) => {
       const map = { 'ai-ml': 'AI/ML', 'ai_ml': 'AI/ML', 'aiml': 'AI/ML' };
       return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
     };
+    // Caller's own votes (problem + every solution on the page) in ONE query.
+    // Without this the client has no way to know its own vote after a refetch,
+    // so VoteButtons resets its highlight to null (vote "reverts" on reload).
+    const solutionRows = solutions.results || [];
+    let problemUserVote = null;
+    const solutionUserVotes = new Map();
+    if (callerId !== null) {
+      // Bound to problem_id via a subquery, NOT an expanded `IN (?,?,...)` over
+      // every solution id: D1 caps bound parameters at 100, so a thread with
+      // >= 99 solutions made the expanded form throw and the whole detail
+      // read came back 503 for every logged-in reader (adversarial review of
+      // the first version, reproduced in test/a5-c0910-vote.test.js). This
+      // form binds exactly three parameters regardless of thread length.
+      const voteRows = await env.AIHANGOUT_DB
+        .prepare(`SELECT target_type, target_id, vote_type FROM votes
+                  WHERE user_id = ?
+                    AND ((target_type = 'problem' AND target_id = ?)
+                      OR (target_type = 'solution' AND target_id IN (SELECT id FROM solutions WHERE problem_id = ?)))`)
+        .bind(callerId, problem.id, problem.id)
+        .all();
+      for (const v of (voteRows.results || [])) {
+        const voteType = v.vote_type === 'up' || v.vote_type === 'down' ? v.vote_type : null;
+        if (v.target_type === 'problem' && Number(v.target_id) === Number(problem.id)) {
+          problemUserVote = voteType;
+        } else if (v.target_type === 'solution') {
+          solutionUserVotes.set(Number(v.target_id), voteType);
+        }
+      }
+    }
+
     const sanitizedProblem = {
       ...problem,
       description: problem.description ? problem.description.replace(bountyPatternSingle, '').trim() : problem.description,
       category: normalizeCategorySingle(problem.category),
+      user_vote: problemUserVote,
     };
+    const sanitizedSolutions = solutionRows.map(s => ({
+      ...s,
+      user_vote: solutionUserVotes.get(Number(s.id)) ?? null,
+    }));
 
     return new Response(JSON.stringify({
       success: true,
       problem: sanitizedProblem,
-      solutions: solutions.results || []
+      solutions: sanitizedSolutions
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -14530,6 +14583,14 @@ router.get('/api/problem-bank', async (request, env) => {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
+    // impact is a closed vocabulary shared by both data sources below.
+    const VALID_BANK_IMPACTS = ['critical', 'high', 'medium'];
+    if (impact && impact !== 'all' && !VALID_BANK_IMPACTS.includes(impact)) {
+      return new Response(JSON.stringify({ success: false, error: 'impact must be critical, high, or medium' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     // First check if major_problems table has data
     const majorCount = await env.AIHANGOUT_DB
       .prepare('SELECT COUNT(*) as count FROM major_problems')
@@ -14570,14 +14631,24 @@ router.get('/api/problem-bank', async (request, env) => {
       });
     }
 
-    // Fallback: source from existing problems table
-    let whereClause = " WHERE status = 'open'";
+    // Fallback: source from existing problems table.
+    // Problems that pass the first-post gate are stored as 'approved' (see
+    // POST /api/problems effectiveStatus); legacy rows are 'open'. Both are bank-visible.
+    let whereClause = " WHERE status IN ('open','approved')";
     const whereParams = [];
     if (category && category !== 'all') {
       whereClause += ' AND category = ?';
       whereParams.push(category);
     }
-
+    // impact is synthesized from difficulty in the response mapping below
+    // (hard->critical, medium->high, else->medium), so filter with the same rule.
+    if (impact === 'critical') {
+      whereClause += " AND difficulty = 'hard'";
+    } else if (impact === 'high') {
+      whereClause += " AND difficulty = 'medium'";
+    } else if (impact === 'medium') {
+      whereClause += " AND (difficulty IS NULL OR difficulty NOT IN ('hard','medium'))";
+    }
     const countResult = await env.AIHANGOUT_DB
       .prepare('SELECT COUNT(*) as total FROM problems' + whereClause)
       .bind(...whereParams).first();
@@ -18637,7 +18708,10 @@ export default {
         const contentType = request.headers.get('Content-Type') || '';
         const allowsBeaconPayload = url.pathname === '/api/events/batch' &&
           (contentType === '' || contentType.toLowerCase().startsWith('text/plain'));
-        const allowsEmptyBody = url.pathname === '/api/auth/logout';
+        // Body-less mutations: the follow toggle reads only the path param and
+        // the auth header; browsers/axios drop Content-Type on an empty POST.
+        const allowsEmptyBody = url.pathname === '/api/auth/logout' ||
+          /^\/api\/users\/\d+\/follow$/.test(url.pathname);
         if (!allowsBeaconPayload && !allowsEmptyBody &&
             !contentType.toLowerCase().startsWith('application/json')) {
           return jsonResponse({

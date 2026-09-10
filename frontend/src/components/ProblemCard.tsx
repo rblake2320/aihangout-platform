@@ -16,6 +16,7 @@ interface Problem {
   category?: string
   difficulty?: string
   upvotes: number
+  user_vote?: 'up' | 'down' | null
   solution_count: number
   verified_solution_count?: number
   username: string
@@ -79,6 +80,7 @@ export default function ProblemCard({ problem, isBookmarked: initialBookmarked =
             targetType="problem"
             targetId={problem.id}
             upvotes={problem.upvotes}
+            userVote={problem.user_vote ?? null}
             size="large"
           />
 
