@@ -2,6 +2,10 @@
 
 ## Unreleased — frontier assistance integration, 2026-09-10
 
+- Staging deployed as version `4ee3f285-81b1-42a3-bf6b-913247611976`; health, login, and unauthorized mobile-route refusal verified after deployment.
+- Installed APK `d41db6f6fec1b0e98f3712ec49338f664a65d7d90632706be0cb0d4bbc6a76d6` on both Moto test phones, preserving existing data. Both enrolled with the hosted backend after quarantining their old local identities.
+- Tested the actual disabled-provider response on both phones: no provider request row or action created. Moto2 retained the same assistance request after force-stop/relaunch.
+- Integrated Worker suite: 174 passed. Android suite/build passed, followed by focused setup-response regression/build. Live OpenAI diagnosis and approved repair remain blocked on API-key/budget authorization; these device checks do not claim that workflow ran.
 - Integrate the bounded OpenAI assistance endpoint and durable request records. Provider calls remain disabled pending live-test credentials and budget authorization.
 - Remove bearer-token and account-response output from the web approval acceptance driver.
 - Prepare the hosted staging database for mobile enrollment and actions, preserving a pre-migration backup and verifying the seven applied migration records and active-device triggers.
