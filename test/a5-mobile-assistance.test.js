@@ -1,6 +1,7 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import { enrollmentProof } from './mobile-proof-helper.js';
+import { RESERVE_CALL_SLOT_SQL } from '../src/mobile-assistance.js';
 
 // Real handlers in workerd against a real D1. The OpenAI Responses API is
 // replaced by the in-process stub selected in vitest.config.mjs
@@ -108,13 +109,94 @@ describe('POST /api/mobile/assistance (frontier phone wiring, backend lane)', ()
     } finally { env.MOBILE_ASSISTANCE_MAX_CALLS = saved; }
   });
 
-  it('deployment gate: with MOBILE_ASSISTANCE_ENABLED off nothing is persisted or called', async () => {
+  it('concurrent cap boundary: distinct requests racing with ONE slot left reserve exactly one provider call', async () => {
     const u = await user(); const d = await device(u);
-    const saved = env.MOBILE_ASSISTANCE_ENABLED; env.MOBILE_ASSISTANCE_ENABLED = '0';
+    const count = async () => (await env.AIHANGOUT_DB.prepare('SELECT COUNT(*) AS n FROM mobile_assistance_requests WHERE provider_called_at IS NOT NULL').first()).n;
+    const used = await count();
+    const saved = env.MOBILE_ASSISTANCE_MAX_CALLS; env.MOBILE_ASSISTANCE_MAX_CALLS = String(used + 1); // exactly one slot left
+    try {
+      const rs = await Promise.all([1, 2, 3, 4].map(i => ask(u, d, `req-race-${i}`)));
+      expect(rs.map(r => r.status).sort(), JSON.stringify(rs.map(r => r.json))).toEqual([200, 429, 429, 429]);
+      expect(await count()).toBe(used + 1); // the durable count moved by exactly one
+      const blocked = (await env.AIHANGOUT_DB.prepare("SELECT COUNT(*) AS n FROM mobile_assistance_requests WHERE request_id LIKE 'req-race-%' AND status = 'failed' AND provider_called_at IS NULL").first()).n;
+      expect(blocked).toBe(3);
+    } finally { env.MOBILE_ASSISTANCE_MAX_CALLS = saved; }
+  });
+
+  it('race proof at the SQL level: interleaved count-then-update over-admits; the single-statement reservation the route runs admits exactly one', async () => {
+    // Real D1, real table. Three pending rows, one slot left. The vitest pool does
+    // not interleave concurrent route requests at the DB step (the route-level
+    // race test above passes against the old two-step code too), so the race is
+    // reproduced here explicitly: every request reads the count BEFORE any of
+    // them writes -- the exact interleaving A1 described.
+    const u = await user(); const d = await device(u);
+    const db = env.AIHANGOUT_DB;
+    const count = async () => (await db.prepare('SELECT COUNT(*) AS n FROM mobile_assistance_requests WHERE provider_called_at IS NOT NULL').first()).n;
+    const seed = async (ids) => { for (const id of ids) await db.prepare("INSERT INTO mobile_assistance_requests (request_id, owner_user_id, device_id, status, diagnostics_json, provider, model) VALUES (?, ?, ?, 'pending', '{}', 'openai', 'stub-model')").bind(id, u.id, d).run(); };
+
+    // Old algorithm (b22e906): SELECT COUNT per request, then UPDATE per request.
+    const oldIds = ['sql-race-old-1', 'sql-race-old-2', 'sql-race-old-3']; await seed(oldIds);
+    const base = await count(); const cap = base + 1;
+    const reads = []; for (const _ of oldIds) reads.push((await db.prepare('SELECT COUNT(*) AS n FROM mobile_assistance_requests WHERE provider_called_at IS NOT NULL').first()).n);
+    let oldAdmitted = 0;
+    for (let i = 0; i < oldIds.length; i++) if (reads[i] < cap) { await db.prepare('UPDATE mobile_assistance_requests SET provider_called_at = CURRENT_TIMESTAMP WHERE owner_user_id = ? AND request_id = ?').bind(u.id, oldIds[i]).run(); oldAdmitted++; }
+    expect(oldAdmitted).toBe(3); // over-admits: 3 provider calls against a cap with 1 slot
+    expect(await count()).toBe(base + 3);
+    // undo so the durable cap for the rest of the suite is unaffected
+    await db.prepare("UPDATE mobile_assistance_requests SET provider_called_at = NULL WHERE request_id LIKE 'sql-race-old-%'").run();
+    expect(await count()).toBe(base);
+
+    // New statement (the one the route runs), same three-way race shape.
+    const newIds = ['sql-race-new-1', 'sql-race-new-2', 'sql-race-new-3']; await seed(newIds);
+    const results = await Promise.all(newIds.map(id => db.prepare(RESERVE_CALL_SLOT_SQL).bind(u.id, id, cap).run()));
+    expect(results.map(r => r.meta.changes).sort()).toEqual([0, 0, 1]);
+    expect(await count()).toBe(base + 1);
+    // Idempotent for an already-reserved row: cannot double-reserve the winner.
+    const winner = newIds[results.findIndex(r => r.meta.changes === 1)];
+    expect((await db.prepare(RESERVE_CALL_SLOT_SQL).bind(u.id, winner, cap + 10).run()).meta.changes).toBe(0);
+  });
+
+  it('hostile provider shapes are contained as retained failed outcomes (424), never a generic 500/503', async () => {
+    const u = await user(); const d = await device(u);
+    for (const id of ['stub-hostile-output-01', 'stub-hostile-content-01', 'stub-hostile-root-01', 'stub-hostile-huge-01', 'stub-hostile-array-01']) {
+      const r = await ask(u, d, id);
+      expect(r.status, `${id}: ${JSON.stringify(r.json)}`).toBe(424);
+      expect(r.json).toMatchObject({ requestId: id, status: 'failed' });
+      const s = await row(u, id);
+      expect(s.status).toBe('failed'); expect(s.error).toBe('provider output rejected by schema');
+      expect(s.proposal_json).toBeNull(); expect(s.provider_called_at).not.toBeNull();
+    }
+  });
+
+  it('resubmit guidance: unknown/pending carry no "new requestId" hint; failed does', async () => {
+    const u = await user(); const d = await device(u);
+    await ask(u, d, 'stub-timeout-guid01');
+    const unk = await ask(u, d, 'stub-timeout-guid01');
+    expect(unk.status).toBe(409); expect(unk.json.status).toBe('unknown');
+    expect(unk.json.error).not.toMatch(/new requestId/i); expect(unk.json.error).toMatch(/do not replay/);
+    await ask(u, d, 'stub-http500-guid01');
+    const fl = await ask(u, d, 'stub-http500-guid01');
+    expect(fl.status).toBe(409); expect(fl.json.status).toBe('failed'); expect(fl.json.error).toMatch(/new requestId/);
+  });
+
+  it('setup gates are structured non-5xx refusals (424 disabled / not_configured) that survive the outer handler; nothing persisted or called', async () => {
+    const u = await user(); const d = await device(u);
+    const savedEnabled = env.MOBILE_ASSISTANCE_ENABLED; env.MOBILE_ASSISTANCE_ENABLED = '0';
     try {
       const r = await ask(u, d, 'req-gate-0001');
-      expect(r.status).toBe(503);
+      expect(r.status, JSON.stringify(r.json)).toBe(424);
+      expect(r.json).toEqual({ success: false, error: 'Mobile assistance is disabled on this deployment', requestId: 'req-gate-0001', status: 'disabled' });
       expect(await row(u, 'req-gate-0001')).toBeNull();
-    } finally { env.MOBILE_ASSISTANCE_ENABLED = saved; }
+    } finally { env.MOBILE_ASSISTANCE_ENABLED = savedEnabled; }
+    // Enabled but no key/model (the exact state the first installed phone will hit
+    // while owner key/budget consent is pending). Base URL made non-stub so the
+    // real config path runs; the refusal happens before any network is touched.
+    const savedBase = env.OPENAI_BASE_URL; env.OPENAI_BASE_URL = 'https://provider.invalid';
+    try {
+      const r = await ask(u, d, 'req-gate-0002');
+      expect(r.status, JSON.stringify(r.json)).toBe(424);
+      expect(r.json).toMatchObject({ success: false, requestId: 'req-gate-0002', status: 'not_configured' });
+      expect(await row(u, 'req-gate-0002')).toBeNull();
+    } finally { env.OPENAI_BASE_URL = savedBase; }
   });
 });
