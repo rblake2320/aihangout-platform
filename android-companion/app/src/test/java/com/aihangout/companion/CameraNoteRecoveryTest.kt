@@ -91,6 +91,27 @@ class CameraNoteRecoveryTest {
     }
 
     @Test
+    fun `a failed save keeps the draft (still Recognized, edits intact) and a later retry succeeds`() {
+        val d = dir()
+        var renameWorks = false
+        val store = NoteStore(d, rename = { from, to -> renameWorks && from.renameTo(to) })
+        val draft = CameraNoteDraft(store)
+        draft.startCapture(); draft.captureResult(true, sha); draft.startRecognition()
+        draft.recognized("fake-ocr", "RAW"); draft.edit("edited")
+        val thrown = try { draft.save(1L); null } catch (e: com.aihangout.companion.notes.NoteWriteException) { e }
+        assertNotNull(thrown)
+        val s = draft.state as State.Recognized // NOT Saved, NOT NoNote
+        assertEquals("edited", s.text)
+        assertTrue(store.list().isEmpty())
+        renameWorks = true
+        store.sweepStaleTemp()
+        val note = draft.save(2L)
+        assertNotNull(note)
+        assertEquals("edited", store.load(note!!.id)!!.text)
+        assertTrue(draft.state is State.Saved)
+    }
+
+    @Test
     fun `an interrupted save leaves only a temp file that is never listed and is swept, while real notes stay`() {
         val d = dir()
         val store = NoteStore(d)

@@ -17,6 +17,7 @@ import com.aihangout.companion.notes.CameraNoteDraft
 import com.aihangout.companion.notes.MlKitTextRecognizer
 import com.aihangout.companion.notes.NoteStore
 import com.aihangout.companion.notes.NoteText
+import com.aihangout.companion.notes.NoteWriteException
 import com.aihangout.companion.notes.TextRecognizer
 import java.io.File
 import java.security.MessageDigest
@@ -62,7 +63,12 @@ class CameraNotesActivity : AppCompatActivity() {
         // result is classified instead of crashing on an out-of-state transition.
         if (draft.state !is CameraNoteDraft.State.AwaitingCapture) draft.restore(AWAITING_SNAPSHOT)
         val image = pendingImage
-        val sha = if (captured && image != null && image.isFile && image.length() > 0) sha256(image) else null
+        // Hashing reads the file the camera app wrote; an IO failure there (file
+        // vanished, storage error) is contained and classified as an unreadable
+        // capture -> no note, never an exception escaping the result callback.
+        val sha = if (captured && image != null && image.isFile && image.length() > 0) {
+            try { sha256(image) } catch (e: java.io.IOException) { null } catch (e: SecurityException) { null }
+        } else null
         draft.captureResult(captured = sha != null, imageSha256 = sha)
         if (sha == null) {
             image?.delete(); pendingImage = null
@@ -113,8 +119,13 @@ class CameraNotesActivity : AppCompatActivity() {
         captureButton.setOnClickListener { startCapture() }
         saveButton.setOnClickListener {
             draft.edit(textInput.text.toString())
-            val note = draft.save(System.currentTimeMillis())
-            status(if (note == null) "Not saved: the note text is blank." else "Saved note ${note.id.take(8)} (${note.text.length} chars${if (note.truncated) ", truncated" else ""}).")
+            try {
+                val note = draft.save(System.currentTimeMillis())
+                status(if (note == null) "Not saved: the note text is blank." else "Saved note ${note.id.take(8)} (${note.text.length} chars${if (note.truncated) ", truncated" else ""}).")
+            } catch (e: NoteWriteException) {
+                // Draft is untouched (still Recognized, text still in the editor): the human can retry or discard.
+                status("NOT saved (${e.stage}): ${e.message}. Your draft is kept -- try Save again or Discard.")
+            }
             render()
         }
         discardButton.setOnClickListener {
@@ -232,7 +243,14 @@ class CameraNotesActivity : AppCompatActivity() {
     }
 
     private fun showNote(note: CameraNote) {
-        val fresh = store.load(note.id) ?: note
+        // What is shown is what is on disk NOW. If the file cannot be read back
+        // (deleted, corrupted, storage error) say so; never display the stale
+        // in-memory copy as if it were the durable note.
+        val fresh = store.load(note.id)
+        if (fresh == null) {
+            viewer.text = "Note ${note.id} could not be read from disk (missing or unreadable). Nothing is shown from memory."
+            renderNotes(); return
+        }
         viewer.text = "Note ${fresh.id}\nsaved ${fmt(fresh.createdAtEpochMs)} via ${fresh.ocrEngine}" +
             (fresh.sourceImageSha256?.let { "\nsource image sha256 $it" } ?: "") +
             (if (fresh.truncated) "\n(text was truncated at ${NoteText.MAX_CHARS} chars)" else "") +

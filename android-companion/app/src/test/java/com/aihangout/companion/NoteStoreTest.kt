@@ -2,6 +2,7 @@ package com.aihangout.companion
 
 import com.aihangout.companion.notes.NoteStore
 import com.aihangout.companion.notes.NoteText
+import com.aihangout.companion.notes.NoteWriteException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -76,6 +77,32 @@ class NoteStoreTest {
         assertEquals(NoteText.MAX_CHARS, note.text.length)
         assertTrue(note.truncated)
         assertTrue(store.load(note.id)!!.truncated)
+    }
+
+    @Test
+    fun `a refused atomic rename throws a classified NoteWriteException, never writes the target, and preserves the temp file`() {
+        val dir = tempDir()
+        val store = NoteStore(dir, rename = { _, _ -> false }) // FS refuses the rename
+        val thrown = try { store.save("kept in temp", null, "fake-ocr", 1L); null } catch (e: NoteWriteException) { e }
+        assertNotNull(thrown)
+        assertEquals("rename", thrown!!.stage)
+        val files = dir.listFiles()!!.map { it.name }
+        assertEquals(1, files.size)
+        assertTrue(files[0].endsWith(".json.tmp")) // evidence preserved, no direct write of the target
+        assertTrue(store.list().isEmpty())
+        assertEquals(0, store.corruptCount())
+        assertEquals(1, store.sweepStaleTemp())
+    }
+
+    @Test
+    fun `a collision on an existing id is classified and writes nothing`() {
+        val dir = tempDir()
+        val store = NoteStore(dir)
+        val first = store.save("one", null, "fake-ocr", 1L)!!
+        val thrown = try { store.save("two", null, "fake-ocr", 2L, id = first.id); null } catch (e: NoteWriteException) { e }
+        assertEquals("collision", thrown!!.stage)
+        assertEquals("one", store.load(first.id)!!.text)
+        assertEquals(1, dir.listFiles()!!.size)
     }
 
     @Test

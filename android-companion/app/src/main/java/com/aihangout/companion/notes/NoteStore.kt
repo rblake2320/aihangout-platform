@@ -52,9 +52,25 @@ data class CameraNote(
  * Corrupt files are skipped on read and left on disk (evidence preserved,
  * never auto-deleted). Pure JVM code -- unit-tested without Android.
  */
-class NoteStore(private val dir: File) {
+/**
+ * A save that did not complete. The target `.json` was never written to; the
+ * temp file (if any) is left in place as evidence for [NoteStore.sweepStaleTemp].
+ * Callers keep their draft and let the human retry or discard.
+ */
+class NoteWriteException(val stage: String, message: String, cause: Throwable? = null) : java.io.IOException("$stage: $message", cause)
 
-    /** Persist [text] as a new note. Refuses blank text (returns null, writes nothing). */
+class NoteStore(
+    private val dir: File,
+    /** Injectable only so the rename-failure path is unit-testable; production uses File.renameTo. */
+    private val rename: (File, File) -> Boolean = { from, to -> from.renameTo(to) }
+) {
+
+    /**
+     * Persist [text] as a new note. Refuses blank text (returns null, writes nothing).
+     * Throws [NoteWriteException] when the write or the atomic rename fails: the
+     * target is never written directly (no copy fallback -- that would be a
+     * non-atomic write a crash could tear), and the temp file is preserved.
+     */
     fun save(
         text: String,
         sourceImageSha256: String?,
@@ -65,22 +81,22 @@ class NoteStore(private val dir: File) {
         require(CameraNote.ID_RE.matches(id)) { "bad note id" }
         val normalized = NoteText.normalize(text)
         if (normalized.isBlank) return null
-        if (!dir.isDirectory && !dir.mkdirs()) throw java.io.IOException("cannot create note directory")
+        if (!dir.isDirectory && !dir.mkdirs()) throw NoteWriteException("mkdir", "cannot create note directory")
         val note = CameraNote(id, nowEpochMs, normalized.text, sourceImageSha256, ocrEngine, normalized.truncated)
         val target = fileFor(id)
-        if (target.exists()) throw IllegalStateException("note id already exists")
+        if (target.exists()) throw NoteWriteException("collision", "note id already exists")
         val tmp = File(dir, "$id.json.tmp")
         val bytes = note.toJson().toString().toByteArray(Charsets.UTF_8)
-        java.io.FileOutputStream(tmp).use { out ->
-            out.write(bytes)
-            out.flush()
-            out.fd.sync() // durable before the rename makes it visible (crash / power loss safe)
+        try {
+            java.io.FileOutputStream(tmp).use { out ->
+                out.write(bytes)
+                out.flush()
+                out.fd.sync() // durable before the rename makes it visible (crash / power loss safe)
+            }
+        } catch (e: java.io.IOException) {
+            throw NoteWriteException("write", e.message ?: e.javaClass.simpleName, e)
         }
-        if (!tmp.renameTo(target)) {
-            // Windows/exotic FS fallback: copy then delete; still never leaves a partial target.
-            target.writeBytes(tmp.readBytes())
-            tmp.delete()
-        }
+        if (!rename(tmp, target)) throw NoteWriteException("rename", "atomic rename refused; temp file preserved, note NOT saved")
         return note
     }
 
