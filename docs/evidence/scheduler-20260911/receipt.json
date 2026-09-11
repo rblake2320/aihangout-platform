@@ -1,0 +1,31 @@
+{
+  "recordedAt": "2026-09-10T23:39:13.6378741-05:00",
+  "commit": "eab3891",
+  "apkSha256": "128e3cfce0afa08bea462cdc5ecfd80e81c3fc26abe220b6886d3137652e95c1",
+  "installedDevices": [
+    "Moto 1",
+    "Moto 2"
+  ],
+  "executedDevice": "Moto 1",
+  "operation": "battery_status_read",
+  "forceStopThenReopenBeforeDeadline": true,
+  "screenOffBeforeDeadline": true,
+  "job": {
+    "id": "job-ab2ac372-dfd4-4c07-9463-daa7ded2fb9e",
+    "operation": "battery_status_read",
+    "fire_at": 1789101495000,
+    "tz": "America/Chicago",
+    "status": "COMPLETED",
+    "created_at": 1789101399088,
+    "claimed_at": 1789101495043,
+    "finished_at": 1789101495097,
+    "result_json": "{\"percent\":100,\"isCharging\":true}",
+    "note": "completed"
+  },
+  "independentBatteryRead": {
+    "level": 100,
+    "usbPowered": true
+  },
+  "cancellationTest": "pending - device requires owner PIN",
+  "smsScheduledOnPhone": false
+}
