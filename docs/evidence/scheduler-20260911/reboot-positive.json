@@ -1,0 +1,63 @@
+{
+  "recorded_at": "2026-09-11T13:37:36.213396+00:00",
+  "device": "Moto 1",
+  "scope": "Existing positive reboot battery-timer acceptance; read-only closure, no new job or app launch",
+  "apk_sha256": "128e3cfce0afa08bea462cdc5ecfd80e81c3fc26abe220b6886d3137652e95c1",
+  "job": {
+    "id": "job-2077779e-1c1f-41ef-8720-6e639d5c4f1b",
+    "operation": "battery_status_read",
+    "fire_at": 1789130400000,
+    "tz": "America/Chicago",
+    "status": "COMPLETED",
+    "created_at": 1789129923455,
+    "claimed_at": 1789130400458,
+    "finished_at": 1789130400537,
+    "result_json": "{\"percent\":100,\"isCharging\":true}",
+    "note": "completed"
+  },
+  "claim_delay_ms": 458,
+  "completion_delay_ms": 537,
+  "checks": {
+    "boot_complete": true,
+    "installed_apk_matches_prior_test_artifact": true,
+    "one_retained_target_row": true,
+    "operation_is_battery_read": true,
+    "completed": true,
+    "claimed_after_deadline_within_one_second": true,
+    "finished_after_claim_within_one_second": true,
+    "result_is_measured_battery_record": true,
+    "boot_receiver_started_before_deadline": true,
+    "boot_broadcast_completed_before_deadline": true,
+    "boot_receiver_process_killed_before_alarm": true,
+    "alarm_receiver_started_at_deadline": true,
+    "no_activity_launch_in_retained_app_log_lines": true,
+    "readback_did_not_change_retained_rows": true
+  },
+  "passed": true,
+  "retained_device_log_lines": [
+    "09-11 07:35:28.277  2105  2246 I ActivityManager: Start proc 9890:com.aihangout.companion/u0a521 for broadcast {com.aihangout.companion/com.aihangout.companion.scheduler.BootReceiver}",
+    "09-11 07:35:45.330  2105  2227 I ActivityManager: Finished processing BOOT_COMPLETED for u0",
+    "09-11 07:35:50.542  2105  2683 D ActivityManager: freezing 9890 com.aihangout.companion, reason = moto_freezer, adj=920, adjType=cch-empty",
+    "09-11 07:35:52.015  2105 10494 I ActivityManager: Killing 9890:com.aihangout.companion/u0a521 (adj 920, setSvc -10000): empty #25",
+    "09-11 07:35:52.122  2105 10494 I ActivityManager: appDiedLocked: app=ProcessRecord{8def606 9890:com.aihangout.companion/u0a521} thread=android.os.BinderProxy@1fbf97d fromBinderDied=true isKilledByAm=true reason=null",
+    "09-11 07:40:00.041  2105  2246 I ActivityManager: Start proc 12655:com.aihangout.companion/u0a521 for broadcast {com.aihangout.companion/com.aihangout.companion.scheduler.ScheduleAlarmReceiver}",
+    "09-11 07:40:10.659  2105  2683 D ActivityManager: freezing 12655 com.aihangout.companion, reason = moto_freezer, adj=920, adjType=cch-empty",
+    "09-11 08:36:27.998  2105  6621 I ActivityManager: Killing 12655:com.aihangout.companion/u0a521 (adj 920, setSvc -10000): empty #25",
+    "09-11 08:36:28.068  2105  2710 I ActivityManager: appDiedLocked: app=ProcessRecord{b72c9e 12655:com.aihangout.companion/u0a521} thread=android.os.BinderProxy@abc0c0c fromBinderDied=true isKilledByAm=true reason=null"
+  ],
+  "local_artifact_sha256": {
+    "prior-rows.json": "43f69ce92e0918b05de7b238d20119771dd6f9f88cec97dbb8941d43b16e5379",
+    "relevant-logcat.txt": "66934e874c26a1f13c887791569a01c4f8366900363c3becabd6cc4e37374aae",
+    "rows.json": "43f69ce92e0918b05de7b238d20119771dd6f9f88cec97dbb8941d43b16e5379",
+    "snapshot.db": "4b75efe4e04db45a04979b45cd379d0c5e9988928a7f057b055e8a90b58b44fa",
+    "sys.boot_completed.txt": "f1b2f662800122bed0ff255693df89c4487fbdcf453d3524a42d4ec20c3d9c04"
+  },
+  "bounds": [
+    "BOOT_COMPLETED receiver in this app re-arms the pending alarm; Android does not automatically restore alarms.",
+    "Completed after owner unlock; no claim of execution before first unlock.",
+    "No activity launch appears in retained ActivityManager/ActivityTaskManager app log lines. This is bounded log evidence, not a complete device interaction audit.",
+    "Battery result is the receiver-recorded value; this receipt adds no simultaneous independent battery measurement.",
+    "One harmless battery operation on Moto 1; no Moto 2 reboot, SMS scheduling, arbitrary operation, exact-once external effect or load claim.",
+    "Hashes bind retained bytes; checks and device records establish only the stated bounded observations."
+  ]
+}

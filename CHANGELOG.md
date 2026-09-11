@@ -2,8 +2,10 @@
 
 - Installed on both Motos; Moto1 battery timer completed after force-stop/reopen with screen off.
 - Cancellation retained no claim/result after deadline; same-version APK replacement preserved and executed a pending timer without reopening.
-- Phone SMS scheduling explicitly refused; three retained device rows, no outgoing messages.
-- Reboot, mid-execution interruption and overdue recovery remain separate device gates.
+- Phone SMS scheduling explicitly refused; no outgoing messages. The final retained scheduler database contains seven test jobs.
+- Moto1 reboot-before-deadline passed on the installed APK: the app's BOOT_COMPLETED receiver started at 07:35:28, its process was killed at 07:35:52, and ScheduleAlarmReceiver started at 07:40:00. The battery job was claimed 458 ms after its deadline and completed at +537 ms. No activity launch appears in the retained app lifecycle logs. Receipt: `docs/evidence/scheduler-20260911/reboot-positive.json` (14/14 checks).
+- The separate real RUNNING/kill/reopen case became UNKNOWN without replay (21 retained checks); deliberate overdue return became MISSED without a claim/result. These are passing refusal/recovery outcomes, not unresolved execution failures; evidence remains in the scheduler receipt.
+- Scope: Moto1 installed debug APK, harmless battery read, boot execution after owner unlock. No pre-unlock execution, Moto2 reboot acceptance, phone-native SMS scheduling, or general external-effect recovery claim.
 
 # Changelog
 
