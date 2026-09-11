@@ -28,9 +28,16 @@ object SchedulerAlarms {
             Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply { data = android.net.Uri.parse("package:${context.packageName}") }
         else null
 
+    /** PendingIntent identity is requestCode + Intent.filterEquals, which IGNORES
+     * extras (A5 finding 2): two job ids with equal hashCode() would otherwise
+     * share one PendingIntent and the earlier alarm would be silently replaced.
+     * The job id therefore also goes into the Intent DATA, which filterEquals
+     * does compare, so every job has a distinct identity regardless of hash. */
+    fun identityUri(jobId: String): String = "aihangout-job:$jobId"
+
     private fun pending(context: Context, jobId: String): PendingIntent {
-        val intent = Intent(context, ScheduleAlarmReceiver::class.java).setAction(ACTION_FIRE).putExtra(EXTRA_JOB_ID, jobId)
-        // Request code from the job id keeps one PendingIntent per job; IMMUTABLE so no other app can rewrite the extras.
+        val intent = Intent(context, ScheduleAlarmReceiver::class.java).setAction(ACTION_FIRE)
+            .setData(android.net.Uri.parse(identityUri(jobId))).putExtra(EXTRA_JOB_ID, jobId)
         return PendingIntent.getBroadcast(context, jobId.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 

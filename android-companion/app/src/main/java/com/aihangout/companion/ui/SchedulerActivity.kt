@@ -67,6 +67,9 @@ class SchedulerActivity : AppCompatActivity() {
         }
         setContentView(ScrollView(this).apply { addView(layout) })
         permView.text = permissionLine()
+        // Reconcile on every app start (A5 finding 1): quarantine RUNNING rows left by
+        // a killed receiver, mark overdue PENDING rows MISSED -- not only on reboot.
+        val plan = SchedulerPolicy.reconcile(store, System.currentTimeMillis())
         // Re-arm any future PENDING job whose alarm could not be set earlier (permission granted since).
         if (SchedulerAlarms.canScheduleExact(this)) {
             store.list().filter { it.status == JobStatus.PENDING && it.fireAtEpochMs > System.currentTimeMillis() }.forEach { SchedulerAlarms.schedule(this, it) }

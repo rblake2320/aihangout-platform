@@ -75,7 +75,17 @@ object SchedulerPolicy {
     fun cancel(store: ScheduleStore, jobId: String, nowEpochMs: Long): Boolean =
         store.casStatus(jobId, JobStatus.PENDING, JobStatus.CANCELLED, nowEpochMs, "cancelled by owner")
 
+    /** Hard budget for the receiver's execution after the claim (A5 finding 3): the
+     * broadcast window is ~10 s and goAsync() does not extend it; a stalled read must
+     * become UNKNOWN by our own clock, not by the OS killing the process. */
+    const val EXECUTION_BUDGET_MS: Long = 3_000
+
     data class BootPlan(val reschedule: List<ScheduledJob>, val missed: List<ScheduledJob>, val quarantined: List<ScheduledJob>)
+
+    /** Same reconciliation as boot, run on EVERY process start / package replace
+     * (A5 finding 1): a receiver killed between claim and finish, or an alarm
+     * cleared by force-stop/update, must not wait for a device reboot. Idempotent. */
+    fun reconcile(store: ScheduleStore, nowEpochMs: Long): BootPlan = onBoot(store, nowEpochMs)
 
     fun onBoot(store: ScheduleStore, nowEpochMs: Long): BootPlan {
         val reschedule = mutableListOf<ScheduledJob>(); val missed = mutableListOf<ScheduledJob>(); val quarantined = mutableListOf<ScheduledJob>()

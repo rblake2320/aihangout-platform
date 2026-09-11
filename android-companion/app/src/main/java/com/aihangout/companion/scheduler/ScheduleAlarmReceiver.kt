@@ -31,15 +31,20 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         }.start()
     }
 
+    /** Battery-only, under a hard budget (A5 finding 3): the claim was already
+     * taken, so any outcome other than a completed read is recorded UNKNOWN. */
     private fun execute(context: Context, store: ScheduleStore, job: ScheduledJob) {
-        try {
-            val result = when (job.operation) {
+        val outcome = BoundedExecution.run(job.operation, SchedulerPolicy.EXECUTION_BUDGET_MS) {
+            when (job.operation) {
                 OperationRegistry.BATTERY_STATUS_READ -> ResultHasher.batteryStatusJson(AndroidDeviceReader(context).readBatteryStatus())
                 else -> throw IllegalStateException("unsupported operation reached execute(): ${job.operation}")
             }
-            SchedulerPolicy.finishCompleted(store, job.id, System.currentTimeMillis(), result)
-        } catch (e: Exception) {
-            SchedulerPolicy.finishUnknown(store, job.id, System.currentTimeMillis(), "${e.javaClass.simpleName}: ${e.message}")
+        }
+        val now = System.currentTimeMillis()
+        when (outcome) {
+            is BoundedExecution.Outcome.Completed -> SchedulerPolicy.finishCompleted(store, job.id, now, outcome.resultJson)
+            is BoundedExecution.Outcome.TimedOut -> SchedulerPolicy.finishUnknown(store, job.id, now, "execution exceeded ${outcome.budgetMs} ms budget")
+            is BoundedExecution.Outcome.Failed -> SchedulerPolicy.finishUnknown(store, job.id, now, outcome.error)
         }
     }
 }
