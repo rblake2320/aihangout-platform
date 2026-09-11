@@ -70,7 +70,19 @@
   ],
   "remainingDeviceProof": [
     "reboot rearm",
-    "interrupted RUNNING quarantine",
-    "overdue MISSED"
-  ]
+    "interrupted RUNNING quarantine"
+  ],
+  "overdueRecovery": {
+    "id": "job-1d217f52-f6ef-48a4-a187-c13bb0362d5f",
+    "operation": "battery_status_read",
+    "fire_at": 1789105084000,
+    "tz": "America/Chicago",
+    "status": "MISSED",
+    "created_at": 1789105007819,
+    "claimed_at": null,
+    "finished_at": 1789105088953,
+    "result_json": null,
+    "note": "overdue at boot; not executed"
+  },
+  "rebootPendingJob": "job-13179eed-d12a-4eb9-b8eb-5b68a0f310e5"
 }
