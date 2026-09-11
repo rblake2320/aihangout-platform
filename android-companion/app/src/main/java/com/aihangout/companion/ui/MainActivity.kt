@@ -72,6 +72,8 @@ class MainActivity : AppCompatActivity() {
         val askAiButton = Button(this).apply { text = "Ask AI for help (backend model diagnosis -> web approval)" }
         val refreshButton = Button(this).apply { text = "Refresh last result status (GET only)" }
         val cameraNotesButton = Button(this).apply { text = "Camera notes (on-device OCR, private)" }
+        val cameraWatchButton = Button(this).apply { text = "Camera check-in: motion and photo analysis" }
+        cameraWatchButton.setOnClickListener { startActivity(android.content.Intent(this, CameraWatchActivity::class.java)) }
         val phoneToolsButton = Button(this).apply { text = "Phone tools: calendar, apps, voice" }
         val networkButton = Button(this).apply { text = "Network check (read-only)" }
         networkButton.setOnClickListener { startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java)) }
@@ -124,6 +126,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 48, 48, 48)
             addView(phoneToolsButton)
+            addView(cameraWatchButton)
             addView(schedulerButton)
             addView(cameraNotesButton)
             addView(networkButton)

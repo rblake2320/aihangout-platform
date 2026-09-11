@@ -1,0 +1,92 @@
+{
+  "recordedAt": "2026-09-11T19:38:27.339133+00:00",
+  "scope": "Supervised private camera/Blink check-in; Moto1 full flow, Moto2 installation and listener grant",
+  "status": "PASS_BOUNDED",
+  "checks": {
+    "exact_two_request_ids": true,
+    "requests_all_fields_identical_after_restart": true,
+    "event_id_source_bindings_unchanged": true,
+    "photo_analyzed_no_action": true,
+    "photo_ids_bound": true,
+    "photo_reported_tokens_448": true,
+    "blink_completed_with_fixed_proposal": true,
+    "blink_summary_explicit_no_image": true,
+    "blink_reported_tokens_208": true,
+    "receipt_bound_to_request_event": true,
+    "receipt_approval_precedes_observation": true,
+    "one_matching_system_notification_before": true,
+    "system_exact_checkin_text": true,
+    "system_silent_notification": true,
+    "system_channel_sound_and_vibration_disabled": true,
+    "matching_notification_absent_after_restart": true,
+    "device-connected": true,
+    "run-as-debuggable": true,
+    "exact-three-prior-request-ids": true,
+    "no-prior-work-in-flight": true,
+    "private-port-allocated": true,
+    "exactly-one-new-sending": true,
+    "no-action-receipt-or-response": true,
+    "prior-requests-unchanged": true,
+    "new-request-has-no-notification": true,
+    "same-process-before-kill": true,
+    "original-process-gone": true,
+    "rows-identical-after-kill": true,
+    "native_reopen_quarantines_sending": true,
+    "get_reconciles_terminal_failed": true,
+    "original_three_rows_unchanged": true,
+    "server_three_provider_calls": true,
+    "server_one_failed_without_provider": true,
+    "both_installed_final_apk": true
+  },
+  "finalApkSha256": "b1ce840525ecefb8fde0daab170b59afb9d75d1aa8781fe9e44649d187987794",
+  "initialPositiveApkSha256": "db507e63a56e4c8120cb4a4b416b1fd6f46f39cd1e324a9d2315db30d41901bd",
+  "backendDeployment": "4ec6cafa-4271-4705-b6e5-fb9d9e15d0c5",
+  "providerCalls": 3,
+  "providerReportedTokens": 866,
+  "model": "gpt-5.6-sol",
+  "serverStates": [
+    {
+      "status": "analyzed",
+      "requests": 3,
+      "provider_calls": 3
+    },
+    {
+      "status": "failed",
+      "requests": 1,
+      "provider_calls": 0
+    }
+  ],
+  "tests": {
+    "worker": {
+      "passed": 190,
+      "provider": "simulated",
+      "database": "real workerd/D1"
+    },
+    "androidFocused": {
+      "protocolPassed": 7,
+      "changedRecoveryPassed": 4
+    }
+  },
+  "bounds": [
+    "Photo and actual Blink motion notification analyzed with explicit upload approval.",
+    "Photo summary checked against captured scene by A1, not a general vision accuracy benchmark.",
+    "One explicit local-notification approval observed by Android system; no SMS/call or medical/emergency action.",
+    "Request crash tested before cap-error classification, not kill during native notification dispatch.",
+    "No automatic replay observed after selected restarts; not exactly-once certification.",
+    "Raw captures retained locally; explicitly consented image/event sent to provider for analysis; not retained as raw payload in application backend DB/activity/public feed/training. Provider store:false is not a zero-retention guarantee.",
+    "Three-call staging trial cap exhausted intentionally; further analysis requires explicit budget configuration.",
+    "No continuous Blink video, face identity, fall/fire/medication detector or vehicle/firmware adapter."
+  ],
+  "privateEvidenceHashes": {
+    "moto1-before-restart.db": "66e771b3b83f618ae434ed8528d087f7310a7569e553ebe39a9b1940ea64e647",
+    "moto1-after-restart.db": "66e771b3b83f618ae434ed8528d087f7310a7569e553ebe39a9b1940ea64e647",
+    "notifications-before-restart-private.txt": "bdd1fac3c2c5954eef28aa46209cf8d929565e404c9c31ce6ee5b35cda4cc6c2",
+    "notifications-after-restart-private.txt": "6db5925e7f2c9ed03012f01f0cbbadfc21e780cd3f8e1596ac3e30e784a6fb3e",
+    "independent-review.json": "de7772abfd63759bd00519883f81416fb8561b5b0425b52be9a90442df610c6d",
+    "request-crash-final/receipt-private.json": "edccfbe85683b5bb996d5bace760adcd65d492ad78ddf00e0ba60199b157260e",
+    "request-crash-final/reopened.db": "2a57815578eb4c39eac9a476909bae155ff161770a95a780e82df52910aea017",
+    "request-crash-final/reconciled.db": "c0adaed85c27f3d21845d5b1abc31f97b24820b6c123a7bd60bfade1573937bd",
+    "server-call-count-final.json": "b35bd73a30f9b82bcd3ce2b141c4088e6168d9da40746ff7fe75b6c762f870e1",
+    "installed-hashes.json": "723bdbd0509475975095cbd44eb2477903ce261cc60c4eeddda2e8d302fa2834"
+  }
+}

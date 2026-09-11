@@ -20,6 +20,7 @@
          missed, never run late. Still NO SEND_SMS / CALL_PHONE. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Camera notes (ui.CameraNotesActivity): still NO CAMERA permission. The
          photo is taken by the system camera app the human launches and presses
@@ -39,6 +40,16 @@
         android:theme="@style/Theme.AIHangoutCompanion">
 
         <activity android:name=".ui.PhoneToolsActivity" android:exported="false" />
+        <activity android:name=".ui.CameraWatchActivity" android:exported="false" android:label="Camera check-in" />
+        <service
+            android:name=".watch.CameraEventListener"
+            android:label="Camera check-in (Blink motion only)"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
 
         <activity
             android:name=".ui.MainActivity"
@@ -72,7 +83,7 @@
             android:exported="false"
             android:label="Network diagnostics" />
 
-        <!-- Scheduler (A3 lane): owner-approved, closed-operation, exactly-once. -->
+        <!-- Scheduler: owner-approved bounded operations; unknown results quarantine without replay. -->
         <activity
             android:name=".ui.SchedulerActivity"
             android:exported="false"

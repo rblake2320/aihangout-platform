@@ -41,6 +41,9 @@ export default defineConfig({
             // No OPENAI_API_KEY here -- tests never reach the real provider.
             MOBILE_ASSISTANCE_ENABLED: '1',
             MOBILE_ASSISTANCE_MAX_CALLS: '50',
+            MOBILE_CAMERA_ANALYSIS_ENABLED: '1',
+            MOBILE_CAMERA_ANALYSIS_MAX_CALLS: '3',
+            MOBILE_CAMERA_ANALYSIS_TEST_MODE: '1',
             OPENAI_BASE_URL: 'stub://responses',
             // Isolated test scope only; not production configuration.
             PATHBOOK_TEST_SCOPE_ID: 'vitest-isolated-pathbook-scope',

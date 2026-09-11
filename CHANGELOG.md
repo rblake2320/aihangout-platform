@@ -1,3 +1,10 @@
+## 2026-09-11 - Private camera check-in trial
+
+- Added explicit camera/photo or Blink-motion → private model analysis → separate approved silent local check-in flow. No public activity/training publication; no automatic model polling or action replay.
+- Three real Moto1 model calls reported 866 tokens. Actual Android notification readback and restart retention passed; real request-process kill recovered UNKNOWN then GET-only FAILED with no fourth provider call.
+- Installed final APK on both Motos; listener connected on both. Fixed stale event display and moved selected actions before timestamped event rows.
+- Staging only, three-call test cap intentionally exhausted. Full model/action acceptance was on Moto1; no universal camera monitoring or medical/emergency claim. See docs/camera-checkin.md and docs/evidence/camera-watch-20260911/receipt.json.
+
 ## 2026-09-11 - Phone-local scheduler
 
 - Installed on both Motos; Moto1 battery timer completed after force-stop/reopen with screen off.

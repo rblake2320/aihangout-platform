@@ -44,6 +44,10 @@ MOBILE_APP_CERT_SHA256 = "b709192f6a09f7c1a93addb13d766f4ad5f134747862d4b7f48143
 MOBILE_ASSISTANCE_ENABLED = "1"
 MOBILE_ASSISTANCE_MAX_CALLS = "5"
 OPENAI_MODEL = "gpt-5.6-sol"
+# Private camera check-in test: new durable ledger, at most three provider calls.
+# No raw photos enter activity/public-content logs; each request requires consent.
+MOBILE_CAMERA_ANALYSIS_ENABLED = "1"
+MOBILE_CAMERA_ANALYSIS_MAX_CALLS = "3"
 # JWT_SECRET must be set via: wrangler secret put JWT_SECRET --env staging
 # AI_ARMY_SERVER must be set via: wrangler secret put AI_ARMY_SERVER --env staging
 

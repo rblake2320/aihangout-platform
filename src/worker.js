@@ -7,6 +7,7 @@
 import { Router } from 'itty-router';
 import { installMobileEnrollment } from './mobile-enrollment.js';
 import { installMobileAssistance } from './mobile-assistance.js';
+import { installMobileCameraAnalysis } from './mobile-camera-analysis.js';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 
 const router = Router();
@@ -17798,6 +17799,7 @@ installMobileEnrollment(router, { authenticate, safeJsonParse, sanitizeContent, 
 // "Ask AI for help" (frontier phone wiring contract v1): proposes only; execution
 // still goes through /api/mobile/actions/intent + web approval below.
 installMobileAssistance(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse });
+installMobileCameraAnalysis(router, { authenticate, safeJsonParse, sanitizeContent, jsonResponse, checkRateLimit, rateLimitResponse });
 
 router.post('/api/mobile/devices/:deviceId/revoke', async (request, env) => {
   try {
@@ -18882,6 +18884,10 @@ export default {
     // is ever written to problems/solutions.
     const isMutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method);
     const shouldLogActivity = isMutating && url.pathname.startsWith('/api/') &&
+      // Camera observations have their own owner-only digest/status journal.
+      // Never clone images, notification text or model descriptions into the
+      // community activity/quarantine pipeline, including rejected requests.
+      !url.pathname.startsWith('/api/mobile/camera-analysis') &&
       // Health probes and telemetry beacons are high-volume and carry no user
       // intent; logging them would bury the signal this table exists to keep.
       !url.pathname.startsWith('/api/health') && url.pathname !== '/api/events/batch';
