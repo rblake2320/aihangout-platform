@@ -14,6 +14,14 @@
     <!-- Explicit owner-selected APK handoff; Android retains install confirmation. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Phone-local scheduler (A3 lane). SCHEDULE_EXACT_ALARM is user-granted
+         (not pre-granted on fresh installs targeting 33+; checked with
+         canScheduleExactAlarms() before every exact set). RECEIVE_BOOT_COMPLETED
+         only re-arms future PENDING jobs after a reboot; overdue ones are marked
+         missed, never run late. Still NO SEND_SMS / CALL_PHONE. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- Camera notes (ui.CameraNotesActivity): still NO CAMERA permission. The
          photo is taken by the system camera app the human launches and presses
          the shutter in (ACTION_IMAGE_CAPTURE via TakePicture), written into this
@@ -64,6 +72,24 @@
             android:name=".ui.NetworkDiagnosticsActivity"
             android:exported="false"
             android:label="Network diagnostics" />
+
+        <!-- Scheduler (A3 lane): owner-approved, closed-operation, exactly-once. -->
+        <activity
+            android:name=".ui.SchedulerActivity"
+            android:exported="false"
+            android:label="Scheduler" />
+        <receiver
+            android:name=".scheduler.ScheduleAlarmReceiver"
+            android:exported="false" />
+        <!-- BOOT_COMPLETED is a protected system broadcast: exported is required for the
+             system to deliver it, and no other app can send it. -->
+        <receiver
+            android:name=".scheduler.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"
