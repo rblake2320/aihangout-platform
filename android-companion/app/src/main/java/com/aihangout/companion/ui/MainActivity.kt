@@ -75,6 +75,8 @@ class MainActivity : AppCompatActivity() {
         val phoneToolsButton = Button(this).apply { text = "Phone tools: calendar, apps, voice" }
         val networkButton = Button(this).apply { text = "Network check (read-only)" }
         networkButton.setOnClickListener { startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java)) }
+        val schedulerButton = Button(this).apply { text = "Schedule a phone action" }
+        schedulerButton.setOnClickListener { startActivity(android.content.Intent(this, SchedulerActivity::class.java)) }
         val skillsButton = Button(this).apply { text = "Guided procedures (bundled skills)" }
         skillsButton.setOnClickListener { startActivity(android.content.Intent(this, SkillsActivity::class.java)) }
         phoneToolsButton.setOnClickListener { startActivity(android.content.Intent(this, PhoneToolsActivity::class.java)) }
@@ -122,6 +124,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 48, 48, 48)
             addView(phoneToolsButton)
+            addView(schedulerButton)
             addView(cameraNotesButton)
             addView(networkButton)
             addView(skillsButton)
