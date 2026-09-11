@@ -121,6 +121,10 @@ class MainActivity : AppCompatActivity() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 48, 48, 48)
+            addView(phoneToolsButton)
+            addView(cameraNotesButton)
+            addView(networkButton)
+            addView(skillsButton)
             addView(emailInput)
             addView(passwordInput)
             addView(agentNameInput)
@@ -130,10 +134,6 @@ class MainActivity : AppCompatActivity() {
             addView(runButton)
             addView(archiveButton)
             addView(refreshButton)
-            addView(cameraNotesButton)
-            addView(phoneToolsButton)
-            addView(networkButton)
-            addView(skillsButton)
             addView(statusView)
         }
         setContentView(ScrollView(this).apply { addView(layout) })
