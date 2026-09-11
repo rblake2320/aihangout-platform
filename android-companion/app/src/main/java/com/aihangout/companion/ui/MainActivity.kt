@@ -73,6 +73,10 @@ class MainActivity : AppCompatActivity() {
         val refreshButton = Button(this).apply { text = "Refresh last result status (GET only)" }
         val cameraNotesButton = Button(this).apply { text = "Camera notes (on-device OCR, private)" }
         val phoneToolsButton = Button(this).apply { text = "Phone tools: calendar, apps, voice" }
+        val networkButton = Button(this).apply { text = "Network check (read-only)" }
+        networkButton.setOnClickListener { startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java)) }
+        val skillsButton = Button(this).apply { text = "Guided procedures (bundled skills)" }
+        skillsButton.setOnClickListener { startActivity(android.content.Intent(this, SkillsActivity::class.java)) }
         phoneToolsButton.setOnClickListener { startActivity(android.content.Intent(this, PhoneToolsActivity::class.java)) }
         cameraNotesButton.setOnClickListener {
             startActivity(android.content.Intent(this, CameraNotesActivity::class.java))
@@ -128,6 +132,8 @@ class MainActivity : AppCompatActivity() {
             addView(refreshButton)
             addView(cameraNotesButton)
             addView(phoneToolsButton)
+            addView(networkButton)
+            addView(skillsButton)
             addView(statusView)
         }
         setContentView(ScrollView(this).apply { addView(layout) })
