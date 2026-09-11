@@ -21,9 +21,15 @@ import java.util.concurrent.TimeUnit
  */
 class AndroidNetworkObserver(private val context: Context, private val baseUrl: String) {
 
-    private val client = OkHttpClient.Builder()
+    /** ONE request means one: no OkHttp connection-failure retry (its default is
+     * true), no redirects, and the socket is bound to the exact [Network] that
+     * was observed so a wifi observation can never be silently paired with a
+     * cellular request if the default network changes mid-probe. */
+    private fun clientBoundTo(network: android.net.Network): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).callTimeout(8, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false)
+        .retryOnConnectionFailure(false)
+        .socketFactory(network.socketFactory)
         .build()
 
     fun observe(runProbe: Boolean = true): NetworkObservation {
@@ -43,7 +49,7 @@ class AndroidNetworkObserver(private val context: Context, private val baseUrl: 
         val probe: ProbeResult = when {
             network == null -> ProbeResult.NotAttempted("no active network")
             !runProbe -> ProbeResult.NotAttempted("probe disabled")
-            else -> probe(endpoint)
+            else -> probe(clientBoundTo(network), endpoint)
         }
         return NetworkObservation(
             hasActiveNetwork = network != null,
@@ -57,7 +63,7 @@ class AndroidNetworkObserver(private val context: Context, private val baseUrl: 
         )
     }
 
-    private fun probe(endpoint: String): ProbeResult {
+    private fun probe(client: OkHttpClient, endpoint: String): ProbeResult {
         val start = System.nanoTime()
         fun elapsed() = (System.nanoTime() - start) / 1_000_000
         return try {
@@ -73,7 +79,10 @@ class AndroidNetworkObserver(private val context: Context, private val baseUrl: 
     /** App-private, timestamped, bounded to the newest [keep] files; never uploaded. */
     fun saveReport(report: org.json.JSONObject, keep: Int = 20): File {
         val dir = File(context.filesDir, "network-diagnostics").apply { mkdirs() }
-        val stamp = SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date())
+        // Second precision alone collides on a quick double-tap; the UUID suffix
+        // keeps every report distinct without changing the sortable prefix.
+        val stamp = SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date()) +
+            "-" + java.util.UUID.randomUUID().toString().take(8)
         val tmp = File(dir, "$stamp.json.tmp")
         val out = File(dir, "$stamp.json")
         tmp.outputStream().use { it.write(report.toString(2).toByteArray(Charsets.UTF_8)); it.fd.sync() }
