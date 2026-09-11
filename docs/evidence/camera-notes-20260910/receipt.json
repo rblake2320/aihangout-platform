@@ -1,0 +1,15 @@
+{
+  "status": "PASS_CAPTURE_OCR_SAVE_RESTART_READBACK",
+  "device": "Moto1",
+  "apk_sha256": "e279a2994672898d39cae39a81b9f3ae747cbfcc16e88c5dccf2418162e96dcf",
+  "note_bytes_equal_after_force_stop": true,
+  "viewer_contains_exact_saved_text": true,
+  "saved_characters": 958,
+  "note_sha256": "f060f36ea1d0b693be56dcc293e0fb4a56da2ed78548376be470ef126962a493",
+  "limits": [
+    "OCR accuracy not comprehensively scored",
+    "First draft exited without saving during UI operation; second capture saved",
+    "No crash-during-write claim",
+    "No PhoneClaw comparison in this receipt"
+  ]
+}
