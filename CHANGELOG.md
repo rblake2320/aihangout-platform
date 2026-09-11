@@ -1,5 +1,14 @@
 # Changelog
 
+## Supervised action acceptance - 2026-09-11 UTC
+
+- Moto1: calendar test event created, renamed, reopened after Calendar process restart, then deleted. Test title absent afterward; no test reminder retained.
+- Added explicit APK document picker and Android-controlled source/install confirmation. No silent-install or model authority granted. Built no-permission fixture from retained source; installed and actual fixture screen observed, uninstalled and package absence verified. Confirmation attribution unknown where UI advanced between observations.
+- Voice: system speech recognized "open calendar" after an ElevenLabs sample played; companion displayed a proposal, explicit Confirm then opened Calendar. One phrase tested; no claim for arbitrary spoken tasks. Earlier no-recognition attempt retained.
+- ElevenLabs key read privately from owner-selected workbook cell; one 14-character Flash v2.5 sample generated. No credential bundled or committed. This is test audio, not a shipped cloud-voice integration.
+- Corrected companion installed on both Motos. Raw UI evidence containing account details stays local; sanitized receipts under docs/evidence/actions-20260911.
+
+
 ## Phone capability integration - 2026-09-10
 
 - Installed candidate `cc09dc26e1983805610f544e0e2e1af55eae89ccb383538df2a419e44b298dde` on both Motos.

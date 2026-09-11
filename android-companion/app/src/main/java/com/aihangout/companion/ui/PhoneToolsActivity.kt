@@ -15,6 +15,11 @@ class PhoneToolsActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var proposal: TextView
     private var pending: String? = null
+    private val selectApk = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) { status.text="Install cancelled; no package submitted."; return@registerForActivityResult }
+        launch(Intent(Intent.ACTION_VIEW).setDataAndType(uri,"application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+    }
     private val voice = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val words = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
         pending = when (words?.trim()?.lowercase()) {
@@ -40,6 +45,15 @@ class PhoneToolsActivity : AppCompatActivity() {
                 .putExtra(CalendarContract.Events.TITLE,"AIHangout test - review before saving"))
         }
         button("App management (Android settings)") { execute("apps") }
+        button("Install an APK you select (Android confirmation required)") {
+            if (!packageManager.canRequestPackageInstalls()) {
+                status.text="Android requires permission for this app to request installs. Enable it, return here, then select the APK."
+                launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:$packageName")))
+            } else {
+                try { selectApk.launch(arrayOf("application/vnd.android.package-archive")) }
+                catch(e: RuntimeException) { status.text="File picker unavailable: ${e.javaClass.simpleName}" }
+            }
+        }
         button("Companion app details") { launch(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
         button("Speak a supported command") {
             pending=null

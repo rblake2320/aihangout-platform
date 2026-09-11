@@ -1,0 +1,10 @@
+{
+  "provider": "ElevenLabs",
+  "model": "eleven_flash_v2_5",
+  "characters": 14,
+  "requests": 1,
+  "pcm_bytes": 34180,
+  "audio_sha256": "ddeb7ee4285025ef87838942d4acda0c70718f69311f6f6e226255afe46cff0a",
+  "audible_playback_verified": false,
+  "companion_apk_sha256": "d68345747c40ba898a7e508d81183d290a3720c3f1d4dc15ed0d94a182e3e4bd"
+}
