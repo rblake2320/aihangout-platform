@@ -40,8 +40,18 @@ data class InstalledIdentity(val appVersion: String, val apkSha256: String?, val
  * Every declared identity field must match; a field the app cannot compute
  * counts as a mismatch (fail closed), never as a pass.
  */
+/**
+ * Three outcomes, deliberately distinct (A1 review):
+ * - [Verified]   the file pins the exact APK hash and it matches this installed build.
+ * - [Compatible] the file pins only signer + version, and both match. Many builds
+ *                share a signer and a version, so this is COMPATIBILITY, not proof
+ *                that this exact build was the one verified; the procedure's own
+ *                outcome verification still applies.
+ * - [Unverified] some declared identity does not match (or cannot be read): dispatch refused.
+ */
 sealed class SkillVerdict {
     object Verified : SkillVerdict()
+    data class Compatible(val basis: String) : SkillVerdict()
     data class Unverified(val reasons: List<String>) : SkillVerdict()
 }
 
@@ -57,7 +67,9 @@ object SkillVerification {
             val have = installed.signerSha256
             if (have == null) reasons += "installed signer unavailable" else if (have != want) reasons += "signer sha256 ${have.take(12)}… != verified ${want.take(12)}…"
         }
-        return if (reasons.isEmpty()) SkillVerdict.Verified else SkillVerdict.Unverified(reasons)
+        if (reasons.isNotEmpty()) return SkillVerdict.Unverified(reasons)
+        return if (m.lastVerifiedApkSha256 != null) SkillVerdict.Verified
+        else SkillVerdict.Compatible("signer + version ${m.lastVerifiedAppVersion} match; exact build not pinned")
     }
 }
 
@@ -67,7 +79,8 @@ sealed class LoadedSkill {
 
     /** Parsed, allowlisted; [verdict] decides whether dispatch is enabled. */
     data class Supported(override val directory: String, val manifest: SkillManifest, val entrypoint: LocalEntrypoint, val verdict: SkillVerdict) : LoadedSkill() {
-        val dispatchAllowed: Boolean get() = verdict is SkillVerdict.Verified
+        /** Verified or Compatible may be opened; Unverified (any pinned identity mismatch) never. */
+        val dispatchAllowed: Boolean get() = verdict is SkillVerdict.Verified || verdict is SkillVerdict.Compatible
     }
 
     /** Parsed but its operation is not in the allowlist, or the directory is not an expected bundled skill. */

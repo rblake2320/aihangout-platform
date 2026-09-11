@@ -6,7 +6,7 @@ approval_tier_reference: local_only
 last_verified_app_version: "0.1.0"
 last_verified_signer_sha256: b709192f6a09f7c1a93addb13d766f4ad5f134747862d4b7f4814357d9fc0b4e
 last_verified_date: "2026-09-10"
-provenance: self-authored from committed implementation e1bebdc, fbc88d0, 97f94ac (unit-tested 150/150 + 24 changed cases; A1 integrated as d0d4787); real-device OCR acceptance owned by A1 and pending a printed page
+provenance: self-authored from committed implementation e1bebdc, fbc88d0, 97f94ac (A1 integrated as d0d4787) and A1's real Moto1 acceptance receipt docs/evidence/camera-notes-20260910/receipt.json (PASS_CAPTURE_OCR_SAVE_RESTART_READBACK on APK e279a2994672898d39cae39a81b9f3ae747cbfcc16e88c5dccf2418162e96dcf); this file pins signer + version only, so a match means COMPATIBLE, not that the installed build is that exact APK
 schema_version: 1
 ---
 
@@ -29,6 +29,8 @@ This is procedure content, not a permission grant. The screen it describes exist
 6. The note appears in "Saved notes"; tapping it re-reads it from disk. A note that cannot be read back is reported as such, never shown from memory.
 
 ## Verification
-Expected on a real device: cancel produces no note; a saved note survives force-stop and reopen; `run-as com.aihangout.companion ls files/camera-notes` lists exactly the saved `<uuid>.json` files and `cache/camera-notes-capture` is empty afterwards; the package declares no CAMERA permission. Evidence: `Team/tasks/A5-camera-notes-20260910.md` (unit tests, negative controls, APK permission dump). Real-device OCR proof is pending A1's acceptance with a printed page; until then this procedure is verified for code behaviour, not for recognition quality.
+Real-device proof (A1, 2026-09-10, Moto1, APK `e279a299…e96dcf`): printed-page capture → on-device OCR → explicit save of 958 characters → force-stop → reopen → viewer shows the exact saved text and the note file bytes are unchanged (note sha256 `f060f36e…2a493`). Receipt: `docs/evidence/camera-notes-20260910/receipt.json` (status `PASS_CAPTURE_OCR_SAVE_RESTART_READBACK`, with its recorded limits). Code-level evidence: `Team/tasks/A5-camera-notes-20260910.md` (unit tests, negative controls, APK permission dump).
+
+Outcome verification the human performs each time, because signer + version do not identify an exact build: cancel produces no note; the saved note is listed and re-opens with the edited text after force-stop; `run-as com.aihangout.companion ls files/camera-notes` lists exactly the saved `<uuid>.json` files and `cache/camera-notes-capture` is empty afterwards; the package declares no CAMERA permission. A different recognition quality on another device or page is not covered by the receipt above.
 
 This does not upload photos, identify faces, read other apps, or grant any phone-wide authority.

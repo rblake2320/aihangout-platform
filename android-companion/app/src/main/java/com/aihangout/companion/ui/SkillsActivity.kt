@@ -58,7 +58,11 @@ class SkillsActivity : AppCompatActivity() {
 
     private fun row(s: LoadedSkill): Button = Button(this).apply {
         text = when (s) {
-            is LoadedSkill.Supported -> "${s.manifest.name} -- ${if (s.dispatchAllowed) "VERIFIED for this build" else "UNVERIFIED (revalidation required)"}"
+            is LoadedSkill.Supported -> "${s.manifest.name} -- " + when (s.verdict) {
+                is SkillVerdict.Verified -> "VERIFIED exact build"
+                is SkillVerdict.Compatible -> "COMPATIBLE (outcome verification required)"
+                is SkillVerdict.Unverified -> "UNVERIFIED (revalidation required)"
+            }
             is LoadedSkill.Refused -> "${s.directory} -- REFUSED"
         }
         setOnClickListener { show(s) }
@@ -74,7 +78,8 @@ class SkillsActivity : AppCompatActivity() {
             is LoadedSkill.Supported -> {
                 val m = s.manifest
                 val verdictText = when (val v = s.verdict) {
-                    is SkillVerdict.Verified -> "VERIFIED: version and artifact identity match this installed build."
+                    is SkillVerdict.Verified -> "VERIFIED: this exact installed APK (hash pinned in the procedure) is the one that was verified."
+                    is SkillVerdict.Compatible -> "COMPATIBLE: ${v.basis}. Several builds can share signer and version, so this is compatibility, not proof this exact build was verified -- follow the procedure's own outcome verification."
                     is SkillVerdict.Unverified -> "UNVERIFIED for this build -- ${v.reasons.joinToString("; ")}. The procedure's own rule: revalidate before use. Dispatch is disabled."
                 }
                 detail.addView(TextView(this).apply {

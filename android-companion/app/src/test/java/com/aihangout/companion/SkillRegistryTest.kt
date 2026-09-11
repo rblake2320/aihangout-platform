@@ -57,6 +57,21 @@ class SkillRegistryTest {
     }
 
     @Test
+    fun `VERIFIED requires an exact APK pin that matches - signer plus version alone is only COMPATIBLE`() {
+        val pinned = (SkillManifest.parse(text("camera-notes", "capture_camera_note", apkSha = apk), "camera-notes") as SkillManifest.Companion.Parsed.Ok).manifest
+        assertTrue(SkillVerification.evaluate(pinned, installed) is SkillVerdict.Verified)
+        val signerOnly = (SkillManifest.parse(text("camera-notes", "capture_camera_note"), "camera-notes") as SkillManifest.Companion.Parsed.Ok).manifest
+        val v = SkillVerification.evaluate(signerOnly, installed)
+        assertTrue(v is SkillVerdict.Compatible)
+        assertTrue((v as SkillVerdict.Compatible).basis.contains("exact build not pinned"))
+        // A different APK with the same signer+version is still only Compatible -- never Verified.
+        assertTrue(SkillVerification.evaluate(signerOnly, installed.copy(apkSha256 = "11".repeat(32))) is SkillVerdict.Compatible)
+        // Wrong signer or version -> Unverified even without a pin.
+        assertTrue(SkillVerification.evaluate(signerOnly, installed.copy(signerSha256 = "22".repeat(32))) is SkillVerdict.Unverified)
+        assertTrue(SkillVerification.evaluate(signerOnly, installed.copy(appVersion = "0.1.1")) is SkillVerdict.Unverified)
+    }
+
+    @Test
     fun `verification gate - every declared identity must match, unknown installed identity fails closed`() {
         val m = (SkillManifest.parse(text("camera-notes", "capture_camera_note", apkSha = apk), "camera-notes") as SkillManifest.Companion.Parsed.Ok).manifest
         assertTrue(SkillVerification.evaluate(m, installed) is SkillVerdict.Verified)
@@ -71,10 +86,15 @@ class SkillRegistryTest {
     }
 
     @Test
-    fun `dispatch is allowed only for a supported AND verified skill`() {
+    fun `dispatch is allowed for a supported skill that is Verified or Compatible, never Unverified`() {
         val ok = SkillResolver.resolve("camera-notes", text("camera-notes", "capture_camera_note"), installed) as LoadedSkill.Supported
         assertTrue(ok.dispatchAllowed)
+        assertTrue(ok.verdict is SkillVerdict.Compatible)
         assertEquals(LocalEntrypoint.CAMERA_NOTES, ok.entrypoint)
+        val pinned = SkillResolver.resolve("camera-notes", text("camera-notes", "capture_camera_note", apkSha = apk), installed) as LoadedSkill.Supported
+        assertTrue(pinned.dispatchAllowed); assertTrue(pinned.verdict is SkillVerdict.Verified)
+        val pinnedWrong = SkillResolver.resolve("camera-notes", text("camera-notes", "capture_camera_note", apkSha = "33".repeat(32)), installed) as LoadedSkill.Supported
+        assertFalse(pinnedWrong.dispatchAllowed)
         val stale = SkillResolver.resolve("camera-notes", text("camera-notes", "capture_camera_note", version = "0.0.9"), installed) as LoadedSkill.Supported
         assertFalse(stale.dispatchAllowed)
         assertTrue(stale.verdict is SkillVerdict.Unverified)

@@ -55,11 +55,14 @@ class BundledProceduresTest {
     }
 
     @Test
-    fun `camera-notes maps to CameraNotesActivity and is verified for the debug signer at version 0_1_0`() {
+    fun `camera-notes maps to CameraNotesActivity and is COMPATIBLE (not Verified) for the debug signer at 0_1_0 - no APK self-pin`() {
         val r = SkillResolver.resolve("camera-notes", read("camera-notes"), installed) as LoadedSkill.Supported
         assertEquals("capture_camera_note", r.manifest.operationReference)
         assertEquals(LocalEntrypoint.CAMERA_NOTES, r.entrypoint)
         assertEquals("local_only", r.manifest.approvalTierReference)
+        assertEquals(null, r.manifest.lastVerifiedApkSha256) // a build cannot contain its own hash; none is invented
+        assertTrue(r.verdict is SkillVerdict.Compatible)
+        assertTrue(r.manifest.provenance.contains("docs/evidence/camera-notes-20260910/receipt.json"))
         assertTrue(r.dispatchAllowed)
         assertFalse((SkillResolver.resolve("camera-notes", read("camera-notes"), installed.copy(signerSha256 = "00".repeat(32))) as LoadedSkill.Supported).dispatchAllowed)
     }
