@@ -1,0 +1,6 @@
+{
+  "status": "PASS_FINAL_INSTALLED_NETWORK_REPORT",
+  "apk_sha256": "cc09dc26e1983805610f544e0e2e1af55eae89ccb383538df2a419e44b298dde",
+  "visible_result": "\n\n\n\n\n\n\nRUN READ-ONLY NETWORK CHECK\nSHARE MINIMAL REPORT... (YOU PICK THE APP; NOTHING IS SENT AUTOMATICALLY)\nRead-only network check. Observes the active network's transport and Android's validated/captive flags, and makes ONE bounded HTTPS request to https://aihangout-staging.rblake2320.workers.dev/api/health. No scans, no router changes, no SSID/location collection, no upload.\n\nVerdict: BACKEND_REACHABLE\nInternet is validated on wifi and the fixed backend health endpoint answered HTTP 200 in 292 ms.\n[rule-based classifier (deterministic); not a model output]\n\nObservation: transport=wifi validated=true captive=false internetCap=true metered=false\nProbe: {\"outcome\":\"ok\",\"httpStatus\":200,\"latencyMs\":292}\nSaved privately: 20260911T010605Z-967635a0.json\n",
+  "scope": "healthy-network positive on corrected artifact; no router changes"
+}

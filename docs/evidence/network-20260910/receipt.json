@@ -1,0 +1,16 @@
+{
+  "status": "PASS_OBSERVE_SHARE_MODEL_EXPLANATION",
+  "device": "Moto1",
+  "tested_apk_sha256": "bbaddbf384e87044c9825eb4d45bcec50210c8b29b79d02e0f2775aa195bbf61",
+  "http_status": 200,
+  "latency_ms": 225,
+  "transport": "wifi",
+  "android_validated": true,
+  "captive_portal": false,
+  "model_app": "ChatGPT",
+  "model_version": "not observed",
+  "response_observed": true,
+  "flow": "explicit user-authorized Share chooser -> ChatGPT -> Send -> response",
+  "scope": "healthy connectivity only, not diagnosis of an induced fault or repair",
+  "source_followup": "network retry/binding/report collision repair requires new-artifact readback"
+}

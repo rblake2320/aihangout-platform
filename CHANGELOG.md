@@ -1,5 +1,15 @@
 # Changelog
 
+## Phone capability integration - 2026-09-10
+
+- Installed candidate `cc09dc26e1983805610f544e0e2e1af55eae89ccb383538df2a419e44b298dde` on both Motos.
+- Moto1 measured validated Wi-Fi and HTTP 200 (292 ms) using the corrected network observer, saved a uniquely named private report. Earlier report shared through Android chooser to ChatGPT produced a real explanation. This proves healthy-path observation and deliberate model handoff, not automatic fault repair.
+- Bundled procedure loader opened Camera Notes and disabled the stale APK-pinned diagnostics procedure on-device. Signer/version compatibility is explicitly not exact-build verification. No skill grants authority.
+- New explicit phone tools opened Calendar and Android app management on Moto1. Speech prompt opened; spoken-command execution, event creation, install/uninstall remain unverified.
+- Original PhoneClaw model comparison remains blocked by its placeholder credential and lack of owner-key UI. A separately named test fork was proposed; original source remains untouched. No competitor failure-rate claim.
+- Appliance/vehicle proof awaits owner device models, supported integration/account and OBD adapter. No firmware or router mutation was attempted.
+
+
 ## Camera notes device proof - 2026-09-10
 
 - Moto 1 completed camera capture, OCR, explicit save, force-stop/reopen and exact saved-text UI readback (958 characters). JSON bytes matched before/after restart. Receipt: `docs/evidence/camera-notes-20260910/receipt.json`.

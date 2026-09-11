@@ -1,0 +1,8 @@
+{
+  "status": "PASS_BUNDLED_SKILL_DISPATCH_AND_STALE_PIN_REFUSAL",
+  "device": "Moto1",
+  "apk_sha256": "cc09dc26e1983805610f544e0e2e1af55eae89ccb383538df2a419e44b298dde",
+  "camera_skill_opened_actual_activity": true,
+  "old_diagnostics_apk_pin_disabled_dispatch": true,
+  "scope": "guided local screen entrypoints, not external model skill discovery or new authority"
+}

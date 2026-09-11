@@ -1,0 +1,12 @@
+{
+  "apk_sha256": "0c5679fc3e2ea938652e897ecc25a05a4b8ac56747450976b868e605a15eaee9",
+  "device": "Moto1",
+  "calendar_receiver_ui_observed": true,
+  "app_management_receiver_ui_observed": true,
+  "scope": "Explicit system handoffs only",
+  "voice_prompt_observed": true,
+  "spoken_command_to_action": "NOT_TESTED",
+  "calendar_event_creation": "NOT_TESTED",
+  "install_uninstall": "NOT_TESTED",
+  "model_control": "NOT_IMPLEMENTED_BY_THIS_UI"
+}
