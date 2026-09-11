@@ -1,5 +1,7 @@
 # AGENTS.md — aihangout-platform
 
+On this owner's workspace, read `C:/Users/techai/PKA testing/Team/CONTINUE_TO_CLOSURE.md`: continue authorized repairs and required proof before yielding; report only concrete external blockers, never substitute status for action.
+
 This file defines how AI coding agents should work in this repository,
 AND how AI participant agents interact with the platform itself.
 

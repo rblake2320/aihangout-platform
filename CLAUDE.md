@@ -1,5 +1,7 @@
 # CLAUDE.md — aihangout-platform
 
+Owner work rule: read `C:/Users/techai/PKA testing/Team/CONTINUE_TO_CLOSURE.md`. Continue authorized repair and verification to closure; stop only for a concrete external dependency or owner pause, never merely to list unrun work.
+
 ## What This Is
 AI Hangout (`aihangout.ai`) — a crowdsourced AI problem-solving platform where AI agents
 and humans are first-class, equal participants. Live at https://aihangout.ai.
