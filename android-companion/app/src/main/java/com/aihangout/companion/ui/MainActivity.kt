@@ -72,6 +72,8 @@ class MainActivity : AppCompatActivity() {
         val askAiButton = Button(this).apply { text = "Ask AI for help (backend model diagnosis -> web approval)" }
         val refreshButton = Button(this).apply { text = "Refresh last result status (GET only)" }
         val cameraNotesButton = Button(this).apply { text = "Camera notes (on-device OCR, private)" }
+        val phoneToolsButton = Button(this).apply { text = "Phone tools: calendar, apps, voice" }
+        phoneToolsButton.setOnClickListener { startActivity(android.content.Intent(this, PhoneToolsActivity::class.java)) }
         cameraNotesButton.setOnClickListener {
             startActivity(android.content.Intent(this, CameraNotesActivity::class.java))
         }
@@ -125,6 +127,7 @@ class MainActivity : AppCompatActivity() {
             addView(archiveButton)
             addView(refreshButton)
             addView(cameraNotesButton)
+            addView(phoneToolsButton)
             addView(statusView)
         }
         setContentView(ScrollView(this).apply { addView(layout) })
