@@ -26,6 +26,51 @@
     "level": 100,
     "usbPowered": true
   },
-  "cancellationTest": "pending - device requires owner PIN",
-  "smsScheduledOnPhone": false
+  "cancellationTest": "PASS: cancelled before deadline, no claim or result after deadline",
+  "smsScheduledOnPhone": false,
+  "packageReplacementTest": "PASS: pending job completed after same-version APK reinstall without opening app",
+  "unsupportedSms": "PASS: UI refuses sms_send; no new job row",
+  "finalRows": [
+    {
+      "id": "job-ab2ac372-dfd4-4c07-9463-daa7ded2fb9e",
+      "operation": "battery_status_read",
+      "fire_at": 1789101495000,
+      "tz": "America/Chicago",
+      "status": "COMPLETED",
+      "created_at": 1789101399088,
+      "claimed_at": 1789101495043,
+      "finished_at": 1789101495097,
+      "result_json": "{\"percent\":100,\"isCharging\":true}",
+      "note": "completed"
+    },
+    {
+      "id": "job-1544cc0d-3559-45af-83fb-cf7a8d2ba5fc",
+      "operation": "battery_status_read",
+      "fire_at": 1789101989000,
+      "tz": "America/Chicago",
+      "status": "CANCELLED",
+      "created_at": 1789101913190,
+      "claimed_at": null,
+      "finished_at": 1789101927594,
+      "result_json": null,
+      "note": "cancelled by owner"
+    },
+    {
+      "id": "job-809940b8-a56a-4adb-ac5c-5a4ade13dbb4",
+      "operation": "battery_status_read",
+      "fire_at": 1789102019000,
+      "tz": "America/Chicago",
+      "status": "COMPLETED",
+      "created_at": 1789101952762,
+      "claimed_at": 1789102019026,
+      "finished_at": 1789102019155,
+      "result_json": "{\"percent\":100,\"isCharging\":true}",
+      "note": "completed"
+    }
+  ],
+  "remainingDeviceProof": [
+    "reboot rearm",
+    "interrupted RUNNING quarantine",
+    "overdue MISSED"
+  ]
 }

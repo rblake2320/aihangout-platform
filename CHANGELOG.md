@@ -1,3 +1,10 @@
+## 2026-09-11 - Phone-local scheduler
+
+- Installed on both Motos; Moto1 battery timer completed after force-stop/reopen with screen off.
+- Cancellation retained no claim/result after deadline; same-version APK replacement preserved and executed a pending timer without reopening.
+- Phone SMS scheduling explicitly refused; three retained device rows, no outgoing messages.
+- Reboot, mid-execution interruption and overdue recovery remain separate device gates.
+
 # Changelog
 
 ## Supervised action acceptance - 2026-09-11 UTC
