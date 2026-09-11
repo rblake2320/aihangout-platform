@@ -48,6 +48,14 @@
             android:exported="false"
             android:label="Camera notes" />
 
+        <!-- Read-only network diagnostics (A3 lane). Not exported; needs only the
+             INTERNET + ACCESS_NETWORK_STATE permissions already declared above.
+             One launch entrypoint to be added in MainActivity by its owner. -->
+        <activity
+            android:name=".ui.NetworkDiagnosticsActivity"
+            android:exported="false"
+            android:label="Network diagnostics" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.camera-notes.fileprovider"
