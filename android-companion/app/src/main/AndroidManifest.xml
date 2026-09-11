@@ -43,6 +43,13 @@
         <!-- Camera -> on-device OCR -> editable -> explicit save (A5 lane).
              Not exported: reachable only from inside this app (one launch
              entrypoint to be added in MainActivity by its owner). -->
+        <!-- Bundled procedure discovery (A5 skill loader). Not exported; reads only
+             assets/skills/* baked into this APK; opens only in-package Activities. -->
+        <activity
+            android:name=".ui.SkillsActivity"
+            android:exported="false"
+            android:label="Procedures" />
+
         <activity
             android:name=".ui.CameraNotesActivity"
             android:exported="false"

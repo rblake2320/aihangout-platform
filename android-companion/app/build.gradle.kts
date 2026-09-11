@@ -44,6 +44,18 @@ android {
     }
 }
 
+// Bundled procedures (SkillsActivity): the reviewed `phone-skills/<name>/SKILL.md`
+// files at the repo root are copied into the APK assets at build time under
+// `assets/skills/<name>/SKILL.md`. Single source of truth -- no forked copy in
+// the Android tree, nothing loaded from outside the signed APK at runtime.
+val bundledSkillsDir = layout.buildDirectory.dir("generated/bundledSkills")
+val bundleSkills by tasks.registering(Copy::class) {
+    from(rootProject.file("../phone-skills")) { include("*/SKILL.md") }
+    into(bundledSkillsDir.map { it.dir("skills") })
+}
+android.sourceSets["main"].assets.srcDir(bundledSkillsDir)
+tasks.named("preBuild") { dependsOn(bundleSkills) }
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
