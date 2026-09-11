@@ -69,8 +69,7 @@
     }
   ],
   "remainingDeviceProof": [
-    "reboot rearm",
-    "interrupted RUNNING quarantine"
+    "future pending job reboot rearm before deadline"
   ],
   "overdueRecovery": {
     "id": "job-1d217f52-f6ef-48a4-a187-c13bb0362d5f",
@@ -84,5 +83,128 @@
     "result_json": null,
     "note": "overdue at boot; not executed"
   },
-  "rebootPendingJob": "job-13179eed-d12a-4eb9-b8eb-5b68a0f310e5"
+  "rebootPendingJob": "job-13179eed-d12a-4eb9-b8eb-5b68a0f310e5",
+  "interruptedExecution": {
+    "verdict": "PASS",
+    "jobId": "job-c70d7767-503e-4f93-ae19-cd0abb50c1c8",
+    "method": "JDWP method breakpoint after committed claim; real process kill; reopen through UI",
+    "checks": {
+      "debuggable-run-as": {
+        "ok": true,
+        "detail": "run-as works only for debuggable builds"
+      },
+      "process-alive-before": {
+        "ok": true,
+        "detail": "pid=5430 (Scheduler screen must be open so JDWP can attach BEFORE the fire)"
+      },
+      "one-future-pending": {
+        "ok": true,
+        "detail": "1 candidate(s)"
+      },
+      "lead-time": {
+        "ok": true,
+        "detail": "84s until fire (need 45..600)"
+      },
+      "alarm-armed-before": {
+        "ok": true,
+        "detail": "dumpsys alarm lists this app's FIRE alarm"
+      },
+      "jdb-attached": {
+        "ok": true,
+        "detail": "jdwp:5430 via tcp:8700"
+      },
+      "breakpoint-set": {
+        "ok": true,
+        "detail": "com.aihangout.companion.scheduler.ScheduleAlarmReceiver.execute"
+      },
+      "breakpoint-hit": {
+        "ok": true,
+        "detail": "process suspended after PENDING->RUNNING CAS, before execute body"
+      },
+      "row-RUNNING-while-suspended": {
+        "ok": true,
+        "detail": "{\"id\": \"job-c70d7767-503e-4f93-ae19-cd0abb50c1c8\", \"operation\": \"battery_status_read\", \"fire_at\": 1789128269000, \"tz\": \"America/Chicago\", \"status\": \"RUNNING\", \"created_at\": 1789128153991, \"claimed_at\": 1789128269019, \"finished_at\": null, \"result_json\": null, \"note\": \"claimed\"}"
+      },
+      "claimed-at-vs-fire": {
+        "ok": true,
+        "detail": "delta=19ms"
+      },
+      "process-dead": {
+        "ok": true,
+        "detail": "pid 5430 gone 14.2s after breakpoint"
+      },
+      "row-still-RUNNING-after-kill": {
+        "ok": true,
+        "detail": "nothing finished the row: the kill landed between claim and finish"
+      },
+      "new-pid-after-reopen": {
+        "ok": true,
+        "detail": "pid0=5430 pid1=6135"
+      },
+      "row-UNKNOWN": {
+        "ok": true,
+        "detail": "{\"id\": \"job-c70d7767-503e-4f93-ae19-cd0abb50c1c8\", \"operation\": \"battery_status_read\", \"fire_at\": 1789128269000, \"tz\": \"America/Chicago\", \"status\": \"UNKNOWN\", \"created_at\": 1789128153991, \"claimed_at\": 1789128269019, \"finished_at\": 1789128298062, \"result_json\": null, \"note\": \"found RUNNING after restart; quarantined, no replay\"}"
+      },
+      "quarantine-note": {
+        "ok": true,
+        "detail": "'found RUNNING after restart; quarantined, no replay'"
+      },
+      "claimed-at-unchanged": {
+        "ok": true,
+        "detail": "the original claim survived; no re-claim"
+      },
+      "finished-at-after-kill": {
+        "ok": true,
+        "detail": "finished_at=1789128298062"
+      },
+      "no-result": {
+        "ok": true,
+        "detail": "never executed"
+      },
+      "other-rows-untouched": {
+        "ok": true,
+        "detail": ""
+      },
+      "alarm-gone-after": {
+        "ok": true,
+        "detail": "one fire consumed; nothing re-armed for this id"
+      },
+      "logcat-death-line": {
+        "ok": true,
+        "detail": "09-11 07:04:30.522  1931 19161 I ActivityManager: Process com.aihangout.companion (pid 5430) has died: fg  TOP "
+      },
+      "no-second-fire": {
+        "ok": true,
+        "detail": "0 receiver line(s) after death"
+      }
+    },
+    "artifactHashes": {
+      "db-0-baseline.sqlite": "706b6d8cc7c46d9b89f50e7ebf9c8dcbc1c98fb0bed41af89ba595deb9f0d154",
+      "db-0-baseline.sqlite-journal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "db-0-baseline.sqlite-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "db-0-baseline.sqlite-wal": "1079506bbf9978f775d0aad5a784942081c5107fc8e39092991be7f6d7cdbf87",
+      "db-1-suspended.sqlite": "3aa8e83d868b59cb95573acceb96b9e1dcaeb75e0e18976e43e102991ca9e5d6",
+      "db-1-suspended.sqlite-journal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "db-1-suspended.sqlite-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "db-1-suspended.sqlite-wal": "1079506bbf9978f775d0aad5a784942081c5107fc8e39092991be7f6d7cdbf87",
+      "db-2-after-kill.sqlite": "3aa8e83d868b59cb95573acceb96b9e1dcaeb75e0e18976e43e102991ca9e5d6",
+      "db-2-after-kill.sqlite-journal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "db-2-after-kill.sqlite-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "db-2-after-kill.sqlite-wal": "1079506bbf9978f775d0aad5a784942081c5107fc8e39092991be7f6d7cdbf87",
+      "db-3-poll.sqlite": "63a20181bed519274a468addcc4da64c85f08842b5dfc2b0e3f72f123412c004",
+      "db-3-poll.sqlite-journal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "db-3-poll.sqlite-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "db-3-poll.sqlite-wal": "1079506bbf9978f775d0aad5a784942081c5107fc8e39092991be7f6d7cdbf87",
+      "db-4-final.sqlite": "63a20181bed519274a468addcc4da64c85f08842b5dfc2b0e3f72f123412c004",
+      "db-4-final.sqlite-journal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "db-4-final.sqlite-shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "db-4-final.sqlite-wal": "1079506bbf9978f775d0aad5a784942081c5107fc8e39092991be7f6d7cdbf87",
+      "jdb-transcript.txt": "0e4b3be52f6180d9662bd015744b178c53b3df62f8f154f0d2ffa9b0627dc645",
+      "logcat-death-lines.txt": "a90a1e3522e7bb0647cb7b3e1a2916513b92a17f2188a4ff28f81bbcb3cbdc7b",
+      "logcat.txt": "d38638f1b76fd2cd34fef6eb6fec97b3c1766227baf388b0585f34f587b1ca25",
+      "records.json": "c07fb796c11e9a33b1987da0dfc782b2d50d63b782cd2b12962ff9e35729dae4"
+    },
+    "limit": "debuggable installed APK; bounded observation, not exactly-once external effects"
+  },
+  "rebootObserved": "prior job became MISSED with no claim/result after phone returned past deadline"
 }
