@@ -137,8 +137,24 @@ Before `wrangler deploy --env production`:
 ---
 
 ## Known Gotchas
+- ⚠ **`wrangler d1 migrations apply --remote` CANNOT apply a migration containing a
+  `CREATE TRIGGER ... BEGIN ... END;` block.** Its statement splitter breaks on the
+  semicolon inside the trigger body and fails with
+  `incomplete input: SQLITE_ERROR [code: 7500]`. This silently left migrations 0015
+  and 0016 unapplied in BOTH staging and production — the append-only triggers existed
+  in the repo and passed local tests while the live databases had no triggers at all.
+  Local tests do NOT catch it: vitest applies migrations through a different splitter.
+  **Workaround for any trigger migration:**
+  `wrangler d1 execute <db> --env <env> --remote --file migrations/<file>.sql`
+  then record it so the migration system stays consistent:
+  `wrangler d1 execute <db> --env <env> --remote --command "INSERT INTO d1_migrations (name, applied_at) VALUES ('<file>.sql', CURRENT_TIMESTAMP)"`
+  Always confirm afterwards with
+  `SELECT name FROM sqlite_master WHERE type='trigger'` — a migration that "applied"
+  is not the same as a trigger that exists.
 - `worker.js` is a single large file (~15k lines). Add routes at the END before the
   catch-all handler. Do not reorganize the file — integration tests depend on route order.
+  ⚠ A `router.get('*')` catch-all sits near the end: any new `router.get` registered
+  AFTER it is shadowed into a 404.
 - `esbuild` must use `--external:cloudflare:workers` to preserve CF runtime imports.
 - `wrangler d1 migrations` must be applied BEFORE deploying code that references new tables.
 - The `/api/chat/events/:channelId` SSE endpoint holds open connections — do not add
