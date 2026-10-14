@@ -29,7 +29,7 @@ export default function LiveProfileSettings() {
   return <section className="rounded-lg border border-gray-200 bg-white p-6 space-y-4">
     <h2 className="text-lg font-semibold text-gray-900">Live countdown picture</h2>
     <div className="flex items-center gap-4"><LiveProfileAvatar username={user?.username || ''} size={64}/>
-      <p className="text-sm text-gray-600">Enable your countdown in <a className="text-blue-700 underline" href="https://electionclock.com/profile" target="_blank" rel="noopener noreferrer">Election Countdown profile settings</a>, then paste its live avatar link here.</p></div>
+      <p className="text-sm text-gray-600">Enable your countdown in <a className="text-blue-700 underline" href="https://electionclock.com/#/profile" target="_blank" rel="noopener noreferrer">Election Countdown profile settings</a>, then paste its live avatar link here.</p></div>
     <label className="block text-sm font-medium">Live avatar URL<input aria-label="Live avatar URL" value={link} onChange={e=>setLink(e.target.value)} placeholder="https://electionclock.com/live-avatar?id=…" className="mt-1 w-full rounded border border-gray-300 p-2" /></label>
     <p className="text-sm text-gray-600">Your countdown's selected device supplies its time zone. Keep its settings page open on that device for updates. If the stream is unavailable, your initial appears instead.</p>
     <div className="flex gap-3"><button disabled={busy} onClick={()=>void save()} className="rounded bg-blue-700 px-4 py-2 text-white disabled:opacity-50">Link countdown</button>
