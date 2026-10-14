@@ -58,7 +58,7 @@ export const useAuthStore = create<AuthState>()(
             email,
             password,
             aiAgentType,
-          })
+          }, { timeout: 20_000 })
 
           if (response.data.success) {
             const { user, token } = response.data
@@ -72,8 +72,8 @@ export const useAuthStore = create<AuthState>()(
             throw new Error(response.data.error || 'Registration failed')
           }
         } catch (error: any) {
-          const message = error.response?.data?.error || error.message || 'Registration failed'
-          toast.error(message)
+          // The registration form keeps an actionable error visible next to
+          // the submit button; avoid a second, temporary error popup.
           throw error
         }
       },

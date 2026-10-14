@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
+import { registrationErrorMessage, registrationValidation } from '../utils/registrationFeedback'
+import { useAnalytics } from '../hooks/useAnalytics'
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -13,6 +15,7 @@ export default function RegisterPage() {
   const [isLoading, setIsLoading] = useState(false)
   const { register } = useAuthStore()
   const navigate = useNavigate()
+  const { track } = useAnalytics()
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     setFormData({
@@ -22,48 +25,39 @@ export default function RegisterPage() {
   }
 
   const [formError, setFormError] = useState('')
+  const errorRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (formError) errorRef.current?.focus()
+  }, [formError])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (isLoading) return
     setFormError('')
-
-    if (!formData.username.trim()) {
-      setFormError('Username is required.')
-      return
-    }
-
-    if (!formData.email.trim()) {
-      setFormError('Email address is required.')
-      return
-    }
-
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
-      setFormError('Enter a valid email address.')
-      return
-    }
-
-    if (!formData.password) {
-      setFormError('Password is required.')
-      return
-    }
-
-    if (formData.password.length < 12) {
-      setFormError('Password must be at least 12 characters.')
-      return
-    }
-
-    if (formData.password !== formData.confirmPassword) {
-      setFormError('Passwords do not match.')
+    const validation = registrationValidation(formData)
+    if (validation) {
+      setFormError(validation)
+      track('registration_validation_failed', { reason: validation, account_type: formData.aiAgentType })
       return
     }
 
     setIsLoading(true)
+    const startedAt = Date.now()
+    track('registration_submit', { account_type: formData.aiAgentType })
 
     try {
-      await register(formData.username, formData.email, formData.password, formData.aiAgentType)
+      await register(formData.username.trim(), formData.email.trim(), formData.password, formData.aiAgentType)
+      track('registration_client_result', { success: true, duration_ms: Date.now() - startedAt })
       navigate('/')
     } catch (error) {
-      // Error is handled in the store with toast
+      setFormError(registrationErrorMessage(error))
+      const failure = error as { code?: string; response?: { status?: number } }
+      track('registration_client_result', {
+        success: false,
+        status: failure.response?.status || 0,
+        reason: failure.response ? 'server_response' : failure.code === 'ECONNABORTED' ? 'timeout' : 'connection',
+        duration_ms: Date.now() - startedAt
+      })
     } finally {
       setIsLoading(false)
     }
@@ -92,7 +86,7 @@ export default function RegisterPage() {
           </p>
         </div>
 
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
+        <form className="mt-8 space-y-6" onSubmit={handleSubmit} noValidate>
           <div className="space-y-4">
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-gray-700">
@@ -102,12 +96,18 @@ export default function RegisterPage() {
                 id="username"
                 name="username"
                 type="text"
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                aria-describedby="username-help"
                 required
                 value={formData.username}
                 onChange={handleChange}
                 className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
                 placeholder="Enter your username"
               />
+              <p id="username-help" className="mt-1 text-xs text-gray-500">Use letters, numbers, underscores, periods or hyphens. No spaces.</p>
             </div>
 
             <div>
@@ -119,6 +119,9 @@ export default function RegisterPage() {
                 name="email"
                 type="email"
                 autoComplete="email"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 required
                 value={formData.email}
                 onChange={handleChange}
@@ -183,9 +186,14 @@ export default function RegisterPage() {
           </div>
 
           {formError && (
-            <p role="alert" aria-live="polite" className="text-sm text-red-600 text-center">
-              {formError}
-            </p>
+            <div ref={errorRef} tabIndex={-1} role="alert" aria-live="polite" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 focus:outline-none focus:ring-2 focus:ring-red-500">
+              <p>{formError}</p>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
+                <Link className="underline" to="/login">Sign in</Link>
+                <Link className="underline" to="/forgot-password">Reset password</Link>
+                <Link className="underline" to="/bug-report">Report signup problem</Link>
+              </div>
+            </div>
           )}
 
           <div>
