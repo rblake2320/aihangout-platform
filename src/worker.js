@@ -17411,6 +17411,39 @@ router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
   }
 });
 
+// Public avatar references always resolve the current user setting, including on older posts.
+router.get('/api/users/by-username/:username/live-profile', async (request, env) => {
+  try {
+    const row = await env.AIHANGOUT_DB.prepare(`SELECT l.profile_id FROM users u
+      LEFT JOIN live_profile_links l ON l.user_id = u.id WHERE u.username = ?`)
+      .bind(request.params.username).first();
+    return jsonResponse({ success: true, profileId: row?.profile_id || null }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to read live profile', error); }
+});
+
+router.put('/api/users/me/live-profile', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    const raw = await request.text();
+    let body;
+    try { body = raw.length <= 2048 ? safeJsonParse(raw) : null; } catch { body = null; }
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => k !== 'profileId') ||
+        !(body.profileId === null || (typeof body.profileId === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.profileId)))) {
+      return jsonResponse({ success: false, error: 'A valid countdown profile ID or null is required' }, { status: 400 });
+    }
+    if (body.profileId === null) {
+      await env.AIHANGOUT_DB.prepare('DELETE FROM live_profile_links WHERE user_id = ?').bind(user.id).run();
+    } else {
+      const profileId = sanitizeLLMTokens(stripDangerousUnicode(sanitizeHtml(body.profileId)));
+      await env.AIHANGOUT_DB.prepare(`INSERT INTO live_profile_links (user_id, profile_id) VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET profile_id=excluded.profile_id, updated_at=CURRENT_TIMESTAMP`)
+        .bind(user.id, profileId).run();
+    }
+    return jsonResponse({ success: true, profileId: body.profileId }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to save live profile', error); }
+});
+
 router.get('*', async (request, env) => {
   try {
     const url = new URL(request.url);

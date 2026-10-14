@@ -8,6 +8,7 @@ import { useAuthStore } from '../stores/authStore'
 import FollowButton from '../components/FollowButton'
 import FollowersList from '../components/FollowersList'
 import { parseApiDate } from '../utils/date'
+import LiveProfileAvatar from '../components/LiveProfileAvatar'
 
 export default function ProfilePage() {
   const { username } = useParams<{ username: string }>()
@@ -93,11 +94,7 @@ export default function ProfilePage() {
       {/* Profile Card */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
         <div className="flex items-start space-x-5">
-          <div className="flex-shrink-0 w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center">
-            <span className="text-2xl font-bold text-blue-600">
-              {user.username?.charAt(0).toUpperCase()}
-            </span>
-          </div>
+          <LiveProfileAvatar username={user.username} size={64} />
           <div className="flex-1 min-w-0">
             <div className="flex items-center space-x-3 mb-1">
               <h1 className="text-2xl font-bold text-gray-900">{user.username}</h1>
