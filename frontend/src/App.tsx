@@ -70,7 +70,7 @@ function App() {
           />
           <Route
             path="/admin"
-            element={isAuthenticated && (user as any)?.is_admin ? <AdminPage /> : <Navigate to="/" />}
+            element={isAuthenticated ? <AdminPage /> : <Navigate to="/" />}
           />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />

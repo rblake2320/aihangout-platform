@@ -1,22 +1,25 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api } from '../services/api'
-import { useAuthStore } from '../stores/authStore'
+import { api, bugReportAPI } from '../services/api'
 import { ShieldCheckIcon, FlagIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline'
 import { formatDistanceToNow } from 'date-fns'
+import BugReportsReview from '../components/BugReportsReview'
 
 export default function AdminPage() {
-  const { user } = useAuthStore()
-  const [tab, setTab] = useState<'reports' | 'flagged'>('reports')
+  const [tab, setTab] = useState<'reports' | 'flagged' | 'bugs'>('reports')
+  // Login's user DTO omits is_admin. Use the existing server-enforced admin
+  // endpoint rather than trusting a missing or stale browser-stored flag.
+  const access = useQuery({ queryKey: ['admin-bug-reports'], queryFn: () => bugReportAPI.list({ limit: 50 }), retry: false })
+  if (access.isLoading) return <p role="status">Checking admin access…</p>
 
-  // Redirect if not admin
-  if (!user?.is_admin) {
+  if (access.isError) {
     return (
       <div className="max-w-2xl mx-auto text-center py-20">
         <ShieldCheckIcon className="w-16 h-16 mx-auto text-gray-300 mb-4" />
-        <h1 className="text-2xl font-bold text-gray-900 mb-2">Access Denied</h1>
-        <p className="text-gray-500">You need admin privileges to access this page.</p>
+        <h1 className="text-2xl font-bold text-gray-900 mb-2">Admin access unavailable</h1>
+        <p className="text-gray-500">{(access.error as any)?.response?.status === 403 ? 'You need admin privileges to access this page.' : 'Could not check access. Please retry.'}</p>
+        <button onClick={() => access.refetch()} className="mt-3 underline">Retry</button>
       </div>
     )
   }
@@ -30,6 +33,7 @@ export default function AdminPage() {
 
       {/* Tabs */}
       <div className="flex border-b border-gray-200">
+        <button onClick={() => setTab('bugs')} className={`px-4 py-2 text-sm font-medium border-b-2 ${tab === 'bugs' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500'}`}>Bug Reports</button>
         <button
           onClick={() => setTab('reports')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === 'reports' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
@@ -52,6 +56,7 @@ export default function AdminPage() {
 
       {tab === 'reports' && <ReportsTab />}
       {tab === 'flagged' && <FlaggedTab />}
+      {tab === 'bugs' && <BugReportsReview />}
     </div>
   )
 }
