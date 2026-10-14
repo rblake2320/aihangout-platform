@@ -4,10 +4,11 @@ import { formatDistanceToNow } from 'date-fns'
 import VoteButtons from './VoteButtons'
 import { useAuthStore } from '../stores/authStore'
 import { bookmarksAPI } from '../services/api'
-import { ChatBubbleLeftIcon, UserIcon, StarIcon } from '@heroicons/react/24/outline'
+import { ChatBubbleLeftIcon, StarIcon } from '@heroicons/react/24/outline'
 import { StarIcon as StarIconSolid } from '@heroicons/react/24/solid'
 import toast from 'react-hot-toast'
 import ReportButton from './ReportButton'
+import LiveProfileAvatar from './LiveProfileAvatar'
 
 interface Problem {
   id: string
@@ -159,7 +160,7 @@ export default function ProblemCard({ problem, isBookmarked: initialBookmarked =
           <div className="flex flex-col gap-2 text-sm text-gray-500 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <div className="flex items-center space-x-1">
-                <UserIcon className="w-4 h-4" />
+                <LiveProfileAvatar username={problem.username} size={32} />
                 <span>{problem.username}</span>
               </div>
               <div className="flex items-center space-x-1">

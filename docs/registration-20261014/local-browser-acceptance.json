@@ -1,0 +1,77 @@
+[
+  {
+    "scenario": "username_spaces",
+    "result": "Worked",
+    "message": "Your username can contain letters, numbers, underscores (_), periods (.) and hyphens (-). Remove spaces or other symbols.\n\nSign in\nReset password\nReport signup problem",
+    "focused": true,
+    "width": 375
+  },
+  {
+    "scenario": "duplicate_409",
+    "result": "Worked",
+    "message": "We could not use those account details. Your email or username may already be registered. Try signing in or resetting your password; otherwise choose a different username and check your email address.\n\nSign in\nReset password\nReport signup problem",
+    "focused": true
+  },
+  {
+    "scenario": "rate_limit",
+    "result": "Worked",
+    "message": "Too many signup attempts from this network. Wait at least 1 minute without trying again, then submit once. Repeated attempts can extend the wait. If you are still blocked, wait longer or report the problem.\n\nSign in\nReset password\nReport signup problem",
+    "focused": true,
+    "retryEnabled": true
+  },
+  {
+    "scenario": "server",
+    "result": "Worked",
+    "message": "AIHangout could not finish signup right now. Try signing in first in case your account was created. If that does not work, wait a few minutes and try again, or report the problem.\n\nSign in\nReset password\nReport signup problem",
+    "focused": true,
+    "retryEnabled": true
+  },
+  {
+    "scenario": "network",
+    "result": "Worked",
+    "message": "We could not reach AIHangout. Check your internet connection and try again. If you submitted already, try signing in first in case your account was created.\n\nSign in\nReset password\nReport signup problem",
+    "focused": true,
+    "retryEnabled": true
+  },
+  {
+    "scenario": "timeout",
+    "result": "Worked",
+    "message": "The signup request timed out. Check your connection, then try signing in first in case your account was created. If you cannot sign in, try signup again.\n\nSign in\nReset password\nReport signup problem",
+    "focused": true,
+    "retryEnabled": true
+  },
+  {
+    "scenario": "reset_link",
+    "result": "Worked",
+    "url": "http://127.0.0.1:4319/forgot-password",
+    "heading": "Reset your password"
+  },
+  {
+    "scenario": "retained_fields_after_rejection",
+    "result": "Worked",
+    "fields": [
+      {
+        "name": "username",
+        "retained": true
+      },
+      {
+        "name": "email",
+        "retained": true
+      },
+      {
+        "name": "password",
+        "retained": true
+      },
+      {
+        "name": "confirmPassword",
+        "retained": true
+      }
+    ]
+  },
+  {
+    "scenario": "persistent_error_after_other_checks",
+    "result": "Worked",
+    "message": "We could not use those account details. Your email or username may already be registered. Try signing in or resetting your password; otherwise choose a different username and check your email address.\n\nSign in\nReset password\nReport signup problem",
+    "retryEnabled": true
+  }
+]

@@ -1,0 +1,28 @@
+
+🚨 MANDATORY DEPLOYMENT VERIFICATION
+=====================================
+
+📡 Testing API endpoints...
+✅ Problems API: Working
+✅ Sorting: Newest-first verified
+✅ Online counter API: Working
+✅ New-user routes/search: multi-term match and /signup shell verified
+✅ API contracts: pagination, media type, and unknown route errors verified
+
+🌐 Testing frontend deployment...
+✅ Frontend: Loading
+📄 JS Asset: index-04LpGAeH.js
+✅ Frontend: Contains sorting fix
+✅ Frontend: Deployed JS matches local dist build
+✅ Auth crypto: healthy
+✅ Notification pipeline: healthy
+✅ Human verification/feed: schema healthy and Community/AI Digest sources separated
+✅ Pathbooks: schema, authorship, D1 audit chain/head, and sealed materialized state healthy
+✅ Launch contracts/CSP: beacon, logout, retired prototype, and self-hosted font verified
+✅ Grounded capability APIs: 12/12 expected responses
+✅ PBKDF2 iterations: 100000 (within Workers cap)
+
+📊 VERIFICATION RESULTS
+========================
+Passed: 15/15
+🎉 ✅ DEPLOYMENT VERIFIED - SUCCESS CLAIMS ALLOWED

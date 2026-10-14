@@ -25,7 +25,8 @@ class AnalyticsTracker {
   private readonly FLUSH_INTERVAL_MS = 15_000
   private readonly BATCH_ENDPOINT = '/api/events/batch'
   private consecutiveFailures = 0
-  private readonly MAX_CONSECUTIVE_FAILURES = 5
+  private retryAt = 0
+  private inFlight = false
 
   constructor() {
     this.sessionId = this.getOrCreateSessionId()
@@ -86,16 +87,11 @@ class AnalyticsTracker {
   }
 
   private async flush(): Promise<void> {
-    if (this.buffer.length === 0) return
+    if (this.buffer.length === 0 || this.inFlight || Date.now() < this.retryAt) return
 
-    // Stop retrying after too many consecutive failures
-    if (this.consecutiveFailures >= this.MAX_CONSECUTIVE_FAILURES) {
-      this.buffer = []
-      return
-    }
-
-    const eventsToSend = [...this.buffer]
-    this.buffer = []
+    // The ingestion API accepts at most 50 events. Keep the remainder queued.
+    const eventsToSend = this.buffer.splice(0, this.MAX_BUFFER)
+    this.inFlight = true
 
     try {
       const token = useAuthStore.getState().token
@@ -109,23 +105,30 @@ class AnalyticsTracker {
       })
 
       if (!response.ok) {
-        this.consecutiveFailures++
-        this.buffer = [...eventsToSend, ...this.buffer].slice(0, this.HARD_CAP)
+        throw new Error('Analytics delivery failed')
       } else {
         this.consecutiveFailures = 0
+        this.retryAt = 0
       }
     } catch {
       this.consecutiveFailures++
+      // Bound retry traffic, but always allow a later recovery attempt.
+      this.retryAt = Date.now() + Math.min(60_000, this.FLUSH_INTERVAL_MS * 2 ** Math.min(this.consecutiveFailures - 1, 2))
       this.buffer = [...eventsToSend, ...this.buffer].slice(0, this.HARD_CAP)
+    } finally {
+      this.inFlight = false
     }
   }
 
   private setupBeaconOnUnload(): void {
     window.addEventListener('beforeunload', () => {
       if (this.buffer.length === 0) return
-      const payload = JSON.stringify({ events: this.buffer, session_id: this.sessionId })
-      navigator.sendBeacon(this.BATCH_ENDPOINT, payload)
-      this.buffer = []
+      while (this.buffer.length > 0) {
+        const events = this.buffer.slice(0, this.MAX_BUFFER)
+        const payload = JSON.stringify({ events, session_id: this.sessionId })
+        if (!navigator.sendBeacon(this.BATCH_ENDPOINT, payload)) break
+        this.buffer.splice(0, events.length)
+      }
     })
   }
 

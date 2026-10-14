@@ -228,17 +228,21 @@ export default function Chat() {
 
         // Capture message data for analytics (non-blocking)
         track('chat_message', {
-          author: user?.username || 'unknown',
           author_type: user?.aiAgentType || 'anonymous',
+          channel_id: 1,
+          message_id: data.message.id,
           message_length: messageContent.length,
+          send_duration_ms: Date.now() - sendTime.getTime(),
           timestamp: sendTime.toISOString()
         })
 
       } else {
+        track('chat_send_failed', { channel_id: 1, reason: 'server_rejected', status: response.status })
         console.error('❌ Message send failed:', data.error)
         alert(`Failed to send message: ${data.error}`)
       }
     } catch (error) {
+      track('chat_send_failed', { channel_id: 1, reason: 'network_or_response_error' })
       console.error('❌ Network error sending message:', error)
       alert('Network error. Please check your connection and try again.')
     }
@@ -255,24 +259,17 @@ export default function Chat() {
 
   // 🎯 CAPTURE COMPLETE CONVERSATION WHEN CHAT CLOSES
   useEffect(() => {
-    if (!isOpen && conversationStartTime && messages.length > 0) {
+    if (!isOpen && conversationStartTime) {
       const conversationDuration = Date.now() - conversationStartTime.getTime()
 
       const uniqueUsernames = new Set(messages.map(m => m.username))
 
-      // Determine outcome
-      let outcome = 'general_discussion'
-      if (messages.some(m => m.message.includes('solved') || m.message.includes('solution'))) {
-        outcome = 'problem_solved'
-      } else if (messages.some(m => m.message.includes('help') || m.message.includes('question'))) {
-        outcome = 'help_requested'
-      }
-
       track('chat_close', {
+        channel_id: 1,
         duration_ms: conversationDuration,
-        message_count: messages.length,
-        participant_count: uniqueUsernames.size,
-        outcome
+        messages_sent_count: messageTimestamps.length,
+        messages_visible_count: messages.length,
+        participants_visible_count: uniqueUsernames.size
       })
 
       // Reset tracking
@@ -291,7 +288,6 @@ export default function Chat() {
 
     // Try to establish SSE connection for real-time updates
     let eventSource: EventSource | null = null
-    let useFallback = false
     // Minting the ticket is async, so the effect can be cleaned up (unmount, or
     // isOpen/isAuthenticated changing) before `eventSource` is ever assigned.
     // Without this flag, cleanup below would close a still-null `eventSource`
@@ -306,7 +302,6 @@ export default function Chat() {
         // authenticated request and passed in the stream URL instead.
         const { token } = useAuthStore.getState()
         if (!token) {
-          useFallback = true
           return
         }
         const ticketResponse = await fetch('/api/chat/events/ticket', {
@@ -320,7 +315,6 @@ export default function Chat() {
         const ticketData = await ticketResponse.json()
         if (cancelled) return
         if (!ticketData.success) {
-          useFallback = true
           return
         }
         eventSource = new EventSource(`/api/chat/events/1?ticket=${ticketData.ticket}`)
@@ -328,10 +322,6 @@ export default function Chat() {
           eventSource.close()
           eventSource = null
           return
-        }
-
-        eventSource.onopen = () => {
-          useFallback = false
         }
 
         eventSource.onmessage = (event) => {
@@ -372,28 +362,26 @@ export default function Chat() {
         eventSource.onerror = (error) => {
           console.error('SSE connection error:', error)
           eventSource?.close()
-          useFallback = true
         }
 
       } catch (error) {
         console.error('Failed to establish SSE connection:', error)
-        useFallback = true
       }
     }
 
     // Start with SSE
     connectSSE()
 
-    // Setup fallback polling (reduced frequency since SSE handles real-time)
+    // Presence and durable history reads remain independent of SSE health.
     const usersInterval = setInterval(fetchOnlineUsers, 30000) // Poll online users every 30 seconds
     const heartbeatInterval = setInterval(sendHeartbeat, 30000) // Heartbeat every 30 seconds
 
-    // Fallback message polling only if SSE fails
-    const fallbackInterval = setInterval(() => {
-      if (useFallback) {
-        fetchMessages()
-      }
-    }, 5000) // Fallback poll every 5 seconds
+    // Reconcile even when SSE opens: the current Worker sends keepalives,
+    // but cannot fan messages out across Worker instances. A healthy stream
+    // therefore must not disable reads of the durable message history.
+    const messageInterval = setInterval(() => {
+      fetchMessages()
+    }, 5000)
 
     // Send initial heartbeat
     sendHeartbeat()
@@ -403,7 +391,7 @@ export default function Chat() {
       eventSource?.close()
       clearInterval(usersInterval)
       clearInterval(heartbeatInterval)
-      clearInterval(fallbackInterval)
+      clearInterval(messageInterval)
     }
   }, [isOpen, isAuthenticated, showNewestFirst])
 
