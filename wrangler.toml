@@ -50,6 +50,7 @@ binding = "AIHANGOUT_KV"
 id = "9cd27d12b2c341b3a5b77f47b69a89c0"
 
 [env.production.vars]
+PROFILEPAYS_TEST_ENABLED = "true"
 ENVIRONMENT = "production"
 API_VERSION = "v1"
 # AI_ARMY_SERVER must be set via: wrangler secret put AI_ARMY_SERVER --env production

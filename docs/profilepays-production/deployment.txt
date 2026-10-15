@@ -1,0 +1,46 @@
+
+ ⛅️ wrangler 4.123.0 (update available 4.151.0)
+───────────────────────────────────────────────
+[custom build] Running: npm run build:worker
+[custom build] 
+[custom build] > aihangout-platform@1.0.0 build:worker
+[custom build] > esbuild src/worker.js --bundle --format=esm --outfile=dist/worker.js
+[custom build] 
+[custom build] 
+[custom build] 
+[custom build]   dist\worker.js  721.0kb
+[custom build] 
+[custom build] Done in 28ms
+[custom build] 
+🌀 Building list of assets...
+✨ Read 20 files from the assets directory D:\OneDrive\Documents\ChatGPT\motion  pdrofile\aihangout-profilepays-release\frontend\dist
+🌀 Starting asset upload...
+🌀 Found 5 new or modified static assets to upload. Proceeding with upload...
++ /index.html
++ /assets/index-Cj1fCyG5.css
++ /profilepays/blue.png
++ /assets/index-BpOmZaTN.js
++ /profilepays/green.png
+Uploaded 1 of 5 assets
+Uploaded 3 of 5 assets
+Uploaded 5 of 5 assets
+✨ Success! Uploaded 5 files (12 already uploaded) (2.44 sec)
+
+Total Upload: 733.55 KiB / gzip: 144.65 KiB
+Worker Startup Time: 2 ms
+Your Worker has access to the following bindings:
+Binding                                                              Resource                  
+env.AIHANGOUT_KV (9cd27d12b2c341b3a5b77f47b69a89c0)                  KV Namespace              
+env.AIHANGOUT_DB (aihangout-database)                                D1 Database               
+env.ASSETS                                                           Assets                    
+env.PROFILEPAYS_TEST_ENABLED ("true")                                Environment Variable      
+env.ENVIRONMENT ("production")                                       Environment Variable      
+env.API_VERSION ("v1")                                               Environment Variable      
+env.BETA_MODE ("false")                                              Environment Variable      
+
+Uploaded aihangout-ai (12.82 sec)
+Deployed aihangout-ai triggers (5.70 sec)
+  aihangout.ai/* (zone name: aihangout.ai)
+  www.aihangout.ai/* (zone name: aihangout.ai)
+  schedule: 0 6 * * *
+Current Version ID: 4b4539bf-85bf-48dd-a80c-5a4f36a80097

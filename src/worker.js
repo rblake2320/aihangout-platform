@@ -1,3 +1,4 @@
+import { registerProfilePays } from './profilepays.js';
 /**
  * AI Hangout Platform - Cloudflare Worker
  * Crowdsourced AI Problem Solving Platform
@@ -17443,6 +17444,8 @@ router.put('/api/users/me/live-profile', async (request, env) => {
     return jsonResponse({ success: true, profileId: body.profileId }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) { return errResponse('Unable to save live profile', error); }
 });
+
+registerProfilePays(router, {authenticate, safeJsonParse, jsonResponse});
 
 router.get('*', async (request, env) => {
   try {

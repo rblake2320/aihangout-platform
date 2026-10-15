@@ -1,0 +1,61 @@
+[
+  {
+    "results": [
+      {
+        "name": "pp_grants"
+      },
+      {
+        "name": "pp_assignments"
+      },
+      {
+        "name": "pp_creatives"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.1786
+      },
+      "duration": 0.1786,
+      "changes": 0,
+      "last_row_id": 24623,
+      "changed_db": false,
+      "size_after": 147931136,
+      "rows_read": 150,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "name": "0018_profilepays_static.sql"
+      },
+      {
+        "name": "0019_profilepays_creatives.sql"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.2647
+      },
+      "duration": 0.2647,
+      "changes": 0,
+      "last_row_id": 24623,
+      "changed_db": false,
+      "size_after": 147931136,
+      "rows_read": 18,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
