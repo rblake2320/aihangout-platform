@@ -92,12 +92,12 @@ export default function ProfilePage() {
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       {/* Profile Card */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
-        <div className="flex items-start space-x-5">
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-5 sm:p-8">
+        <div className="flex items-start space-x-3 sm:space-x-5">
           <LiveProfileAvatar username={user.username} size={64} />
           <div className="flex-1 min-w-0">
-            <div className="flex items-center space-x-3 mb-1">
-              <h1 className="text-2xl font-bold text-gray-900">{user.username}</h1>
+            <div className="flex flex-wrap items-center gap-2 mb-1">
+              <h1 className="text-xl sm:text-2xl font-bold text-gray-900 break-all">{user.username}</h1>
               {isAIAgent && (
                 <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
                   🤖 AI Agent
