@@ -14,9 +14,9 @@ export function registerProfilePays(router, {authenticate, safeJsonParse, jsonRe
     if(!/^[a-f0-9]{64}$/.test(token)) return null;
     return env.AIHANGOUT_DB.prepare('SELECT * FROM pp_grants WHERE token_hash=? AND revoked=0 AND expires_at>?').bind(await hash(token),Date.now()).first();
   }
-  async function body(request) {
+  async function body(request,limit=2048) {
     const raw=await request.text();
-    if(raw.length>2048) throw new Error('Invalid request');
+    if(raw.length>limit) throw new Error('Invalid request');
     const value=safeJsonParse(raw);
     if(!value || typeof value!=='object' || Array.isArray(value)) throw new Error('Invalid request');
     return value;
@@ -51,7 +51,7 @@ export function registerProfilePays(router, {authenticate, safeJsonParse, jsonRe
     if(!u) return reply({placement:null});
     const normal=await baseline(env,u.id),now=Date.now();
     const a=await env.AIHANGOUT_DB.prepare('SELECT a.* FROM pp_assignments a JOIN pp_grants g ON g.id=a.grant_id WHERE g.user_id=? AND g.revoked=0 AND g.expires_at>? AND a.stopped=0 AND a.lease_until>? ORDER BY a.applied_at DESC LIMIT 1').bind(u.id,now,now).first();
-    return reply({normal,observedAt:now,placement:active(a,normal,now)?{id:a.id,assetKey:a.asset_key,assetUrl:`/profilepays/${a.asset_key}.png`,startsAt:a.starts_at,endsAt:a.ends_at,leaseUntil:a.lease_until,disclosure:'Sponsored test placement • test credits only'}:null});
+    return reply({normal,observedAt:now,placement:active(a,normal,now)?{id:a.id,assetKey:a.asset_key,assetUrl:a.asset_key.startsWith('sha256-')?`/api/profilepays/assets/${a.asset_key}`:`/profilepays/${a.asset_key}.png`,startsAt:a.starts_at,endsAt:a.ends_at,leaseUntil:a.lease_until,disclosure:'Sponsored test placement • test credits only'}:null});
   });
   router.get('/api/profilepays/assignments/:id',async(request,env)=>{
     if(!enabled(env)) return reply({error:'Test connector disabled'},503);
@@ -65,8 +65,20 @@ export function registerProfilePays(router, {authenticate, safeJsonParse, jsonRe
     if(!enabled(env)) return reply({error:'Test connector disabled'},503);
     const g=await grant(request,env);if(!g) return reply({error:'Grant expired or revoked'},401);
     try {
-      const b=await body(request),id=request.params.id,now=Date.now();
-      if(!uuid(id)||!assets.has(b.assetKey)||!Number.isInteger(b.durationSeconds)||b.durationSeconds<10||b.durationSeconds>86400||typeof b.originalKey!=='string'||Object.keys(b).some(k=>!['assetKey','durationSeconds','originalKey'].includes(k))) return reply({error:'Invalid assignment'},400);
+      const b=await body(request,97000),id=request.params.id,now=Date.now();
+      const custom=typeof b.assetKey==='string'&&/^sha256-[a-f0-9]{64}$/.test(b.assetKey);
+      if(!uuid(id)||(!assets.has(b.assetKey)&&!custom)||!Number.isInteger(b.durationSeconds)||b.durationSeconds<10||b.durationSeconds>86400||typeof b.originalKey!=='string'||Object.keys(b).some(k=>!['assetKey','durationSeconds','originalKey','png'].includes(k))) return reply({error:'Invalid assignment'},400);
+      if(custom){
+        if(typeof b.png!=='string'||b.png.length>95000||!/^[A-Za-z0-9+/]+={0,2}$/.test(b.png))return reply({error:'Invalid PNG'},400);
+        const bytes=Uint8Array.from(atob(b.png),c=>c.charCodeAt(0));
+        if(bytes.length<33||bytes.length>70000||[137,80,78,71,13,10,26,10].some((v,i)=>bytes[i]!==v)||new DataView(bytes.buffer).getUint32(16)!==128||new DataView(bytes.buffer).getUint32(20)!==128)return reply({error:'Invalid PNG'},400);
+        const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(n=>n.toString(16).padStart(2,'0')).join('');
+        if(b.assetKey!=='sha256-'+digest)return reply({error:'Image hash mismatch'},400);
+        const count=await env.AIHANGOUT_DB.prepare('SELECT COUNT(*) AS n FROM pp_creatives WHERE grant_id=?').bind(g.id).first();
+        const prior=await env.AIHANGOUT_DB.prepare('SELECT asset_key FROM pp_creatives WHERE asset_key=?').bind(b.assetKey).first();
+        if(!prior&&count.n>=100)return reply({error:'Creative limit reached'},409);
+        await env.AIHANGOUT_DB.prepare('INSERT OR IGNORE INTO pp_creatives(asset_key,grant_id,png_base64) VALUES(?,?,?)').bind(b.assetKey,g.id,b.png).run();
+      } else if(b.png!==undefined)return reply({error:'Unexpected image'},400);
       const normal=await baseline(env,g.user_id);if(b.originalKey!==normal.key) return reply({error:'Normal profile changed'},409);
       const existing=await env.AIHANGOUT_DB.prepare('SELECT * FROM pp_assignments WHERE id=?').bind(id).first();
       if(existing) {
@@ -97,5 +109,11 @@ export function registerProfilePays(router, {authenticate, safeJsonParse, jsonRe
     const g=await grant(request,env);if(!g) return reply({error:'Grant expired or revoked'},401);
     await env.AIHANGOUT_DB.prepare('UPDATE pp_assignments SET stopped=1 WHERE id=? AND grant_id=?').bind(request.params.id,g.id).run();
     return reply({removed:true,normal:await baseline(env,g.user_id)});
+  });
+  router.get('/api/profilepays/assets/:key',async(request,env)=>{
+    if(!enabled(env)||!/^sha256-[a-f0-9]{64}$/.test(request.params.key))return reply({error:'Image unavailable'},404);
+    const a=await env.AIHANGOUT_DB.prepare('SELECT png_base64 FROM pp_creatives WHERE asset_key=?').bind(request.params.key).first();
+    if(!a)return reply({error:'Image unavailable'},404);
+    return new Response(Uint8Array.from(atob(a.png_base64),c=>c.charCodeAt(0)),{headers:{'Content-Type':'image/png','Cache-Control':'public, max-age=31536000, immutable','X-Content-Type-Options':'nosniff'}});
   });
 }

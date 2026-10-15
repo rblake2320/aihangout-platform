@@ -36,9 +36,9 @@ export default function LiveProfileAvatar({username, size = 40}: {username: stri
   // Server time plus a monotonic interval survives a phone clock/time-zone change.
   const serverNow=placementData?.observedAt+Math.max(0,now-placementData?.receivedAt)
   const profileId=placementData?.normal ? placementData.normal.profileId : data?.profileId
-  if (placement && failedPlacement !== placement.id && serverNow < placement.leaseUntil && (!placement.endsAt || serverNow < placement.endsAt)) return <span className="relative shrink-0" title={placement.disclosure}>
-    <img data-static-placement={placement.id} src={placement.assetUrl} width={size} height={size} alt={`${username}: sponsored test placement`} className="rounded-full" style={{width:size,height:size}} onError={()=>setFailedPlacement(placement.id)}/>
-    <span className="absolute -bottom-1 left-0 rounded bg-white px-1 text-[9px] text-gray-700">Ad · test</span></span>
+  if (placement && failedPlacement !== placement.id && serverNow < placement.leaseUntil && (!placement.endsAt || serverNow < placement.endsAt)) return <span className="inline-flex shrink-0 flex-col items-center" style={{width:size}} title={placement.disclosure}>
+    <img data-static-placement={placement.id} src={placement.assetUrl} width={size} height={size} alt={`${username}: sponsored test placement`} className="block shrink-0 rounded-full" style={{width:size,height:size,minWidth:size}} onError={()=>setFailedPlacement(placement.id)}/>
+    <span className="whitespace-nowrap text-[8px] leading-3 text-gray-700">Ad · test</span></span>
   if (!profileId || failed) return <span aria-label={username} data-normal-profile={username} style={{width:size,height:size,fontSize:size/2}}
     className="inline-flex shrink-0 items-center justify-center rounded-full bg-blue-100 font-bold text-blue-700">{username?.charAt(0).toUpperCase()}</span>
   return <img data-live-profile={profileId} src={`${provider.origin}/api/live-profiles/${encodeURIComponent(profileId)}.stream?generation=${generation}`}
