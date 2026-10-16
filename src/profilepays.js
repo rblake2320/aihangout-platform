@@ -59,7 +59,7 @@ export function registerProfilePays(router, {authenticate, safeJsonParse, jsonRe
     const a=await env.AIHANGOUT_DB.prepare('SELECT * FROM pp_assignments WHERE id=? AND grant_id=?').bind(request.params.id,g.id).first();
     if(!a) return reply({error:'Assignment not found'},404);
     const normal=await baseline(env,g.user_id);
-    return reply({id:a.id,startsAt:a.starts_at,endsAt:a.ends_at,leaseUntil:a.lease_until,stopped:!!a.stopped,originalMatches:normal.key===a.original_key,normal,observedAt:Date.now()});
+    return reply({id:a.id,startsAt:a.starts_at,endsAt:a.ends_at,leaseUntil:a.lease_until,stopped:!!a.stopped,breachedAt:a.breached_at??null,breachReason:a.breach_reason??null,originalMatches:normal.key===a.original_key,normal,observedAt:Date.now()});
   });
   router.put('/api/profilepays/assignments/:id',async(request,env)=>{
     if(!enabled(env)) return reply({error:'Test connector disabled'},503);
