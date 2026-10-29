@@ -1,0 +1,83 @@
+[
+  {
+    "number": 1,
+    "username": "humanqa_mv8hog7m_01",
+    "result": "Worked",
+    "mode": "desktop Chrome",
+    "observed": "Authenticated profile link after form submission",
+    "at": "2026-10-14T19:15:11.871Z"
+  },
+  {
+    "number": 2,
+    "username": "humanqa_mv8hog7m_02",
+    "result": "Worked",
+    "mode": "Chrome 390x844",
+    "observed": "Success notice and authenticated profile link",
+    "at": "2026-10-14T19:15:56.599Z"
+  },
+  {
+    "number": 3,
+    "username": "humanqa_mv8hog7m_03",
+    "result": "Worked",
+    "mode": "Chrome 430x844",
+    "at": "2026-10-14T19:16:09.353Z"
+  },
+  {
+    "number": 4,
+    "username": "humanqa_mv8hog7m_04",
+    "result": "Worked",
+    "mode": "Chrome 390x844",
+    "at": "2026-10-14T19:16:58.048Z"
+  },
+  {
+    "number": 5,
+    "username": "humanqa_mv8hog7m_05",
+    "result": "Worked",
+    "mode": "Chrome 390x844",
+    "at": "2026-10-14T19:17:03.153Z"
+  },
+  {
+    "number": 6,
+    "username": "humanqa_mv8hog7m_06",
+    "result": "Failed",
+    "mode": "Chrome 390x844",
+    "observed": "Too many requests. Please try again later.",
+    "at": "2026-10-14T19:17:19.858Z"
+  },
+  {
+    "number": 6,
+    "username": "humanqa_mv8hog7m_06",
+    "result": "Worked",
+    "mode": "Chrome 390x844",
+    "observed": "Retry after leaving the rate-limit window idle",
+    "at": "2026-10-14T19:18:36.996Z"
+  },
+  {
+    "number": 7,
+    "username": "humanqa_mv8hog7m_07",
+    "result": "Worked",
+    "mode": "Chrome 390x844",
+    "at": "2026-10-14T19:18:48.373Z"
+  },
+  {
+    "number": 8,
+    "username": "humanqa_mv8hog7m_08",
+    "result": "Worked",
+    "mode": "Chrome 390x844",
+    "at": "2026-10-14T19:18:53.570Z"
+  },
+  {
+    "number": 9,
+    "username": "humanqa_mv8hog7m_09",
+    "result": "Worked",
+    "mode": "Chrome 390x844",
+    "at": "2026-10-14T19:18:57.753Z"
+  },
+  {
+    "number": 10,
+    "username": "humanqa_mv8hog7m_10",
+    "result": "Worked",
+    "mode": "Chrome 390x844",
+    "at": "2026-10-14T19:19:02.926Z"
+  }
+]
