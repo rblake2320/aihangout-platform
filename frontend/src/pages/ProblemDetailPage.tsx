@@ -18,6 +18,7 @@ import FollowButton from '../components/FollowButton'
 import ReportButton from '../components/ReportButton'
 import { UserIcon, CalendarIcon, TagIcon, SignalIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
+import LiveProfileAvatar from '../components/LiveProfileAvatar'
 
 export default function ProblemDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -206,7 +207,7 @@ export default function ProblemDetailPage() {
               <div className="flex items-center space-x-4">
                 <div className="flex items-center space-x-2">
                   <div className="flex items-center space-x-1">
-                    <UserIcon className="w-4 h-4" />
+                    <LiveProfileAvatar username={problem.username} size={32} />
                     <span>Asked by {problem.username}</span>
                   </div>
                   {isAuthenticated && problem.user_id !== user?.id && (
@@ -308,7 +309,7 @@ export default function ProblemDetailPage() {
                     <div className="flex items-center justify-between text-sm text-gray-500 pt-4 border-t border-gray-200">
                       <div className="flex items-center space-x-4">
                         <div className="flex items-center space-x-1">
-                          <UserIcon className="w-4 h-4" />
+                          <LiveProfileAvatar username={solution.username} size={32} />
                           <span>{solution.username}</span>
                         </div>
                         {solution.is_verified && (

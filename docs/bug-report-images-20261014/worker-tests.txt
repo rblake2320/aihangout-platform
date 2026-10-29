@@ -1,0 +1,28 @@
+
+> aihangout-platform@1.0.0 test
+> vitest run
+
+
+ RUN  v4.1.10 D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform
+
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/Router.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/StatusError.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/createResponse.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/json.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/error.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/status.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/text.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/html.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/jpeg.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/png.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/webp.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/withContent.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/withCookies.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/withParams.ts"
+Sourcemap for "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/itty-router/index.mjs" points to a source file outside its package: "D:/OneDrive/Documents/ChatGPT/motion  pdrofile/aihangout-platform/node_modules/src/src/createCors.ts"
+
+ Test Files  5 passed (5)
+      Tests  62 passed (62)
+   Start at  16:06:29
+   Duration  5.10s (transform 1.39s, setup 3.59s, import 123ms, tests 4.64s, environment 0ms)
+

@@ -72,3 +72,5 @@ test-coverage-analysis/
 # Playwright
 .playwright-cli/
 backup-prod-*.sql
+# Local acceptance state, temporary credentials and logs
+.local/
