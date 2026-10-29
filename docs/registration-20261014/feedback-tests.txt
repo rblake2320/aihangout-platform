@@ -1,0 +1,17 @@
+✔ accepts human form values with surrounding username/email whitespace (0.5945ms)
+✔ explains spaces in usernames before contacting the API (0.2377ms)
+✔ explains malformed email and both password length boundaries (0.158ms)
+✔ explains confirmation mismatch (0.0874ms)
+✔ duplicate details offer sign-in/reset without identifying an existing email (0.2073ms)
+✔ rate limit respects retry duration and warns against repeated retries (0.3282ms)
+✔ connection loss and timeout give a recovery action without claiming account absence (0.1618ms)
+✔ service errors do not disclose raw backend details (0.2372ms)
+✔ known password rejection is actionable; arbitrary response text is not echoed (0.2196ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 6.1042

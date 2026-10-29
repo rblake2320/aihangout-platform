@@ -121,6 +121,7 @@ export const bugReportAPI = {
     userAgent: string
     url: string
     additionalInfo?: string
+    images?: Array<{ name: string; dataUrl: string }>
     userId?: number | null
     username?: string
   }) =>

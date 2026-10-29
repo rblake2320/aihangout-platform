@@ -962,7 +962,7 @@ async function verifyJWT(token, env) {
 
 // Never persist credentials. Keys are matched case-insensitively and by substring
 // so `password`, `newPassword`, `confirm_password`, `token`, `apiKey` are all caught.
-const ACTIVITY_REDACT_KEYS = ['password', 'token', 'secret', 'apikey', 'api_key', 'authorization'];
+const ACTIVITY_REDACT_KEYS = ['password', 'token', 'secret', 'apikey', 'api_key', 'authorization', 'dataurl', 'image_base64'];
 const ACTIVITY_PAYLOAD_LIMIT = 4000;
 
 function redactForActivityLog(value, depth = 0) {
@@ -14554,6 +14554,31 @@ router.get('/api/problem-bank/featured', async (request, env) => {
 });
 
 // Bug Reports API
+const BUG_REPORT_BODY_LIMIT = 2_200_000;
+function validateBugImages(images) {
+  if (images === undefined) return [];
+  if (!Array.isArray(images) || images.length > 3) throw new Error('Attach up to 3 screenshots.');
+  return images.map((image, position) => {
+    const match = typeof image?.dataUrl === 'string' && image.dataUrl.match(/^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/);
+    if (!match || match[2].length > 699052) throw new Error('Screenshots must be PNG, JPEG or WebP, up to 512 KB each.');
+    let bytes;
+    try { bytes = atob(match[2]); } catch { throw new Error('Invalid screenshot encoding.'); }
+    if (!bytes.length || bytes.length > 512 * 1024 || btoa(bytes) !== match[2]) throw new Error('Invalid screenshot size or encoding.');
+    const mime = match[1];
+    const signatureOK = mime === 'image/png'
+      ? bytes.startsWith('\x89PNG\r\n\x1a\n') && bytes.slice(12, 16) === 'IHDR'
+      : mime === 'image/jpeg'
+        ? bytes.startsWith('\xff\xd8\xff') && bytes.endsWith('\xff\xd9')
+        : bytes.startsWith('RIFF') && bytes.slice(8, 12) === 'WEBP';
+    if (!signatureOK) throw new Error('The screenshot does not match its image format.');
+    return {
+      id: crypto.randomUUID(), position, mime,
+      name: sanitizeContent(String(image.name || `Screenshot ${position + 1}`).slice(0, 120)),
+      size: bytes.length, base64: match[2]
+    };
+  });
+}
+
 router.post('/api/bug-reports', async (request, env) => {
   try {
     // Resolve submitter identity from auth token — never trust body-supplied userId/username
@@ -14561,6 +14586,13 @@ router.post('/api/bug-reports', async (request, env) => {
     const reportUserId = authResult?.id || null;
     const reportUsername = authResult?.username || 'Anonymous';
 
+    let body;
+    try { body = safeJsonParse(await request.text()); } catch {
+      return Response.json({ success: false, error: 'Invalid report JSON.' }, { status: 400, headers: corsHeaders });
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return Response.json({ success: false, error: 'Invalid report JSON.' }, { status: 400, headers: corsHeaders });
+    }
     const {
       title,
       description,
@@ -14571,8 +14603,14 @@ router.post('/api/bug-reports', async (request, env) => {
       actualBehavior,
       userAgent,
       url,
-      additionalInfo
-    } = await request.json();
+      additionalInfo,
+      images
+    } = body;
+
+    let attachments;
+    try { attachments = validateBugImages(images); } catch (error) {
+      return Response.json({ success: false, error: error.message }, { status: 400, headers: corsHeaders });
+    }
 
     // Validate required fields
     if (!title || !description || !bugType) {
@@ -14590,32 +14628,46 @@ router.post('/api/bug-reports', async (request, env) => {
       });
     }
 
-    // Insert bug report
-    const result = await env.AIHANGOUT_DB.prepare(`
+    const fields = [title, description, bugType, priority, stepsToReproduce, expectedBehavior, actualBehavior, userAgent, url, additionalInfo];
+    if (fields.some(value => value != null && (typeof value !== 'string' || value.length > 20000))) {
+      return Response.json({ success: false, error: 'Report fields must be text of at most 20,000 characters each.' }, { status: 400, headers: corsHeaders });
+    }
+    const groupId = attachments.length ? crypto.randomUUID() : null;
+    // One D1 batch commits the report and every image together, or none of them.
+    const insertReport = env.AIHANGOUT_DB.prepare(`
       INSERT INTO bug_reports (
         title, description, bug_type, priority, steps_to_reproduce,
         expected_behavior, actual_behavior, user_agent, url, additional_info,
-        user_id, username
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        user_id, username, image_group_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       sanitizeContent(title),
       sanitizeContent(description),
       sanitizeContent(bugType),
-      priority,
+      sanitizeContent(priority),
       stepsToReproduce ? sanitizeContent(stepsToReproduce) : null,
       expectedBehavior ? sanitizeContent(expectedBehavior) : null,
       actualBehavior ? sanitizeContent(actualBehavior) : null,
-      userAgent || null,
-      url || null,
+      userAgent ? sanitizeContent(userAgent) : null,
+      url ? sanitizeContent(url) : null,
       additionalInfo ? sanitizeContent(additionalInfo) : null,
       reportUserId,
-      sanitizeContent(reportUsername)
-    ).run();
+      sanitizeContent(reportUsername),
+      groupId
+    );
+    const results = await env.AIHANGOUT_DB.batch([
+      insertReport,
+      ...attachments.map(image => env.AIHANGOUT_DB.prepare(`
+        INSERT INTO bug_report_images (id, group_id, position, filename, mime_type, byte_length, image_base64)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(image.id, groupId, image.position, image.name, image.mime, image.size, image.base64))
+    ]);
 
     return Response.json({
       success: true,
       message: 'Bug report submitted successfully',
-      bugReportId: result.meta.last_row_id
+      bugReportId: results[0].meta.last_row_id,
+      imageCount: attachments.length
     }, { headers: corsHeaders });
 
   } catch (error) {
@@ -14646,7 +14698,7 @@ router.get('/api/bug-reports', async (request, env) => {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 50);
     const offset = parseInt(url.searchParams.get('offset') || '0');
 
-    let query = 'SELECT * FROM bug_reports WHERE 1=1';
+    let query = 'SELECT bug_reports.*, (SELECT COUNT(*) FROM bug_report_images WHERE group_id = bug_reports.image_group_id) AS image_count FROM bug_reports WHERE 1=1';
     const params = [];
 
     if (status) {
@@ -14713,7 +14765,13 @@ router.get('/api/bug-reports/:id', async (request, env) => {
 
     return Response.json({
       success: true,
-      bugReport: result
+      bugReport: result,
+      images: (await env.AIHANGOUT_DB.prepare(
+        'SELECT id, filename, mime_type, byte_length, image_base64 FROM bug_report_images WHERE group_id = ? ORDER BY position'
+      ).bind(result.image_group_id).all()).results.map(image => ({
+        id: image.id, name: image.filename, mimeType: image.mime_type, byteLength: image.byte_length,
+        dataUrl: `data:${image.mime_type};base64,${image.image_base64}`
+      }))
     }, { headers: corsHeaders });
 
   } catch (error) {
@@ -17478,6 +17536,39 @@ router.post('/api/admin/activity-log/:id/quarantine', async (request, env) => {
   }
 });
 
+// Public avatar references always resolve the current user setting, including on older posts.
+router.get('/api/users/by-username/:username/live-profile', async (request, env) => {
+  try {
+    const row = await env.AIHANGOUT_DB.prepare(`SELECT l.profile_id FROM users u
+      LEFT JOIN live_profile_links l ON l.user_id = u.id WHERE u.username = ?`)
+      .bind(request.params.username).first();
+    return jsonResponse({ success: true, profileId: row?.profile_id || null }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to read live profile', error); }
+});
+
+router.put('/api/users/me/live-profile', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    const raw = await request.text();
+    let body;
+    try { body = raw.length <= 2048 ? safeJsonParse(raw) : null; } catch { body = null; }
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => k !== 'profileId') ||
+        !(body.profileId === null || (typeof body.profileId === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(body.profileId)))) {
+      return jsonResponse({ success: false, error: 'A valid countdown profile ID or null is required' }, { status: 400 });
+    }
+    if (body.profileId === null) {
+      await env.AIHANGOUT_DB.prepare('DELETE FROM live_profile_links WHERE user_id = ?').bind(user.id).run();
+    } else {
+      const profileId = sanitizeLLMTokens(stripDangerousUnicode(sanitizeHtml(body.profileId)));
+      await env.AIHANGOUT_DB.prepare(`INSERT INTO live_profile_links (user_id, profile_id) VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET profile_id=excluded.profile_id, updated_at=CURRENT_TIMESTAMP`)
+        .bind(user.id, profileId).run();
+    }
+    return jsonResponse({ success: true, profileId: body.profileId }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to save live profile', error); }
+});
+
 router.get('*', async (request, env) => {
   try {
     const url = new URL(request.url);
@@ -17961,6 +18052,27 @@ export default {
   async fetch(request, env, ctx) {
     const startTime = Date.now();
     const url = new URL(request.url);
+
+    // Bound screenshot submissions before cloning the body for the activity log.
+    if (request.method === 'POST' && url.pathname === '/api/bug-reports' && request.body) {
+      const reader = request.body.getReader();
+      const chunks = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > BUG_REPORT_BODY_LIMIT) {
+          await reader.cancel();
+          return jsonResponse({ success: false, error: 'Bug report is too large. Attach up to 3 screenshots of 512 KB each.' }, { status: 413 });
+        }
+        chunks.push(value);
+      }
+      const body = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+      request = new Request(request, { body });
+    }
 
     if (url.pathname.startsWith('/api/')) {
       for (const [name, minimum] of [['limit', 1], ['page', 1], ['offset', 0]]) {

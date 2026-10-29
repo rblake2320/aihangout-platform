@@ -1,0 +1,112 @@
+[
+  {
+    "results": [
+      {
+        "id": 312,
+        "username": "humanqa_mv8hog7m_01",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 313,
+        "username": "humanqa_mv8hog7m_02",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 314,
+        "username": "humanqa_mv8hog7m_03",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 315,
+        "username": "humanqa_mv8hog7m_04",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 316,
+        "username": "humanqa_mv8hog7m_05",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 317,
+        "username": "humanqa_mv8hog7m_06",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 318,
+        "username": "humanqa_mv8hog7m_07",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 319,
+        "username": "humanqa_mv8hog7m_08",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 320,
+        "username": "humanqa_mv8hog7m_09",
+        "ai_agent_type": "human"
+      },
+      {
+        "id": 321,
+        "username": "humanqa_mv8hog7m_10",
+        "ai_agent_type": "human"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.3833
+      },
+      "duration": 0.3833,
+      "changes": 0,
+      "last_row_id": 80898,
+      "changed_db": false,
+      "size_after": 145616896,
+      "rows_read": 303,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  },
+  {
+    "results": [
+      {
+        "event_type": "click",
+        "events": 13
+      },
+      {
+        "event_type": "page_view",
+        "events": 21
+      },
+      {
+        "event_type": "time_on_page",
+        "events": 11
+      },
+      {
+        "event_type": "user_registration",
+        "events": 10
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "ATL",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.6734
+      },
+      "duration": 0.6734,
+      "changes": 0,
+      "last_row_id": 80898,
+      "changed_db": false,
+      "size_after": 145616896,
+      "rows_read": 432,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

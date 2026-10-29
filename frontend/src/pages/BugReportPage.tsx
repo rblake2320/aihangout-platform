@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
 import { bugReportAPI } from '../services/api'
 import { useAuthStore } from '../stores/authStore'
 import toast from 'react-hot-toast'
 import { ExclamationTriangleIcon, BugAntIcon } from '@heroicons/react/24/outline'
+import BugScreenshots from '../components/BugScreenshots'
+import { prepareBugImage, type BugImage } from '../utils/bugImages'
 
 const BUG_TYPES = [
   'UI/UX Issue',
@@ -41,6 +43,11 @@ export default function BugReportPage() {
     additionalInfo: ''
   })
   const navigate = useNavigate()
+  const [images, setImages] = useState<BugImage[]>([])
+  const [imageError, setImageError] = useState('')
+  const [submissionError, setSubmissionError] = useState('')
+  const [preparingImages, setPreparingImages] = useState(false)
+  const preparingRef = useRef(false)
 
   const submitBugReportMutation = useMutation({
     mutationFn: bugReportAPI.create,
@@ -51,9 +58,23 @@ export default function BugReportPage() {
     onError: (error: any) => {
       console.error('Bug report submission error:', error)
       const errorMessage = error.response?.data?.error || error.message || 'Failed to submit bug report'
+      setSubmissionError(errorMessage)
       toast.error(errorMessage, { duration: 5000 })
     },
   })
+
+  const addImages = async (files: File[]) => {
+    if (!files.length || preparingRef.current || submitBugReportMutation.isLoading) return
+    setImageError('')
+    if (images.length + files.length > 3) { setImageError('You can attach up to 3 screenshots. Remove one before adding more.'); return }
+    preparingRef.current = true
+    setPreparingImages(true)
+    try {
+      const prepared = await Promise.all(files.map(prepareBugImage))
+      setImages(previous => [...previous, ...prepared])
+    } catch (error) { setImageError(error instanceof Error ? error.message : 'Could not attach this image.') }
+    finally { preparingRef.current = false; setPreparingImages(false) }
+  }
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     setFormData({
@@ -64,6 +85,8 @@ export default function BugReportPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    if (preparingRef.current || submitBugReportMutation.isLoading) return
+    setSubmissionError('')
 
     // Validate required fields
     if (!formData.title.trim()) {
@@ -91,7 +114,8 @@ export default function BugReportPage() {
       url: formData.url,
       additionalInfo: formData.additionalInfo.trim() || undefined,
       userId: isAuthenticated ? user?.id : null,
-      username: isAuthenticated ? user?.username : 'Anonymous'
+      username: isAuthenticated ? user?.username : 'Anonymous',
+      images
     }
 
     submitBugReportMutation.mutate(submitData)
@@ -124,7 +148,10 @@ export default function BugReportPage() {
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-6">
+      <form onSubmit={handleSubmit} onPaste={event => {
+        const files = Array.from(event.clipboardData.items).filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter((file): file is File => Boolean(file))
+        if (files.length) { event.preventDefault(); void addImages(files) }
+      }} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-6">
         {/* Bug Title */}
         <div>
           <label htmlFor="title" className="block text-sm font-medium text-gray-700 mb-2">
@@ -212,6 +239,9 @@ export default function BugReportPage() {
             Describe what went wrong and when it happens
           </p>
         </div>
+
+        <BugScreenshots images={images} busy={preparingImages} disabled={submitBugReportMutation.isLoading} onFiles={files => { void addImages(files) }} onRemove={index => { setImages(previous => previous.filter((_, i) => i !== index)); setImageError('') }} />
+        {imageError && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-800">{imageError}</p>}
 
         {/* Steps to Reproduce */}
         <div>
@@ -318,6 +348,7 @@ export default function BugReportPage() {
           </p>
         </div>
 
+        {submissionError && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-800">{submissionError} Your report and screenshots are still here; you can retry.</p>}
         {/* Submit Buttons */}
         <div className="flex justify-end space-x-4">
           <button
@@ -329,10 +360,10 @@ export default function BugReportPage() {
           </button>
           <button
             type="submit"
-            disabled={submitBugReportMutation.isPending}
+            disabled={submitBugReportMutation.isLoading || preparingImages}
             className="px-6 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center space-x-2"
           >
-            {submitBugReportMutation.isPending ? (
+            {submitBugReportMutation.isLoading ? (
               <>
                 <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
                 <span>Submitting...</span>
