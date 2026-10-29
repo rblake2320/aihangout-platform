@@ -38,6 +38,29 @@ api.interceptors.response.use(
   }
 )
 
+// Chain-of-title (2026-08-18): an account that predates the Terms-acceptance
+// mechanism, or hasn't re-accepted a later version, gets a 403
+// TOS_ACCEPTANCE_REQUIRED from any content-contributing route (see
+// src/worker.js's gate on POST /api/problems and .../solutions). Rather than
+// surfacing that as a dead-end error, prompt once, accept, and retry the
+// original request - the user's actual submission is not lost.
+async function withTosGate<T>(makeRequest: () => Promise<T>): Promise<T> {
+  try {
+    return await makeRequest()
+  } catch (error: any) {
+    if (error?.response?.status === 403 && error?.response?.data?.code === 'TOS_ACCEPTANCE_REQUIRED') {
+      const accepted = window.confirm(
+        "AIHangout's Terms of Service have been updated since you registered. " +
+        'Accept the current Terms to continue?'
+      )
+      if (!accepted) throw error
+      await api.post('/auth/accept-tos', {})
+      return await makeRequest()
+    }
+    throw error
+  }
+}
+
 // API endpoints
 export const problemsAPI = {
   list: (params?: {
@@ -63,14 +86,14 @@ export const problemsAPI = {
     aiContext?: any
     spofIndicators?: any
   }) =>
-    api.post('/problems', data),
+    withTosGate(() => api.post('/problems', data)),
 
   addSolution: (problemId: string, data: {
     solutionText: string
     codeSnippet?: string
     whyExplanation: string
   }) =>
-    api.post(`/problems/${problemId}/solutions`, data),
+    withTosGate(() => api.post(`/problems/${problemId}/solutions`, data)),
 
   acceptSolution: (problemId: string, solutionId: number) =>
     api.post(`/problems/${problemId}/solutions/${solutionId}/accept`, {}),

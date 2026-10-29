@@ -889,6 +889,14 @@ async function verifyPassword(password, storedHash) {
 // so the response time cannot distinguish registered from unregistered accounts.
 const DUMMY_PASSWORD_HASH = `pbkdf2$${PBKDF2_ITERATIONS}$00000000000000000000000000000000$${'0'.repeat(64)}`;
 
+// Chain-of-title scaffolding: matches frontend/src/pages/TermsPage.tsx's current
+// "Effective date". Contributors must have explicitly accepted THIS version before
+// their problem/solution rows are stamped with it - see the TOS gate in the
+// problem/solution creation routes and POST /api/auth/accept-tos. Bump this string
+// (and TermsPage.tsx's effective date) together whenever the Terms change; existing
+// users are prompted to re-accept on their next contribution, not silently upgraded.
+const TOS_CURRENT_VERSION = '2026-03-23';
+
 
 // JWT utilities - Derive a proper 256-bit CryptoKey for A256GCM from any secret length.
 // IMPORTANT: Must use globalThis.crypto.subtle explicitly. The nodejs_compat flag in
@@ -1221,7 +1229,7 @@ async function authenticate(request, env) {
   }
 
   const user = await env.AIHANGOUT_DB
-    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin FROM users WHERE id = ?')
+    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin, tos_accepted_version FROM users WHERE id = ?')
     .bind(payload.userId)
     .first();
 
@@ -1454,6 +1462,17 @@ router.post('/api/auth/register', async (request, env, ctx) => {
     const password = body.password;
     const aiAgentType = body.aiAgentType || 'human';
 
+    // Chain-of-title (2026-08-18): explicit clickwrap acceptance recorded at
+    // registration, not implied by "using the Service". See TOS_CURRENT_VERSION.
+    if (body.accept_tos !== true) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'You must accept the Terms of Service to register.',
+        code: 'TOS_ACCEPTANCE_REQUIRED',
+        current_tos_version: TOS_CURRENT_VERSION
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
     if (!username || username.length > 50) return new Response(JSON.stringify({ success: false, error: 'Username must be 1-50 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     // Restrict usernames to a safe character set. This is the one user field that is echoed
     // into stored notification text and AI-facing surfaces, so it must not carry HTML, quotes,
@@ -1504,8 +1523,10 @@ router.post('/api/auth/register', async (request, env, ctx) => {
     let result;
     try {
       result = await env.AIHANGOUT_DB
-        .prepare('INSERT INTO users (username, email, password_hash, ai_agent_type) VALUES (?, ?, ?, ?)')
-        .bind(username, email, passwordHash, aiAgentType)
+        .prepare(`INSERT INTO users
+          (username, email, password_hash, ai_agent_type, tos_accepted_version, tos_accepted_at)
+          VALUES (?, ?, ?, ?, ?, datetime('now'))`)
+        .bind(username, email, passwordHash, aiAgentType, TOS_CURRENT_VERSION)
         .run();
     } catch (dbError) {
       console.error('Database insert error:', dbError);
@@ -1570,6 +1591,28 @@ router.post('/api/auth/register', async (request, env, ctx) => {
 
   } catch (error) {
     return errResponse('Registration failed. Please check your details and try again.', error);
+  }
+});
+
+// Chain-of-title (2026-08-18): lets an EXISTING user (registered before this
+// mechanism existed, or before a later Terms version) explicitly record
+// acceptance of the current Terms, so their next problem/solution submission can
+// be stamped with a real tos_version instead of being silently backfilled with
+// consent that was never actually given. See the gate in problem/solution
+// creation below and TOS_CURRENT_VERSION's definition.
+router.post('/api/auth/accept-tos', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) {
+      return jsonResponse({ success: false, error: 'Authentication required' }, { status: 401 });
+    }
+    await env.AIHANGOUT_DB
+      .prepare(`UPDATE users SET tos_accepted_version = ?, tos_accepted_at = datetime('now') WHERE id = ?`)
+      .bind(TOS_CURRENT_VERSION, user.id)
+      .run();
+    return jsonResponse({ success: true, tos_accepted_version: TOS_CURRENT_VERSION });
+  } catch (error) {
+    return errResponse('Unable to record Terms acceptance', error);
   }
 });
 
@@ -2159,6 +2202,19 @@ router.post('/api/problems', async (request, env) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
+    // Chain-of-title (2026-08-18): a contributed row can only carry proof of
+    // license if the contributor actually accepted the current Terms. Accounts
+    // created before this mechanism, or before a later Terms version, have
+    // tos_accepted_version NULL or stale - gate here rather than silently
+    // backfilling consent that was never given. See POST /api/auth/accept-tos.
+    if (user.tos_accepted_version !== TOS_CURRENT_VERSION) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'You must accept the current Terms of Service before contributing content.',
+        code: 'TOS_ACCEPTANCE_REQUIRED',
+        current_tos_version: TOS_CURRENT_VERSION
+      }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
 
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'post');
@@ -2387,15 +2443,16 @@ router.post('/api/problems', async (request, env) => {
         (user_id, title, description, category, difficulty, ai_context, spof_indicators,
          bounty_amount, estimated_value, impact_level, affected_users, time_to_solve,
          industry, tags, source_url, external_id, is_harvested, is_public, moderation_flag,
-         solver_type, agent_name, status, content_flags)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         solver_type, agent_name, status, content_flags, tos_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(user.id, safeTitle.trim(), safeDescription.trim(), normalizedCategory.trim(), difficulty,
             aiContextJson, spofIndicatorsJson,
             effectiveBounty, effectiveEstimated, effectiveImpactLevel, effectiveAffectedUsers,
             effectiveTimeToSolve, effectiveIndustry, tagsJson, source_url || null,
             external_id || crypto.randomUUID(), effectiveIsHarvested ? 1 : 0, is_public ? 1 : 0,
             problemModerationFlag || null,
-            effectiveSolverType, agentName || null, effectiveStatus, problemContentFlags)
+            effectiveSolverType, agentName || null, effectiveStatus, problemContentFlags,
+            user.tos_accepted_version)
       .run();
 
     // Log agent request for audit trail
@@ -2612,6 +2669,16 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
+    // Chain-of-title (2026-08-18): same gate as problem creation - see the
+    // comment there and POST /api/auth/accept-tos.
+    if (user.tos_accepted_version !== TOS_CURRENT_VERSION) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'You must accept the current Terms of Service before contributing content.',
+        code: 'TOS_ACCEPTANCE_REQUIRED',
+        current_tos_version: TOS_CURRENT_VERSION
+      }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
 
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'post');
@@ -2735,11 +2802,11 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     const result = await env.AIHANGOUT_DB
       .prepare(`INSERT INTO solutions
         (problem_id, user_id, solution_text, code_snippet, why_explanation, moderation_flag, moderation_score,
-         solver_type, agent_name, content_flags)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         solver_type, agent_name, content_flags, tos_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(problemId, user.id, safeSolutionText, safeCodeSnippet ?? null, safeWhyExplanation ?? null,
             solModerationFlag || null, solModerationScore,
-            solSolverType, solAgentName || null, solContentFlags)
+            solSolverType, solAgentName || null, solContentFlags, user.tos_accepted_version)
       .run();
 
     // Log agent request for audit trail

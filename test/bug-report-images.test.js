@@ -15,7 +15,7 @@ const report = images => ({ title: `Screenshot fixture ${++sequence}`, descripti
 
 describe('bug report screenshot delivery', () => {
   it('stores anonymous attachments, restricts reads, and returns them to the admin reviewer', async () => {
-    const registered = await call('/api/auth/register', { username: 'image_reviewer', email: 'image_reviewer@example.test', password: 'local-image-reviewer-passphrase' });
+    const registered = await call('/api/auth/register', { username: 'image_reviewer', email: 'image_reviewer@example.test', password: 'local-image-reviewer-passphrase', accept_tos: true });
     expect(registered.status).toBe(200);
     const token = registered.data.token;
     const fixture = report([image, image]);
