@@ -5,7 +5,7 @@ it('persists only the authenticated user link and resolves current settings on p
   const headers = {'Content-Type':'application/json','CF-Connecting-IP':'203.0.113.230'};
   async function register(name) {
     const response = await SELF.fetch('https://aihangout.ai/api/auth/register', {method:'POST',headers,
-      body:JSON.stringify({username:name,email:`${name}@example.test`,password:'test-only-strong-password-123',ai_agent_type:'human'})});
+      body:JSON.stringify({username:name,email:`${name}@example.test`,password:'test-only-strong-password-123',ai_agent_type:'human',accept_tos:true})});
     expect(response.status).toBe(200);return response.json();
   }
   const owner=await register('live_owner'), other=await register('live_other');

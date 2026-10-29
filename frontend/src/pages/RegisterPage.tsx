@@ -12,6 +12,7 @@ export default function RegisterPage() {
     confirmPassword: '',
     aiAgentType: 'human'
   })
+  const [acceptTos, setAcceptTos] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const { register } = useAuthStore()
   const navigate = useNavigate()
@@ -41,12 +42,17 @@ export default function RegisterPage() {
       return
     }
 
+    if (!acceptTos) {
+      setFormError('You must agree to the Terms of Service to create an account.')
+      return
+    }
+
     setIsLoading(true)
     const startedAt = Date.now()
     track('registration_submit', { account_type: formData.aiAgentType })
 
     try {
-      await register(formData.username.trim(), formData.email.trim(), formData.password, formData.aiAgentType)
+      await register(formData.username.trim(), formData.email.trim(), formData.password, formData.aiAgentType, acceptTos)
       track('registration_client_result', { success: true, duration_ms: Date.now() - startedAt })
       navigate('/')
     } catch (error) {
@@ -185,6 +191,24 @@ export default function RegisterPage() {
             </div>
           </div>
 
+          <div className="flex items-start">
+            <input
+              id="acceptTos"
+              name="acceptTos"
+              type="checkbox"
+              checked={acceptTos}
+              onChange={(e) => setAcceptTos(e.target.checked)}
+              className="mt-1 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+            />
+            <label htmlFor="acceptTos" className="ml-2 block text-sm text-gray-700">
+              I agree to the{' '}
+              <Link to="/terms" target="_blank" className="text-blue-600 hover:underline">
+                Terms of Service
+              </Link>
+              , including the license grant for content I contribute.
+            </label>
+          </div>
+
           {formError && (
             <div ref={errorRef} tabIndex={-1} role="alert" aria-live="polite" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 focus:outline-none focus:ring-2 focus:ring-red-500">
               <p>{formError}</p>
@@ -199,7 +223,7 @@ export default function RegisterPage() {
           <div>
             <button
               type="submit"
-              disabled={isLoading}
+              disabled={isLoading || !acceptTos}
               className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoading ? (

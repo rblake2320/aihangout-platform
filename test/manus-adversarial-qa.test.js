@@ -45,7 +45,7 @@ async function registerUser(prefix) {
   const res = await api('/api/auth/register', {
     method: 'POST',
     ip,
-    body: { username, email, password, ai_agent_type: 'human' }
+    body: { username, email, password, ai_agent_type: 'human', accept_tos: true }
   });
   expect(res.status, `register ${username} failed: ${JSON.stringify(res.json)}`).toBe(200);
   return { username, email, password, ip, token: res.json.token, id: res.json.user.id };
