@@ -21,6 +21,10 @@ import {
 import { runBackup, applyRetention } from './backup.js';
 import { AVATAR_FILE_RE, AVATAR_MAX_BYTES, validateAvatar, validateBio, validateLinks } from './profile.js';
 import { FILE_MAX_BYTES, INLINE_CONTENT_MAX, citationId, downloadName, escapeLike, parseRef, validateDocumentFile, validateMeta, versionCitation } from './library.js';
+import {
+  enqueueNotificationEmail, flushOutbox, enqueueWeeklyDigests,
+  verifyUnsubscribeToken, applyUnsubscribe, unsubscribePage, getEmailPreferences, setEmailPreferences,
+} from './email-outbox.js';
 
 const router = Router();
 
@@ -1117,7 +1121,7 @@ function escapeEmailHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-async function sendTransactionalEmail(env, { to, subject, html, text, idempotencyKey }) {
+async function sendTransactionalEmail(env, { to, subject, html, text, idempotencyKey, headers }) {
   // Email is an optional integration. When it is not configured (staging, local dev,
   // CI) every signup used to raise "RESEND_API_KEY is not configured" from inside a
   // waitUntil promise, turning a known-absent config into recurring runtime noise.
@@ -1139,7 +1143,8 @@ async function sendTransactionalEmail(env, { to, subject, html, text, idempotenc
       to: [to],
       subject,
       html,
-      text
+      text,
+      ...(headers ? { headers } : {})
     })
   });
   const payload = await response.json().catch(() => ({}));
@@ -2755,36 +2760,25 @@ async function createNotification(env, {
       userId, actorId, type, targetType, targetId, sourceType, sourceId,
       status: existing ? 'refreshed' : 'created'
     });
-    if (settings?.email_notifications === 1) {
-      const recipient = await env.AIHANGOUT_DB.prepare(
-        'SELECT email, email_verified_at FROM users WHERE id = ?'
-      ).bind(userId).first();
-      if (recipient?.email && recipient.email_verified_at) {
-        try {
-          const targetPath = targetType === 'problem' && targetId
-            ? `/problem/${targetId}`
-            : (targetType === 'pathbook' ? '/pathbooks' : '/');
-          const link = `https://aihangout.ai${targetPath}`;
-          await sendTransactionalEmail(env, {
-            to: recipient.email,
-            subject: 'New activity on AI Hangout',
-            text: `${message}\n\nOpen AI Hangout: ${link}`,
-            html: `<p>${escapeEmailHtml(message)}</p><p><a href="${link}">View activity on AI Hangout</a></p>`,
-            idempotencyKey: `notification-${type}-${userId}-${actorId}-${sourceId || targetId || 'event'}`
-          });
-          await logNotificationDelivery(env, {
-            userId, actorId, type, targetType, targetId, sourceType, sourceId,
-            channel: 'email', status: 'created'
-          });
-        } catch (emailError) {
-          console.error('[Notification] Email delivery failed:', emailError?.message || emailError);
-          await logNotificationDelivery(env, {
-            userId, actorId, type, targetType, targetId, sourceType, sourceId,
-            channel: 'email', status: 'failed',
-            errorMessage: String(emailError?.message || emailError).slice(0, 500)
-          });
-        }
+    // Email is queued, not sent here: the cron flushes email_outbox (batched, idempotent, one row
+    // per event, unsubscribe re-checked at send time). See src/email-outbox.js.
+    try {
+      const queued = await enqueueNotificationEmail(env, {
+        userId, actorId, type, targetType, targetId, message, sourceType, sourceId
+      });
+      if (queued) {
+        await logNotificationDelivery(env, {
+          userId, actorId, type, targetType, targetId, sourceType, sourceId,
+          channel: 'email', status: 'queued'
+        });
       }
+    } catch (emailError) {
+      console.error('[Notification] Email enqueue failed:', emailError?.message || emailError);
+      await logNotificationDelivery(env, {
+        userId, actorId, type, targetType, targetId, sourceType, sourceId,
+        channel: 'email', status: 'failed',
+        errorMessage: String(emailError?.message || emailError).slice(0, 500)
+      });
     }
   } catch (e) {
     console.error('[Notification] Delivery failed:', e?.message || e);
@@ -2985,6 +2979,25 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
         sourceType: 'solution',
         sourceId: result.meta.last_row_id
       }));
+    }
+
+    // @mentions in the answer (skipped for agent output awaiting review, and for the question
+    // owner, who is already notified of the answer itself)
+    if (!solAgentName) {
+      ctx.waitUntil((async () => {
+        try {
+          const mentioned = await resolveMentions(env.AIHANGOUT_DB, `${safeSolutionText || ''} ${safeWhyExplanation || ''}`, {
+            excludeUserIds: [user.id, problemOwner.user_id]
+          });
+          for (const m of mentioned) {
+            await createNotification(env, {
+              userId: m.id, actorId: user.id, type: 'mention', targetType: 'problem',
+              targetId: parseInt(problemId), message: `${user.username} mentioned you in an answer`,
+              sourceType: 'solution', sourceId: result.meta.last_row_id
+            });
+          }
+        } catch (e) { console.error('[Mentions] failed:', e?.message || e); }
+      })());
     }
 
     // Notify AI Army about new solution
@@ -14527,6 +14540,43 @@ router.put('/api/users/me/settings', async (request, env) => {
   }
 });
 
+// Email preferences (AIH-R5). Per-category switches; unsubscribed_all stops everything.
+router.get('/api/users/me/email-preferences', async (request, env) => {
+  const user = await authenticate(request, env);
+  if (!user) return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  return new Response(JSON.stringify({ success: true, preferences: await getEmailPreferences(env, user.id) }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+});
+
+router.put('/api/users/me/email-preferences', async (request, env) => {
+  const user = await authenticate(request, env);
+  if (!user) return new Response(JSON.stringify({ success: false, error: 'Authentication required' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  const body = await request.json().catch(() => null);
+  if (!body || typeof body !== 'object') return new Response(JSON.stringify({ success: false, error: 'JSON body required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  return new Response(JSON.stringify({ success: true, preferences: await setEmailPreferences(env, user.id, body) }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+});
+
+// One-click unsubscribe. GET only shows a confirmation page (mail scanners prefetch links and
+// must not unsubscribe anyone); POST performs it, which is also what RFC 8058 mail clients send.
+const unsubHeaders = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' };
+router.get('/api/email/unsubscribe', async (request, env) => {
+  const t = new URL(request.url).searchParams.get('t') || '';
+  const v = await verifyUnsubscribeToken(env, t);
+  if (!v) return new Response(unsubscribePage({ error: 'This unsubscribe link is not valid.' }), { status: 400, headers: unsubHeaders });
+  return new Response(unsubscribePage({ token: t, scope: v.scope }), { headers: unsubHeaders });
+});
+
+router.post('/api/email/unsubscribe', async (request, env) => {
+  let t = new URL(request.url).searchParams.get('t') || '';
+  if (!t) {
+    const form = await request.formData().catch(() => null);
+    t = (form && form.get('t')) || '';
+  }
+  const v = await verifyUnsubscribeToken(env, String(t));
+  if (!v) return new Response(unsubscribePage({ error: 'This unsubscribe link is not valid.' }), { status: 400, headers: unsubHeaders });
+  await applyUnsubscribe(env, v);
+  return new Response(unsubscribePage({ scope: v.scope, done: true }), { headers: unsubHeaders });
+});
+
 // ============================================================================
 // BOOKMARKS BATCH CHECK ENDPOINT
 // ============================================================================
@@ -19219,7 +19269,11 @@ export default {
         // AIH-R8: library uploads are multipart; the routes validate type, size and content themselves.
         const allowsLibraryUpload = request.method === 'POST' && contentType.toLowerCase().startsWith('multipart/form-data') &&
           (url.pathname === '/api/library' || /^\/api\/library\/[^/]+\/versions$/.test(url.pathname));
-        if (!allowsBeaconPayload && !allowsEmptyBody && !allowsAvatarUpload && !allowsLibraryUpload &&
+        // RFC 8058 one-click unsubscribe: mail clients POST a form body (List-Unsubscribe=One-Click)
+        // to the link in the List-Unsubscribe header; they cannot send JSON.
+        const allowsFormUnsubscribe = url.pathname === '/api/email/unsubscribe' &&
+          contentType.toLowerCase().startsWith('application/x-www-form-urlencoded');
+        if (!allowsBeaconPayload && !allowsEmptyBody && !allowsAvatarUpload && !allowsLibraryUpload && !allowsFormUnsubscribe &&
             !contentType.toLowerCase().startsWith('application/json')) {
           return jsonResponse({
             success: false,
@@ -19471,9 +19525,22 @@ export default {
       ctx.waitUntil(runNightlyBackup(env, new Date(event.scheduledTime)));
       return;
     }
-    console.log(`[Cron] Daily harvest triggered at ${new Date(event.scheduledTime).toISOString()}`);
-    ctx.waitUntil(runDailyHarvest(env));
-    ctx.waitUntil(sendOpsDigest(env));
+    const cron = event.cron || '0 6 * * *';
+    console.log(`[Cron] ${cron} triggered at ${new Date(event.scheduledTime).toISOString()}`);
+    if (cron === '0 6 * * *') {
+      ctx.waitUntil(runDailyHarvest(env));
+      ctx.waitUntil(sendOpsDigest(env));
+      return;
+    }
+    // Email pipeline (AIH-R5): Monday 14:00 UTC queues the weekly digests; every run flushes.
+    ctx.waitUntil((async () => {
+      try {
+        if (cron === '0 14 * * 1') console.log('[Cron] digest', JSON.stringify(await enqueueWeeklyDigests(env)));
+        console.log('[Cron] email flush', JSON.stringify(await flushOutbox(env, sendTransactionalEmail)));
+      } catch (e) {
+        console.error('[Cron] email pipeline failed:', e?.message || e);
+      }
+    })());
   },
 };
 
