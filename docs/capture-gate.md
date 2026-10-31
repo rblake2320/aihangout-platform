@@ -132,9 +132,19 @@ See the table in the owner report; short form:
    Comparing local to staging, or a CI Chrome to the recorded one, always triggers it. The
    wrapper tolerates only that code, and only when the origin or browser version really
    differs; missing or extra steps still fail.
-3. **Response attribution is a timing race.** A response (or a request fired by an effect
-   after `domcontentloaded`) is recorded on whichever step is running when it arrives, often
-   the *next* wait step. The wrapper attributes traffic to the last non-wait action instead.
+3. **Event-to-step attribution is a timing race.** A response, or a request fired by an effect
+   after `domcontentloaded`, is recorded on whichever step is running when it arrives, often
+   the *next* wait step, and a DOM snapshot taken right after a click can precede the UI update.
+   The first CI run failed four scenarios on exactly this. The wrapper now (a) attributes traffic
+   to the last non-wait action for the declared per-step expectations, (b) compares response
+   statuses and shapes over the whole scenario rather than per step, and (c) compares URL, DOM
+   selectors and storage keys only on settled wait steps.
+8. **Unread bodies are not evidence.** A response body that was unfinished at capture end is
+   recorded as `unavailable`; the shape comparison skips those rather than passing or failing
+   them.
+9. **Locators are strict.** An empty-feed home page has two links to `/create-problem`; a CSS
+   locator for the route matched both and failed on the CI runner only. Scenarios use the role
+   locator "Ask Question".
 4. **Normalisation is exact-literal only** (no regex), so asset hashes, ids and timestamps
    are handled by the wrapper's own `gate/rules.json`, not by REA's `--normalization-json`.
 5. **MCP compare needs both full results inline**, which for DOM-bearing captures is hundreds
