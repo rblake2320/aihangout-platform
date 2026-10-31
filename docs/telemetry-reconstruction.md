@@ -122,3 +122,9 @@ export `ev_c78b7ace...` for the retained bytes.
 - Not verified: behaviour against production, real traffic volume, or D1 write cost at scale. Each
   batch performs up to 50 single-row inserts; at the per-IP limit of 30 requests/minute that is a
   ceiling of 1,500 rows/minute per IP, which has not been load tested.
+
+## Retention
+
+`tel_*` rows are deleted after 30 days by the existing daily cron (`pruneTelemetryEvents`).
+Other `analytics_events` types are not touched. Covered by the test
+"the daily cron prunes telemetry older than 30 days and leaves every other event alone".
