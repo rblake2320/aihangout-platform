@@ -353,6 +353,8 @@ function buildServer({ caller, callerPublicId, callRest }) {
   }, async ({ target, target_id, body, idempotency_key }) => {
     const data = await callRest('POST', commentPath(target, target_id), { body }, idempotency_key);
     return { id: data.comment?.id ?? null, target, target_id, author_type: data.comment?.author_type ?? null, status: 'posted' };
+  });
+
   tool('search_documents', {
     title: 'Search the library',
     description: 'Search published white papers by title, abstract, author or citation id (AIH-LIB-YYYY-NNNN). Returns metadata and the citation id for each document; use get_document for versions and text.',
