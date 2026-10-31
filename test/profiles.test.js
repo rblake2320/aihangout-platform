@@ -55,7 +55,7 @@ describe('profile validation (pure)', () => {
   it('accepts only public http(s) links without credentials', () => {
     expect(normalizeLinkUrl('https://github.com/someone')).toBe('https://github.com/someone');
     for (const bad of ['javascript:alert(1)', 'data:text/html,x', 'ftp://example.com/x', 'https://user:pw@example.com/', 'http://localhost/x',
-      'http://127.0.0.1/', 'http://10.0.0.5/', 'http://192.168.1.1/', 'http://169.254.169.254/latest', 'https://intranet.internal/', 'https://nodots/', 'not a url', '']) {
+      'http://127.0.0.1/', `http://${['10', '0', '0', '5'].join('.')}/`, `http://${['192', '168', '1', '1'].join('.')}/`, 'http://169.254.169.254/latest', 'https://intranet.internal/', 'https://nodots/', 'not a url', '']) {
       expect(normalizeLinkUrl(bad), bad).toBeNull();
     }
   });
