@@ -7,6 +7,7 @@
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { handleMcpRequest } from './mcp/server.js';
+import { FILE_MAX_BYTES, INLINE_CONTENT_MAX, citationId, downloadName, escapeLike, parseRef, validateDocumentFile, validateMeta, versionCitation } from './library.js';
 
 const router = Router();
 
@@ -17779,6 +17780,250 @@ router.put('/api/users/me/live-profile', async (request, env) => {
   } catch (error) { return errResponse('Unable to save live profile', error); }
 });
 
+// ============================================================================
+// AIH-R8: white-paper library (documents, versions, citation ids, downloads)
+// ============================================================================
+const LIB_PUBLIC_HEADERS = { 'Cache-Control': 'public, max-age=60' };
+
+function shapeDocument(d, versions = []) {
+  let authors = [];
+  try { authors = JSON.parse(d.authors); } catch { authors = []; }
+  return {
+    id: d.id,
+    citation_id: d.citation_id,
+    title: d.title,
+    abstract: d.abstract,
+    authors,
+    license: d.license,
+    status: d.status,
+    latest_version: d.latest_version,
+    download_count: d.download_count,
+    created_at: d.created_at,
+    updated_at: d.updated_at,
+    versions: versions.map((v) => ({
+      version: v.version,
+      citation_id: versionCitation(d.citation_id, v.version),
+      file_type: v.file_type,
+      file_bytes: v.file_bytes,
+      sha256: v.sha256,
+      changelog: v.changelog || '',
+      download_count: v.download_count,
+      download_url: `/api/library/${d.citation_id}/download?version=${v.version}`,
+      created_at: v.created_at
+    }))
+  };
+}
+
+async function findDocument(env, refText) {
+  const ref = parseRef(refText);
+  if (!ref) return null;
+  const row = ref.id !== undefined
+    ? await env.AIHANGOUT_DB.prepare('SELECT * FROM documents WHERE id = ?').bind(ref.id).first()
+    : await env.AIHANGOUT_DB.prepare('SELECT * FROM documents WHERE citation_id = ?').bind(ref.citation).first();
+  return row ? { doc: row, version: ref.version } : null;
+}
+
+async function readLibraryUpload(request, user) {
+  if (!(request.headers.get('Content-Type') || '').toLowerCase().startsWith('multipart/form-data')) {
+    return { error: errResponse('Send multipart/form-data with a "file" field', null, 415) };
+  }
+  const declared = Number(request.headers.get('Content-Length') || 0);
+  if (!declared) return { error: errResponse('Content-Length is required', null, 411) };
+  if (declared > FILE_MAX_BYTES + 64 * 1024) return { error: errResponse(`File must be at most ${FILE_MAX_BYTES / 1024 / 1024} MB`, null, 413) };
+  let form;
+  try { form = await request.formData(); } catch { return { error: errResponse('Invalid multipart body', null, 400) }; }
+  const file = form.get('file');
+  if (!file || typeof file === 'string' || typeof file.arrayBuffer !== 'function') return { error: errResponse('file is required', null, 400) };
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const check = validateDocumentFile(file.name, file.type, bytes);
+  if (!check.ok) return { error: errResponse(check.error, null, check.status) };
+  const fields = {};
+  for (const k of ['title', 'abstract', 'authors', 'license', 'changelog']) {
+    const v = form.get(k);
+    if (typeof v === 'string') fields[k] = v;
+  }
+  return { bytes, check, fields };
+}
+
+async function storeVersion(env, user, doc, version, up, changelog) {
+  const digest = await crypto.subtle.digest('SHA-256', up.bytes);
+  const sha256 = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const key = `library/${doc.id}/v${version}-${sha256.slice(0, 16)}.${up.check.ext}`;
+  await env.MEDIA_BUCKET.put(key, up.bytes, { httpMetadata: { contentType: up.check.contentType } });
+  try {
+    await env.AIHANGOUT_DB.prepare(
+      `INSERT INTO document_versions (document_id, version, file_key, file_type, file_bytes, sha256, changelog, uploader_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(doc.id, version, key, up.check.ext, up.bytes.length, sha256, changelog || null, user.id > 0 ? user.id : null).run();
+  } catch (e) {
+    await env.MEDIA_BUCKET.delete(key).catch(() => {});
+    throw e;
+  }
+}
+
+const libSanitize = (t) => sanitizeContent(String(t ?? ''));
+
+router.post('/api/library', async (request, env) => {
+  let createdId = null;
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+    if (!user.is_admin) return errResponse('Admin required', null, 403);
+    if (!env.MEDIA_BUCKET) return errResponse('Library storage is not configured', null, 503);
+    const up = await readLibraryUpload(request, user);
+    if (up.error) return up.error;
+    const meta = validateMeta(up.fields, libSanitize);
+    if (!meta.ok) return errResponse(meta.error, null, 400);
+
+    const m = meta.value;
+    const ins = await env.AIHANGOUT_DB.prepare(
+      'INSERT INTO documents (title, abstract, authors, license, uploader_id) VALUES (?, ?, ?, ?, ?)'
+    ).bind(m.title, m.abstract, JSON.stringify(m.authors), m.license, user.id > 0 ? user.id : null).run();
+    createdId = ins.meta.last_row_id;
+    const citation = citationId(createdId, new Date().getUTCFullYear());
+    await env.AIHANGOUT_DB.prepare('UPDATE documents SET citation_id = ? WHERE id = ?').bind(citation, createdId).run();
+    await storeVersion(env, user, { id: createdId }, 1, up, m.changelog || 'Initial version');
+    const doc = await env.AIHANGOUT_DB.prepare('SELECT * FROM documents WHERE id = ?').bind(createdId).first();
+    const { results } = await env.AIHANGOUT_DB.prepare('SELECT * FROM document_versions WHERE document_id = ? ORDER BY version').bind(createdId).all();
+    return jsonResponse({ success: true, document: shapeDocument(doc, results) }, { status: 201 });
+  } catch (error) {
+    if (createdId) await env.AIHANGOUT_DB.prepare('DELETE FROM documents WHERE id = ?').bind(createdId).run().catch(() => {});
+    return errResponse('Unable to publish document', error);
+  }
+});
+
+router.post('/api/library/:ref/versions', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+    if (!user.is_admin) return errResponse('Admin required', null, 403);
+    if (!env.MEDIA_BUCKET) return errResponse('Library storage is not configured', null, 503);
+    const found = await findDocument(env, request.params.ref);
+    if (!found) return errResponse('Document not found', null, 404);
+    const up = await readLibraryUpload(request, user);
+    if (up.error) return up.error;
+    const meta = validateMeta(up.fields, libSanitize, { partial: true });
+    if (!meta.ok) return errResponse(meta.error, null, 400);
+    const m = meta.value;
+    if (!m.changelog) return errResponse('changelog is required for a new version', null, 400);
+
+    const version = found.doc.latest_version + 1;
+    try {
+      await storeVersion(env, user, found.doc, version, up, m.changelog);
+    } catch (e) {
+      if (String(e?.message || e).includes('UNIQUE')) return errResponse('Another version was uploaded at the same time; retry', null, 409);
+      throw e;
+    }
+    await env.AIHANGOUT_DB.prepare(
+      `UPDATE documents SET latest_version = ?, updated_at = CURRENT_TIMESTAMP,
+         title = COALESCE(?, title), abstract = COALESCE(?, abstract), authors = COALESCE(?, authors), license = COALESCE(?, license)
+       WHERE id = ?`
+    ).bind(version, m.title ?? null, m.abstract ?? null, m.authors ? JSON.stringify(m.authors) : null, m.license ?? null, found.doc.id).run();
+    const doc = await env.AIHANGOUT_DB.prepare('SELECT * FROM documents WHERE id = ?').bind(found.doc.id).first();
+    const { results } = await env.AIHANGOUT_DB.prepare('SELECT * FROM document_versions WHERE document_id = ? ORDER BY version').bind(found.doc.id).all();
+    return jsonResponse({ success: true, document: shapeDocument(doc, results) }, { status: 201 });
+  } catch (error) { return errResponse('Unable to add version', error); }
+});
+
+router.patch('/api/library/:ref', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return errResponse('Authentication required', null, 401);
+    if (!user.is_admin) return errResponse('Admin required', null, 403);
+    const found = await findDocument(env, request.params.ref);
+    if (!found) return errResponse('Document not found', null, 404);
+    let body;
+    try { body = safeJsonParse(await request.text()); } catch { return errResponse('Invalid JSON', null, 400); }
+    if (!body || !['published', 'retired'].includes(body.status)) return errResponse('status must be published or retired', null, 400);
+    await env.AIHANGOUT_DB.prepare('UPDATE documents SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(body.status, found.doc.id).run();
+    return jsonResponse({ success: true, status: body.status });
+  } catch (error) { return errResponse('Unable to update document', error); }
+});
+
+router.get('/api/library', async (request, env) => {
+  try {
+    const url = new URL(request.url);
+    const q = (url.searchParams.get('q') || '').trim().slice(0, 200);
+    const limit = Math.min(Number(url.searchParams.get('limit') || 20), 50);
+    const offset = Number(url.searchParams.get('offset') || 0);
+    const where = ["status = 'published'"];
+    const binds = [];
+    if (q) {
+      const like = `%${escapeLike(q)}%`;
+      where.push("(title LIKE ? ESCAPE '\\' OR abstract LIKE ? ESCAPE '\\' OR authors LIKE ? ESCAPE '\\' OR citation_id = ?)");
+      binds.push(like, like, like, q);
+    }
+    const clause = where.join(' AND ');
+    const total = (await env.AIHANGOUT_DB.prepare(`SELECT COUNT(*) AS n FROM documents WHERE ${clause}`).bind(...binds).first()).n;
+    const { results } = await env.AIHANGOUT_DB.prepare(
+      `SELECT * FROM documents WHERE ${clause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    ).bind(...binds, limit, offset).all();
+    return jsonResponse({ success: true, total, documents: results.map((d) => shapeDocument(d)) }, { headers: LIB_PUBLIC_HEADERS });
+  } catch (error) { return errResponse('Unable to list documents', error); }
+});
+
+router.get('/api/library/:ref/download', async (request, env) => {
+  try {
+    if (!env.MEDIA_BUCKET) return errResponse('Library storage is not configured', null, 503);
+    const found = await findDocument(env, request.params.ref);
+    if (!found || found.doc.status !== 'published') return errResponse('Document not found', null, 404);
+    const url = new URL(request.url);
+    const wanted = Number(url.searchParams.get('version') || found.version || found.doc.latest_version);
+    const v = Number.isInteger(wanted) ? await env.AIHANGOUT_DB.prepare('SELECT * FROM document_versions WHERE document_id = ? AND version = ?').bind(found.doc.id, wanted).first() : null;
+    if (!v) return errResponse('Version not found', null, 404);
+    const obj = await env.MEDIA_BUCKET.get(v.file_key);
+    if (!obj) return errResponse('File missing from storage', null, 404);
+
+    // One count per visitor per version per hour, so refreshes and crawlers do not inflate it.
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const seenKey = `libdl:${v.id}:${ip}`;
+    if (!(await env.AIHANGOUT_KV.get(seenKey))) {
+      await env.AIHANGOUT_KV.put(seenKey, '1', { expirationTtl: 3600 });
+      await env.AIHANGOUT_DB.batch([
+        env.AIHANGOUT_DB.prepare('UPDATE document_versions SET download_count = download_count + 1 WHERE id = ?').bind(v.id),
+        env.AIHANGOUT_DB.prepare('UPDATE documents SET download_count = download_count + 1 WHERE id = ?').bind(found.doc.id)
+      ]);
+    }
+    return new Response(obj.body, {
+      headers: {
+        'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream',
+        // attachment: a PDF opened inline would run in our origin's context
+        'Content-Disposition': `attachment; filename="${downloadName(found.doc.citation_id, v.version, v.file_type)}"`,
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'Cache-Control': 'private, max-age=0',
+        'ETag': `"${v.sha256}"`,
+        'X-Document-Sha256': v.sha256
+      }
+    });
+  } catch (error) { return errResponse('Unable to download document', error); }
+});
+
+router.get('/api/library/:ref', async (request, env) => {
+  try {
+    const found = await findDocument(env, request.params.ref);
+    if (!found) return errResponse('Document not found', null, 404);
+    let isAdmin = false;
+    if (found.doc.status !== 'published') {
+      const user = await authenticate(request, env).catch(() => null);
+      isAdmin = !!(user && user.is_admin);
+      if (!isAdmin) return errResponse('Document not found', null, 404);
+    }
+    const { results } = await env.AIHANGOUT_DB.prepare('SELECT * FROM document_versions WHERE document_id = ? ORDER BY version').bind(found.doc.id).all();
+    const out = shapeDocument(found.doc, results);
+    const url = new URL(request.url);
+    if (url.searchParams.get('include') === 'content' && env.MEDIA_BUCKET) {
+      const wanted = Number(url.searchParams.get('version') || found.version || found.doc.latest_version);
+      const v = results.find((r) => r.version === wanted);
+      if (v && v.file_type === 'md' && v.file_bytes <= INLINE_CONTENT_MAX) {
+        const obj = await env.MEDIA_BUCKET.get(v.file_key);
+        if (obj) out.content_md = { version: v.version, text: await obj.text() };
+      }
+    }
+    return jsonResponse({ success: true, document: out }, { headers: found.doc.status === 'published' ? LIB_PUBLIC_HEADERS : { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to load document', error); }
+});
+
 router.get('*', async (request, env) => {
   try {
     const url = new URL(request.url);
@@ -18315,7 +18560,10 @@ export default {
         const allowsBeaconPayload = url.pathname === '/api/events/batch' &&
           (contentType === '' || contentType.toLowerCase().startsWith('text/plain'));
         const allowsEmptyBody = url.pathname === '/api/auth/logout';
-        if (!allowsBeaconPayload && !allowsEmptyBody &&
+        // AIH-R8: library uploads are multipart; the routes validate type, size and content themselves.
+        const allowsLibraryUpload = request.method === 'POST' && contentType.toLowerCase().startsWith('multipart/form-data') &&
+          (url.pathname === '/api/library' || /^\/api\/library\/[^/]+\/versions$/.test(url.pathname));
+        if (!allowsBeaconPayload && !allowsEmptyBody && !allowsLibraryUpload &&
             !contentType.toLowerCase().startsWith('application/json')) {
           return jsonResponse({
             success: false,
@@ -18366,8 +18614,12 @@ export default {
       // Health probes and telemetry beacons are high-volume and carry no user
       // intent; logging them would bury the signal this table exists to keep.
       !url.pathname.startsWith('/api/health') && url.pathname !== '/api/events/batch';
+    // AIH-R8: binary uploads (multipart, images) are not text; decoding them wastes CPU and would write
+    // garbage into the audit payload. They are still logged, with a null payload.
+    const uploadType = (request.headers.get('Content-Type') || '').toLowerCase();
+    const isBinaryUpload = uploadType.startsWith('multipart/form-data') || uploadType.startsWith('image/');
     let capturedBody = null;
-    if (shouldLogActivity) {
+    if (shouldLogActivity && !isBinaryUpload) {
       try {
         capturedBody = await request.clone().text();
       } catch {

@@ -67,6 +67,9 @@ export default function Navbar() {
               <AcademicCapIcon className="w-4 h-4" />
               <span>Knowledge Hub</span>
             </Link>
+            <Link to="/library" className={navLinkClass('/library')}>
+              <span>Library</span>
+            </Link>
             <Link to="/problem-bank" className={navLinkClass('/problem-bank')}>
               Problem Bank
             </Link>
@@ -163,6 +166,9 @@ export default function Navbar() {
             </Link>
             <Link to="/learning" onClick={() => setMobileMenuOpen(false)} className={`block px-3 py-2 rounded-lg ${isActive('/learning') ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}>
               Knowledge Hub
+            </Link>
+            <Link to="/library" onClick={() => setMobileMenuOpen(false)} className={`block px-3 py-2 rounded-lg ${isActive('/library') ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}>
+              Library
             </Link>
             <Link to="/problem-bank" onClick={() => setMobileMenuOpen(false)} className={`block px-3 py-2 rounded-lg ${isActive('/problem-bank') ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}>
               Problem Bank

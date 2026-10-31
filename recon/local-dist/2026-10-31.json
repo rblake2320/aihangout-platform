@@ -1,24 +1,24 @@
 {
   "schema": "bundle-recon/1",
   "origin": "local-dist",
-  "fetchedAt": "2026-10-31T16:40:32.810Z",
+  "fetchedAt": "2026-10-31T18:18:50.844Z",
   "index": {
-    "sha256": "04aebfe16f40058766883ec570582714afd5fc2c326e737d86b2adbd8c1be0d9",
+    "sha256": "a4085788045e4ce4c3d223601d6ebd043f6192c3e8045b97c4fa0e6b9b92288f",
     "bytes": 2258
   },
   "assets": [
     {
-      "path": "/assets/index-Bv9XazIt.css",
+      "path": "/assets/index-BXmk0_OK.js",
       "status": 200,
-      "bytes": 42973,
-      "sha256": "5e56f428280651c048878391c42002bf14e157b61066d57cae5ccba02a4639f2",
+      "bytes": 356890,
+      "sha256": "902bb9723e1585df2a7ef46622ef18892ce76f091fca182463afc6239b33f641",
       "sourceMapExposed": false
     },
     {
-      "path": "/assets/index-CDxjmwRw.js",
+      "path": "/assets/index-yFwfl_my.css",
       "status": 200,
-      "bytes": 349676,
-      "sha256": "e58484835fca9dbef5428a7eaff9951ba13d2696109c830334a154d158195be3",
+      "bytes": 43143,
+      "sha256": "07b9cdd731f72620d47cb9736213ffa1c5494127328c93804135a04b564ae8e6",
       "sourceMapExposed": false
     },
     {
@@ -89,6 +89,8 @@
       "GET /bookmarks",
       "GET /bug-reports",
       "GET /bug-reports/{}",
+      "GET /library",
+      "GET /library/${encodeURIComponent",
       "GET /notifications",
       "GET /notifications/count",
       "GET /pathbooks",
@@ -111,6 +113,7 @@
       "POST /bookmarks",
       "POST /bookmarks/check",
       "POST /bug-reports",
+      "POST /library",
       "POST /notifications/read",
       "POST /pathbooks/${encodeURIComponent",
       "POST /pathbooks/lookup",
@@ -140,6 +143,8 @@
       "/how-bounties-work",
       "/learning",
       "/learning/:id",
+      "/library",
+      "/library/:ref",
       "/login",
       "/pathbooks",
       "/privacy",
@@ -179,17 +184,22 @@
       {
         "sha256": "48023abf731b2a19",
         "context": "auth/me\");n.data.success&&n.data.user&&e({user:{...t().user,is_admin:!!n.data.user.is_admin}})}catch{}}}}),{name:\"ai-hangout-auth\",partializ",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "asset": "/assets/index-BXmk0_OK.js"
       },
       {
         "sha256": "62b14b5667f9bffc",
         "context": "s&&n.data.user&&e({user:{...t().user,is_admin:!!n.data.user.is_admin}})}catch{}}}}),{name:\"ai-hangout-auth\",partialize:e=>({user:e.user,toke",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "asset": "/assets/index-BXmk0_OK.js"
       },
       {
         "sha256": "a1575da526a0df19",
         "context": "Settings\",children:(0,Sn.jsx)(K,{className:\"w-5 h-5\"})}),t?.is_admin&&(0,Sn.jsx)(q,{to:\"/admin\",className:\"p-1 text-gray-400 hover:text-blue",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "asset": "/assets/index-BXmk0_OK.js"
+      },
+      {
+        "sha256": "a701be6651ab7719",
+        "context": "ildren:\"Publish\"})]})}function To(){const e=Nn(e=>!!e.user?.is_admin),t=w(),[n,r]=(0,Ze.useState)(\"\"),[s,a]=(0,Ze.useState)(\"\"),[i,o]=(0,Ze.",
+        "asset": "/assets/index-BXmk0_OK.js"
       }
     ]
   }

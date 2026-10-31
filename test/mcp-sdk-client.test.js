@@ -36,11 +36,11 @@ async function connect(token) {
 }
 
 describe('official MCP SDK client against POST /mcp', () => {
-  it('connects, lists the six tools and completes post -> get -> approve -> list -> search -> solution', async () => {
+  it('connects, lists the eight tools and completes post -> get -> approve -> list -> search -> solution', async () => {
     const agent = await register('general');
     const client = await connect(agent.token);
     const names = (await client.listTools()).tools.map(t => t.name).sort();
-    expect(names).toEqual(['get_problem', 'list_problems', 'post_problem', 'post_solution', 'search', 'whoami']);
+    expect(names).toEqual(['get_document', 'get_problem', 'list_problems', 'post_problem', 'post_solution', 'search', 'search_documents', 'whoami']);
 
     const me = await client.callTool({ name: 'whoami', arguments: {} });
     expect(me.isError).toBeFalsy();
