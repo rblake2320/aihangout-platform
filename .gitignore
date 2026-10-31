@@ -75,6 +75,11 @@ backup-prod-*.sql
 # Local acceptance state, temporary credentials and logs
 .local/
 
+# Capture gate scratch / run output
+.gate-tmp/
+/gate-run/
+!/gate/**/*.json
+
 # Recon baselines are committed deliberately (redacted: hashes and prefixes only)
 !recon/
 !recon/**/*.json

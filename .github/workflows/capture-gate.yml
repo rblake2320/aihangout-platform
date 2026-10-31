@@ -1,0 +1,62 @@
+name: Capture gate
+
+# Real-browser deploy gate. Runs the declared REA browser scenarios (gate/scenarios) against a
+# throwaway `wrangler dev` (fresh local D1 with real migrations, fresh KV) and fails on any
+# step whose HTTP status, JSON response shape, key DOM selectors or storage keys differ from
+# the committed local baseline (gate/captures/local). Unit tests cannot see these: they run in
+# workerd, not in a browser executing the shipped frontend bundle against the shipped Worker.
+# Refresh the baseline deliberately (see docs/capture-gate.md); never to make this job pass.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: capture-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Browser capture gate (local)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      REA_BIN: npx -y rea-agents@6.7.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Worker bundle
+        run: npm run build:worker
+
+      - name: Locate Chrome
+        run: |
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          test -x "$CHROME" || { echo "no Chrome/Chromium on the runner"; exit 1; }
+          echo "GATE_CHROME=$CHROME" >> "$GITHUB_ENV"
+          "$CHROME" --version
+
+      # Ubuntu 24.04 runners block unprivileged user namespaces, which Chrome's sandbox needs.
+      - name: Allow Chrome sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Run capture gate against the local baseline
+        run: node scripts/capture-gate-local.mjs --out gate-run --baseline gate/captures/local
+
+      - name: Upload captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-gate-evidence
+          path: gate-run/
+          if-no-files-found: warn
