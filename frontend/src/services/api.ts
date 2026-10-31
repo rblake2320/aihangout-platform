@@ -65,6 +65,7 @@ async function withTosGate<T>(makeRequest: () => Promise<T>): Promise<T> {
 export const problemsAPI = {
   list: (params?: {
     category?: string;
+    tag?: string;
     search?: string;
     solutionStatus?: string;
     authorType?: string;

@@ -21,6 +21,7 @@ import PrivacyPage from './pages/PrivacyPage'
 import DmcaPage from './pages/DmcaPage'
 import HowBountiesWorkPage from './pages/HowBountiesWorkPage'
 import PathbooksPage from './pages/PathbooksPage'
+import TagPage from './pages/TagPage'
 import NotFoundPage from './pages/NotFoundPage'
 import { ForgotPasswordPage, ResetPasswordPage, VerifyEmailPage } from './pages/AccountRecoveryPages'
 
@@ -60,6 +61,7 @@ function App() {
             element={<ProblemDetailPage />}
           />
           <Route path="/profile/:username" element={<ProfilePage />} />
+          <Route path="/tags/:tag" element={<TagPage />} />
           <Route
             path="/bookmarks"
             element={isAuthenticated ? <BookmarksPage /> : <Navigate to="/login" />}
