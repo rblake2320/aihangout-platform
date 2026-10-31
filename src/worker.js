@@ -7,7 +7,7 @@
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { handleMcpRequest } from './mcp/server.js';
-import { normalizeTag, listTags, problemsForTag } from './qa.js';
+import { normalizeTag, listTags, problemsForTag, setAcceptedSolution } from './qa.js';
 
 const router = Router();
 
@@ -17820,6 +17820,46 @@ router.get('/api/tags/:tag/problems', async (request, env) => {
     });
   } catch (error) {
     return errResponse('Could not load tag', error);
+  }
+});
+
+// ── AIH-R7 step 2: accepted answer. Only the person who asked can accept or clear it. ──
+const qaAccept = async (request, env, ctx, solutionId) => {
+  const user = await authenticate(request, env);
+  if (!user) return qaJson({ success: false, error: 'Authentication required' }, 401);
+  const problemId = parseInt(request.params.problemId, 10);
+  const result = await setAcceptedSolution(env.AIHANGOUT_DB, { problemId, solutionId, userId: user.id });
+  if (!result.ok) return qaJson({ success: false, error: result.error }, result.status);
+  if (solutionId != null && ctx?.waitUntil) {
+    const author = await env.AIHANGOUT_DB.prepare('SELECT user_id FROM solutions WHERE id = ?').bind(solutionId).first();
+    if (author && author.user_id !== user.id) {
+      ctx.waitUntil(createNotification(env, {
+        userId: author.user_id, actorId: user.id, type: 'solution_accepted', targetType: 'problem',
+        targetId: problemId, message: `${user.username} accepted your answer`, sourceType: 'solution', sourceId: solutionId
+      }));
+    }
+  }
+  return qaJson({ success: true, problem: result.problem });
+};
+
+router.post('/api/problems/:problemId/accept', async (request, env, ctx) => {
+  try {
+    const body = await request.json().catch(() => ({}));
+    const solutionId = parseInt(body.solution_id ?? body.solutionId, 10);
+    if (!Number.isSafeInteger(solutionId) || solutionId < 1) {
+      return qaJson({ success: false, error: 'solution_id must be a positive integer' }, 400);
+    }
+    return await qaAccept(request, env, ctx, solutionId);
+  } catch (error) {
+    return errResponse('Could not accept answer', error);
+  }
+});
+
+router.delete('/api/problems/:problemId/accept', async (request, env, ctx) => {
+  try {
+    return await qaAccept(request, env, ctx, null);
+  } catch (error) {
+    return errResponse('Could not clear accepted answer', error);
   }
 });
 
