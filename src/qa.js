@@ -59,3 +59,80 @@ export async function setAcceptedSolution(db, { problemId, solutionId, userId })
   await db.prepare('UPDATE problems SET accepted_solution_id = ? WHERE id = ?').bind(solutionId ?? null, problemId).run();
   return { ok: true, problem: { id: problemId, accepted_solution_id: solutionId ?? null } };
 }
+
+export const COMMENT_MAX = 2000;
+
+// ---- comments -------------------------------------------------------------------------------
+
+/** Plain text only: tags, handlers and control characters are removed before storage. */
+export function cleanCommentBody(raw, { sanitizeHtml, stripDangerousUnicode, sanitizeLLMTokens }) {
+  if (typeof raw !== 'string') return null;
+  const text = sanitizeLLMTokens(stripDangerousUnicode(sanitizeHtml(raw)))
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim();
+  if (text.length < 1 || text.length > COMMENT_MAX) return null;
+  return text;
+}
+
+export async function assertCommentable(db, target, targetId) {
+  if (target === 'problem') {
+    return db.prepare(`SELECT p.id, p.user_id FROM problems p WHERE p.id = ? AND ${PUBLIC_PROBLEM_SQL}`).bind(targetId).first();
+  }
+  return db.prepare(`
+    SELECT s.id, s.user_id, s.problem_id FROM solutions s
+    JOIN problems p ON p.id = s.problem_id
+    WHERE s.id = ? AND ${PUBLIC_PROBLEM_SQL}`).bind(targetId).first();
+}
+
+const commentTable = (target) => (target === 'problem' ? 'problem_comments' : 'solution_comments');
+const commentKey = (target) => (target === 'problem' ? 'problem_id' : 'solution_id');
+
+export async function insertComment(db, { target, targetId, userId, body }) {
+  const r = await db.prepare(`INSERT INTO ${commentTable(target)} (${commentKey(target)}, user_id, body) VALUES (?, ?, ?)`)
+    .bind(targetId, userId, body).run();
+  return { id: r.meta.last_row_id, target, target_id: targetId, body, user_id: userId };
+}
+
+export async function listComments(db, { target, targetId, limit = 50, offset = 0 }) {
+  const t = commentTable(target);
+  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ${commentKey(target)} = ? AND hidden = FALSE`)
+    .bind(targetId).first())?.n || 0;
+  const rows = (await db.prepare(`
+    SELECT c.id, c.body, c.created_at, c.user_id, u.username, u.ai_agent_type
+    FROM ${t} c JOIN users u ON u.id = c.user_id
+    WHERE c.${commentKey(target)} = ? AND c.hidden = FALSE
+    ORDER BY c.id ASC LIMIT ? OFFSET ?`).bind(targetId, limit, offset).all()).results || [];
+  return { total, comments: rows.map((r) => ({
+    id: r.id, body: r.body, created_at: r.created_at, author: r.username,
+    author_type: r.ai_agent_type && r.ai_agent_type !== 'human' ? 'AI' : 'human',
+  })) };
+}
+
+/** Author-only soft delete. Returns true when a row was hidden. */
+export async function hideOwnComment(db, { target, commentId, userId }) {
+  const r = await db.prepare(`UPDATE ${commentTable(target)} SET hidden = TRUE WHERE id = ? AND user_id = ? AND hidden = FALSE`)
+    .bind(commentId, userId).run();
+  return (r.meta?.changes ?? 0) > 0;
+}
+
+
+// ---- mentions -------------------------------------------------------------------------------
+
+// Same grammar the mention notifications use everywhere: @name at a word boundary, 2-50 chars.
+export function extractMentions(text, max = 10) {
+  const found = new Set();
+  for (const m of String(text ?? '').matchAll(/(?<![\w@.\-])@([A-Za-z0-9_][A-Za-z0-9_.\-]{1,49})/g)) {
+    found.add(m[1].replace(/[.\-]+$/, '').toLowerCase());
+    if (found.size >= max) break;
+  }
+  return [...found].filter((n) => n.length >= 2);
+}
+
+export async function resolveMentions(db, text, { excludeUserIds = [] } = {}) {
+  const names = extractMentions(text);
+  if (!names.length) return [];
+  const marks = names.map(() => '?').join(',');
+  const rows = (await db.prepare(`SELECT id, username FROM users WHERE lower(username) IN (${marks})`).bind(...names).all()).results || [];
+  const skip = new Set(excludeUserIds);
+  return rows.filter((u) => !skip.has(u.id));
+}
