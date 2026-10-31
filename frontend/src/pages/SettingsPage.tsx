@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, settingsAPI } from '../services/api'
 import toast from 'react-hot-toast'
 import LiveProfileSettings from '../components/LiveProfileSettings'
+import PrivacyControls from '../components/PrivacyControls'
 
 interface ToggleProps {
   label: string
@@ -142,6 +143,8 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+
+      <PrivacyControls />
     </div>
   )
 }

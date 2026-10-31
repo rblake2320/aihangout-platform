@@ -6,7 +6,7 @@ import { EVENT_TYPES } from '../frontend/src/telemetry/types.ts';
 // Real routes, real D1 with the real migrations (same pattern as ops-observability.test.js).
 const ip = '203.0.113.90';
 const sid = (n) => n.toString(16).padStart(32, '0');
-const batch = (body, token, extraHeaders = {}) => SELF.fetch('https://aihangout.ai/api/analytics/batch', {
+const batch = (body, token, extraHeaders = {}) => SELF.fetch('https://aihangout.ai/api/analytics/batch?consent=analytics', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': ip, ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extraHeaders },
   body: typeof body === 'string' ? body : JSON.stringify(body)

@@ -1263,10 +1263,12 @@ async function authenticate(request, env) {
   }
 
   const user = await env.AIHANGOUT_DB
-    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin, tos_accepted_version FROM users WHERE id = ?')
+    .prepare('SELECT id, username, email, reputation, join_date, ai_agent_type, is_admin, tos_accepted_version, deleted_at FROM users WHERE id = ?')
     .bind(payload.userId)
     .first();
 
+  // AIH-R4: a deleted (anonymised) account must not keep working on an unexpired token.
+  if (user && user.deleted_at) return null;
   return user;
 }
 
@@ -3585,6 +3587,7 @@ function normalizeTelemetryEvent(raw) {
 router.post('/api/analytics/batch', async (request, env) => {
   try {
     if (env.TELEMETRY_DISABLED === 'true') return new Response(null, { status: 204, headers: corsHeaders });
+    if (!analyticsConsentGiven(request)) return new Response(null, { status: 204, headers: corsHeaders });
     const ip = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
     const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'telemetry');
     if (rl.limited) return rateLimitResponse(rl);
@@ -13542,6 +13545,7 @@ function calculateCompetitiveValue(event) {
 // POST /api/events/batch - Universal event ingestion from frontend AnalyticsTracker
 router.post('/api/events/batch', async (request, env) => {
   try {
+    if (!analyticsConsentGiven(request)) return new Response(null, { status: 204, headers: corsHeaders });
     const user = await authenticate(request, env);
 
     // Parse body - supports both application/json and text/plain (sendBeacon)
@@ -17777,6 +17781,151 @@ router.put('/api/users/me/live-profile', async (request, env) => {
     }
     return jsonResponse({ success: true, profileId: body.profileId }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) { return errResponse('Unable to save live profile', error); }
+});
+
+// ============================================================================
+// AIH-R4: consent, data export and account deletion
+// ============================================================================
+const PRIVACY_POLICY_VERSION = '2026-10-31';
+
+// Behavioural telemetry is accepted only when the client states a consent decision
+// (?consent=analytics, so sendBeacon can carry it) and the browser has not asked not to
+// be tracked (Global Privacy Control / Do Not Track). Without both, the batch is dropped
+// before anything is parsed or stored. Operational logs (security, ops failures, rate
+// limits) are not behavioural telemetry and are not gated.
+function analyticsConsentGiven(request) {
+  if (request.headers.get('Sec-GPC') === '1' || request.headers.get('DNT') === '1') return false;
+  return new URL(request.url).searchParams.get('consent') === 'analytics';
+}
+
+router.post('/api/consent', async (request, env) => {
+  try {
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'api');
+    if (rl.limited) return rateLimitResponse(rl);
+    let body;
+    try { body = safeJsonParse(await request.text()); } catch { return errResponse('Invalid JSON', null, 400); }
+    if (!body || typeof body.analytics !== 'boolean') return errResponse('analytics must be true or false', null, 400);
+    const sessionId = typeof body.session_id === 'string' && /^[a-f0-9]{16,64}$/.test(body.session_id) ? body.session_id : null;
+    const source = ['banner', 'settings'].includes(body.source) ? body.source : 'banner';
+    let user = null;
+    try { user = await authenticate(request, env); } catch { user = null; }
+    const gpc = request.headers.get('Sec-GPC') === '1' || request.headers.get('DNT') === '1' ? 1 : 0;
+    await env.AIHANGOUT_DB.prepare(
+      'INSERT INTO consent_log (user_id, session_id, analytics, policy_version, source, gpc) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(user && user.id > 0 ? user.id : null, sessionId, body.analytics ? 1 : 0, PRIVACY_POLICY_VERSION, source, gpc).run();
+    return jsonResponse({ success: true, policy_version: PRIVACY_POLICY_VERSION });
+  } catch (error) { return errResponse('Unable to record consent', error); }
+});
+
+// Every table holding data about a user, with the query that selects it. Credential material
+// (password hash, token hashes, session tokens) is deliberately never exported.
+const EXPORT_SECTIONS = [
+  ['problems', 'SELECT * FROM problems WHERE user_id = ?'],
+  ['solutions', 'SELECT * FROM solutions WHERE user_id = ?'],
+  ['votes', 'SELECT * FROM votes WHERE user_id = ?'],
+  ['bookmarks', 'SELECT * FROM bookmarks WHERE user_id = ?'],
+  ['following', 'SELECT * FROM followers WHERE follower_id = ?'],
+  ['followers', 'SELECT * FROM followers WHERE following_id = ?'],
+  ['notifications', 'SELECT * FROM notifications WHERE user_id = ?'],
+  ['chat_messages', 'SELECT * FROM chat_messages WHERE user_id = ?'],
+  ['bug_reports', 'SELECT id, title, description, bug_type, priority, status, url, created_at FROM bug_reports WHERE user_id = ?'],
+  ['content_reports', 'SELECT * FROM content_reports WHERE reporter_id = ?'],
+  ['settings', 'SELECT * FROM user_settings WHERE user_id = ?'],
+  ['live_profile_link', 'SELECT * FROM live_profile_links WHERE user_id = ?'],
+  ['activity_summary', 'SELECT * FROM user_activity_summary WHERE user_id = ?'],
+  ['analytics_events', 'SELECT event_type, session_id, page_url, referrer, user_agent, ip_address, event_data, timestamp FROM analytics_events WHERE user_id = ?'],
+  ['search_events', 'SELECT * FROM search_analytics_events WHERE user_id = ?'],
+  ['consent_decisions', 'SELECT analytics, policy_version, source, gpc, created_at FROM consent_log WHERE user_id = ?'],
+];
+const EXPORT_ROW_CAP = 10000;
+
+router.get('/api/me/export', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user || !(user.id > 0)) return errResponse('Authentication required', null, 401);
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, request.headers.get('CF-Connecting-IP') || 'unknown', user.id, 'api');
+    if (rl.limited) return rateLimitResponse(rl);
+    const db = env.AIHANGOUT_DB;
+    const profile = await db.prepare(
+      'SELECT id, username, email, reputation, join_date, ai_agent_type, email_verified_at, tos_accepted_version, tos_accepted_at FROM users WHERE id = ?'
+    ).bind(user.id).first();
+    const sections = {};
+    const truncated = [];
+    for (const [name, sql] of EXPORT_SECTIONS) {
+      const { results } = await db.prepare(`${sql} LIMIT ${EXPORT_ROW_CAP + 1}`).bind(user.id).all();
+      if (results.length > EXPORT_ROW_CAP) { results.length = EXPORT_ROW_CAP; truncated.push(name); }
+      sections[name] = results;
+    }
+    const payload = {
+      export_version: 1,
+      generated_at: new Date().toISOString(),
+      policy_version: PRIVACY_POLICY_VERSION,
+      profile,
+      ...sections,
+      truncated_sections: truncated,
+      not_included: ['password hash and other credentials', 'security audit logs retained for abuse prevention']
+    };
+    return new Response(JSON.stringify(payload, null, 2), {
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json',
+        'Content-Disposition': `attachment; filename="aihangout-export-${user.id}.json"`,
+        'Cache-Control': 'no-store'
+      }
+    });
+  } catch (error) { return errResponse('Unable to export data', error); }
+});
+
+// Account deletion = anonymisation. Personal and behavioural rows are deleted; the users row is
+// kept with every identifying field replaced, so problems/solutions and audit chains that
+// reference it stay valid and show "deleted-user-<id>". One D1 batch = one transaction.
+router.delete('/api/me', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user || !(user.id > 0)) return errResponse('Authentication required', null, 401);
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'login');
+    if (rl.limited) return rateLimitResponse(rl);
+    let body;
+    try { body = safeJsonParse(await request.text()); } catch { return errResponse('Invalid JSON', null, 400); }
+    if (!body || typeof body.password !== 'string' || body.confirm !== 'DELETE') {
+      return errResponse('Send {"password": "...", "confirm": "DELETE"}', null, 400);
+    }
+    if (user.is_admin) return errResponse('Admin accounts must be demoted before deletion', null, 403);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT password_hash FROM users WHERE id = ?').bind(user.id).first();
+    if (!row || !(await verifyPassword(body.password, row.password_hash))) {
+      await recordOpsFailure(env, request, { kind: 'account_delete', reason: 'bad_password', userId: user.id });
+      return errResponse('Password incorrect', null, 403);
+    }
+    const id = user.id;
+    const run = (sql, ...binds) => env.AIHANGOUT_DB.prepare(sql).bind(...(binds.length ? binds : [id]));
+    await env.AIHANGOUT_DB.batch([
+      run('DELETE FROM active_sessions WHERE user_id = ?'),
+      run('DELETE FROM enhanced_sessions WHERE user_id = ?'),
+      run('DELETE FROM auth_email_tokens WHERE user_id = ?'),
+      run('DELETE FROM bookmarks WHERE user_id = ?'),
+      run('DELETE FROM chat_channel_members WHERE user_id = ?'),
+      run('DELETE FROM chat_messages WHERE user_id = ?'),
+      run('DELETE FROM live_profile_links WHERE user_id = ?'),
+      run('DELETE FROM live_users WHERE user_id = ?'),
+      run('DELETE FROM user_activity_summary WHERE user_id = ?'),
+      run('DELETE FROM user_settings WHERE user_id = ?'),
+      run('DELETE FROM votes WHERE user_id = ?'),
+      run('DELETE FROM notifications WHERE user_id = ? OR actor_id = ?', id, id),
+      run('DELETE FROM notification_delivery_log WHERE user_id = ? OR actor_id = ?', id, id),
+      run('DELETE FROM followers WHERE follower_id = ? OR following_id = ?', id, id),
+      run('DELETE FROM ai_intelligence_views WHERE user_id = ?'),
+      run('DELETE FROM analytics_events WHERE user_id = ?'),
+      run('DELETE FROM data_ownership_events WHERE user_id = ?'),
+      run('DELETE FROM agent_request_log WHERE user_id = ?'),
+      run('UPDATE search_analytics_events SET user_id = NULL WHERE user_id = ?'),
+      run("UPDATE bug_reports SET username = 'deleted-user-' || user_id WHERE user_id = ?"),
+      run(`UPDATE users SET username = 'deleted-user-' || id, email = 'deleted-' || id || '@deleted.invalid',
+             password_hash = '!deleted', is_admin = 0, email_verified_at = NULL, deleted_at = CURRENT_TIMESTAMP WHERE id = ?`),
+    ]);
+    return jsonResponse({ success: true, anonymised_as: `deleted-user-${id}` }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to delete account', error); }
 });
 
 router.get('*', async (request, env) => {
