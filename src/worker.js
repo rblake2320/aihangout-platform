@@ -18562,8 +18562,23 @@ export default {
     console.log(`[Cron] Daily harvest triggered at ${new Date(event.scheduledTime).toISOString()}`);
     ctx.waitUntil(runDailyHarvest(env));
     ctx.waitUntil(sendOpsDigest(env));
+    ctx.waitUntil(pruneTelemetryEvents(env));
   },
 };
+
+// Session telemetry is high-volume and only useful recent; keep 30 days. Other
+// analytics_events types are untouched.
+const TELEMETRY_RETENTION_DAYS = 30;
+async function pruneTelemetryEvents(env) {
+  try {
+    const r = await env.AIHANGOUT_DB.prepare(
+      `DELETE FROM analytics_events WHERE event_type LIKE 'tel\\_%' ESCAPE '\\' AND timestamp < datetime('now', ?)`
+    ).bind(`-${TELEMETRY_RETENTION_DAYS} days`).run();
+    console.log(`[Cron] Telemetry prune removed ${r.meta?.changes ?? 0} rows`);
+  } catch (error) {
+    console.error('[Cron] Telemetry prune failed:', error?.message || error);
+  }
+}
 
 // Ops summary (2026-10-30): one query set shared by the admin endpoint and the daily
 // digest. Answers "who signed in, who failed to, what broke" for the last N hours
