@@ -5,6 +5,7 @@
  */
 
 import { useAuthStore } from '../stores/authStore'
+import { analyticsAllowed } from '../consent'
 
 export interface AnalyticsEvent {
   event_type: string
@@ -23,7 +24,8 @@ class AnalyticsTracker {
   private readonly MAX_BUFFER = 25
   private readonly HARD_CAP = 100
   private readonly FLUSH_INTERVAL_MS = 15_000
-  private readonly BATCH_ENDPOINT = '/api/events/batch'
+  // consent=analytics: the server drops batches that do not declare consent (AIH-R4)
+  private readonly BATCH_ENDPOINT = '/api/events/batch?consent=analytics'
   private consecutiveFailures = 0
   private retryAt = 0
   private inFlight = false
@@ -58,6 +60,7 @@ class AnalyticsTracker {
   }
 
   track(eventType: string, metadata: Record<string, any> = {}): void {
+    if (!analyticsAllowed()) { this.buffer = []; return }
     const userInfo = this.getUserInfo()
     const event: AnalyticsEvent = {
       event_type: eventType,
@@ -87,6 +90,7 @@ class AnalyticsTracker {
   }
 
   private async flush(): Promise<void> {
+    if (!analyticsAllowed()) { this.buffer = []; return }
     if (this.buffer.length === 0 || this.inFlight || Date.now() < this.retryAt) return
 
     // The ingestion API accepts at most 50 events. Keep the remainder queued.
@@ -122,7 +126,7 @@ class AnalyticsTracker {
 
   private setupBeaconOnUnload(): void {
     window.addEventListener('beforeunload', () => {
-      if (this.buffer.length === 0) return
+      if (this.buffer.length === 0 || !analyticsAllowed()) return
       while (this.buffer.length > 0) {
         const events = this.buffer.slice(0, this.MAX_BUFFER)
         const payload = JSON.stringify({ events, session_id: this.sessionId })

@@ -1,24 +1,24 @@
 {
   "schema": "bundle-recon/1",
   "origin": "local-dist",
-  "fetchedAt": "2026-10-31T16:40:32.810Z",
+  "fetchedAt": "2026-10-31T17:43:59.236Z",
   "index": {
-    "sha256": "04aebfe16f40058766883ec570582714afd5fc2c326e737d86b2adbd8c1be0d9",
+    "sha256": "6d5105f8b6bfdb5a8fd0d9548306afee2eb142e87ff67c2f05cf3fa89e275b34",
     "bytes": 2258
   },
   "assets": [
     {
-      "path": "/assets/index-Bv9XazIt.css",
+      "path": "/assets/index-BsaBWepA.css",
       "status": 200,
-      "bytes": 42973,
-      "sha256": "5e56f428280651c048878391c42002bf14e157b61066d57cae5ccba02a4639f2",
+      "bytes": 43017,
+      "sha256": "194d167a40db7d8bb57c21e94c10d328de30502a4a198700a0f4c7cd0f5228ec",
       "sourceMapExposed": false
     },
     {
-      "path": "/assets/index-CDxjmwRw.js",
+      "path": "/assets/index-Fdkxsqlh.js",
       "status": 200,
-      "bytes": 349676,
-      "sha256": "e58484835fca9dbef5428a7eaff9951ba13d2696109c830334a154d158195be3",
+      "bytes": 357331,
+      "sha256": "a047e394530c68bcfab4725418386c8cdc0880218e0372c002f8a9eef12193da",
       "sourceMapExposed": false
     },
     {
@@ -67,6 +67,7 @@
       "/api/chat/message",
       "/api/chat/messages/1",
       "/api/chat/users/online",
+      "/api/consent",
       "/api/events/batch",
       "/api/learning",
       "/api/learning/categories",
@@ -81,6 +82,7 @@
     ],
     "clientCalls": [
       "DELETE /bookmarks/{}/{}",
+      "DELETE /me",
       "DELETE /notifications/{}",
       "GET /admin/flagged-content",
       "GET /admin/ops-summary",
@@ -89,6 +91,7 @@
       "GET /bookmarks",
       "GET /bug-reports",
       "GET /bug-reports/{}",
+      "GET /me/export",
       "GET /notifications",
       "GET /notifications/count",
       "GET /pathbooks",
@@ -165,6 +168,7 @@
     ],
     "storageKeys": [
       "ai-hangout-auth",
+      "aih_tel_session",
       "guestSessionId"
     ],
     "flags": [],
@@ -179,17 +183,17 @@
       {
         "sha256": "48023abf731b2a19",
         "context": "auth/me\");n.data.success&&n.data.user&&e({user:{...t().user,is_admin:!!n.data.user.is_admin}})}catch{}}}}),{name:\"ai-hangout-auth\",partializ",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "asset": "/assets/index-Fdkxsqlh.js"
       },
       {
         "sha256": "62b14b5667f9bffc",
         "context": "s&&n.data.user&&e({user:{...t().user,is_admin:!!n.data.user.is_admin}})}catch{}}}}),{name:\"ai-hangout-auth\",partialize:e=>({user:e.user,toke",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "asset": "/assets/index-Fdkxsqlh.js"
       },
       {
         "sha256": "a1575da526a0df19",
         "context": "Settings\",children:(0,Sn.jsx)(K,{className:\"w-5 h-5\"})}),t?.is_admin&&(0,Sn.jsx)(q,{to:\"/admin\",className:\"p-1 text-gray-400 hover:text-blue",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "asset": "/assets/index-Fdkxsqlh.js"
       }
     ]
   }

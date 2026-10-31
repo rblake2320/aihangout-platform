@@ -18,6 +18,7 @@ import SettingsPage from './pages/SettingsPage'
 import AdminPage from './pages/AdminPage'
 import TermsPage from './pages/TermsPage'
 import PrivacyPage from './pages/PrivacyPage'
+import ConsentBanner from './components/ConsentBanner'
 import DmcaPage from './pages/DmcaPage'
 import HowBountiesWorkPage from './pages/HowBountiesWorkPage'
 import PathbooksPage from './pages/PathbooksPage'
@@ -82,6 +83,8 @@ function App() {
 
       {/* Global Chat Component */}
       <Chat />
+
+      <ConsentBanner />
 
       {/* Site Footer */}
       <footer className="border-t border-gray-200 bg-white mt-12 py-6">
