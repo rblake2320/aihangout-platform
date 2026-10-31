@@ -7,6 +7,7 @@
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { handleMcpRequest } from './mcp/server.js';
+import { registerAdRoutes } from './ads.js';
 
 const router = Router();
 
@@ -17778,6 +17779,10 @@ router.put('/api/users/me/live-profile', async (request, env) => {
     return jsonResponse({ success: true, profileId: body.profileId }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) { return errResponse('Unable to save live profile', error); }
 });
+
+// AIH-R9: first-party ad slots and campaigns (src/ads.js). Registered before the
+// catch-all so its GET routes are not shadowed.
+registerAdRoutes(router, { authenticate, checkRateLimit, rateLimitResponse, jsonResponse, errResponse, sanitizeContent });
 
 router.get('*', async (request, env) => {
   try {
