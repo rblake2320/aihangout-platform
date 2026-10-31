@@ -18,6 +18,7 @@ import {
   cleanCommentBody, assertCommentable, insertComment, listComments, hideOwnComment, resolveMentions,
   findSimilarProblems, PUBLIC_PROBLEM_SQL,
 } from './qa.js';
+import { runBackup, applyRetention } from './backup.js';
 
 const router = Router();
 
@@ -18953,11 +18954,30 @@ export default {
 
   // Daily harvest cron trigger (0 6 * * * = 6 AM UTC daily)
   async scheduled(event, env, ctx) {
+    if (event.cron === BACKUP_CRON) {
+      ctx.waitUntil(runNightlyBackup(env, new Date(event.scheduledTime)));
+      return;
+    }
     console.log(`[Cron] Daily harvest triggered at ${new Date(event.scheduledTime).toISOString()}`);
     ctx.waitUntil(runDailyHarvest(env));
     ctx.waitUntil(sendOpsDigest(env));
   },
 };
+
+// AIH-R3: nightly D1 -> R2 export (see src/backup.js, docs/backups.md). A failure is
+// written to the ops ledger so it shows on the admin Ops tab and in the daily digest.
+const BACKUP_CRON = '30 3 * * *';
+async function runNightlyBackup(env, now) {
+  try {
+    const m = await runBackup(env, { now });
+    console.log(`[Backup] ${m.prefix} tables=${m.totals.tables} rows=${m.totals.rows} parts=${m.totals.parts}`);
+    const r = await applyRetention(env.BACKUP_BUCKET, { now });
+    console.log(`[Backup] retention kept=${r.kept.length} deleted=${r.deleted.length}`);
+  } catch (error) {
+    console.error('[Backup] failed:', error?.message || error);
+    await recordOpsFailure(env, null, { kind: 'backup', reason: error?.message || error });
+  }
+}
 
 // Ops summary (2026-10-30): one query set shared by the admin endpoint and the daily
 // digest. Answers "who signed in, who failed to, what broke" for the last N hours
