@@ -12,6 +12,21 @@ type Summary = {
   registrations: { registrations: number; verified: number }
   active_sessions: Array<{ user_id: number; username: string | null; user_type: string; last_seen: string; page_count: number; activity_score: number; ip_address: string | null }>
   client_errors: number
+  telemetry?: {
+    events: number
+    sessions: number
+    sessions_by_duration: Array<{ label: string; sessions: number }>
+    median_active_ms: number | null
+    frustration_by_page: Array<{ page: string; rage_clicks: number; dead_clicks: number }>
+    top_client_errors: Array<{ fingerprint: string | null; message: string | null; count: number; sessions: number; last_page: string | null }>
+    scroll_depth_by_page: Array<{ page: string; views: number; avg_max_scroll_pct: number | null }>
+  }
+}
+
+const dur = (ms: number | null) => {
+  if (ms === null) return '–'
+  const s = Math.round(ms / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
 const ago = (ts: string) => { try { return formatDistanceToNow(parseApiDate(ts), { addSuffix: true }) } catch { return ts } }
@@ -50,6 +65,67 @@ export default function OpsSummary() {
         {stat('Registrations', `${data.registrations.registrations} (${data.registrations.verified} verified)`)}
         {stat('Active sessions', data.active_sessions.length)}
       </div>
+
+      {data.telemetry && (
+        <section className="space-y-4">
+          <h3 className="font-medium text-gray-900">Session telemetry</h3>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            {stat('Sessions measured', data.telemetry.sessions)}
+            {stat('Median active time', dur(data.telemetry.median_active_ms))}
+            {stat('Telemetry events', data.telemetry.events)}
+          </div>
+          <div className="bg-white rounded-lg border border-gray-200 p-3">
+            <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">Sessions by duration</div>
+            <ul className="space-y-1 text-sm">{data.telemetry.sessions_by_duration.map(b => {
+              const max = Math.max(1, ...data.telemetry!.sessions_by_duration.map(x => x.sessions))
+              return (
+                <li key={b.label} className="flex items-center gap-2">
+                  <span className="w-16 text-gray-500">{b.label}</span>
+                  <span className="h-3 bg-blue-500 rounded" style={{ width: `${(b.sessions / max) * 60}%` }} />
+                  <span>{b.sessions}</span>
+                </li>
+              )
+            })}</ul>
+          </div>
+          <div className="grid md:grid-cols-2 gap-6">
+            <div>
+              <h4 className="text-sm font-medium text-gray-900 mb-1">Rage / dead clicks per page</h4>
+              {data.telemetry.frustration_by_page.length === 0 ? <p className="text-sm text-gray-500">None.</p> : (
+                <table className="w-full text-sm bg-white rounded-lg border border-gray-200">
+                  <thead><tr className="text-left text-gray-500"><th className="p-2">Page</th><th className="p-2 text-right">Rage</th><th className="p-2 text-right">Dead</th></tr></thead>
+                  <tbody>{data.telemetry.frustration_by_page.map((r, i) => (
+                    <tr key={i} className="border-t border-gray-100"><td className="p-2 font-mono text-xs break-all">{r.page}</td><td className="p-2 text-right">{r.rage_clicks}</td><td className="p-2 text-right">{r.dead_clicks}</td></tr>
+                  ))}</tbody>
+                </table>
+              )}
+            </div>
+            <div>
+              <h4 className="text-sm font-medium text-gray-900 mb-1">Scroll depth by page</h4>
+              {data.telemetry.scroll_depth_by_page.length === 0 ? <p className="text-sm text-gray-500">None.</p> : (
+                <table className="w-full text-sm bg-white rounded-lg border border-gray-200">
+                  <thead><tr className="text-left text-gray-500"><th className="p-2">Page</th><th className="p-2 text-right">Views</th><th className="p-2 text-right">Avg max scroll</th></tr></thead>
+                  <tbody>{data.telemetry.scroll_depth_by_page.map((r, i) => (
+                    <tr key={i} className="border-t border-gray-100"><td className="p-2 font-mono text-xs break-all">{r.page}</td><td className="p-2 text-right">{r.views}</td><td className="p-2 text-right">{r.avg_max_scroll_pct ?? '–'}%</td></tr>
+                  ))}</tbody>
+                </table>
+              )}
+            </div>
+          </div>
+          <div>
+            <h4 className="text-sm font-medium text-gray-900 mb-1">Top client errors</h4>
+            {data.telemetry.top_client_errors.length === 0 ? <p className="text-sm text-gray-500">None in this window.</p> : (
+              <ul className="space-y-1 text-sm">{data.telemetry.top_client_errors.map((e, i) => (
+                <li key={i} className="bg-white rounded border border-gray-200 p-2 flex flex-wrap gap-x-3">
+                  <span className="font-medium">{e.count}×</span>
+                  <span className="font-mono text-xs break-all">{e.message}</span>
+                  <span className="text-gray-500">{e.sessions} session{e.sessions === 1 ? '' : 's'}</span>
+                  {e.last_page && <span className="text-gray-400">{e.last_page}</span>}
+                </li>
+              ))}</ul>
+            )}
+          </div>
+        </section>
+      )}
 
       <section>
         <h3 className="font-medium text-gray-900 mb-2">Failures by kind</h3>

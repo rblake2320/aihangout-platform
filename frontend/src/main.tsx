@@ -7,7 +7,16 @@ import '@fontsource-variable/inter'
 import App from './App.tsx'
 import { AnalyticsProvider } from './contexts/AnalyticsProvider'
 import './index.css'
+import { createTelemetry } from './telemetry'
+import { featureFlags } from './utils/featureFlags'
+import { useAuthStore } from './stores/authStore'
 
+// Session telemetry: page/route timing, rage/dead clicks, form abandonment, client errors,
+// network failures. Batched to POST /api/analytics/batch. Never reads input values.
+createTelemetry({
+  enabled: featureFlags.sessionTelemetry,
+  getToken: () => useAuthStore.getState().token,
+}).start()
 
 const queryClient = new QueryClient({
   defaultOptions: {
