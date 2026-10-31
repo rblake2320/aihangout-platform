@@ -72,7 +72,7 @@ enabled = true
 head_sampling_rate = 1
 
 [triggers]
-crons = ["0 6 * * *"]   # 6 AM UTC daily harvest
+crons = ["0 6 * * *", "*/10 * * * *", "0 14 * * 1"]   # 6 AM UTC daily harvest; email outbox flush every 10 min; weekly digest Mon 14:00 UTC
 
 [build]
 command = "npm run build:worker"

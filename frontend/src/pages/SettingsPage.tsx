@@ -1,6 +1,6 @@
 import { useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api, settingsAPI } from '../services/api'
+import { api, settingsAPI, emailPrefsAPI } from '../services/api'
 import toast from 'react-hot-toast'
 import LiveProfileSettings from '../components/LiveProfileSettings'
 
@@ -58,6 +58,17 @@ export default function SettingsPage() {
   })
 
   const settings = data?.data?.settings
+
+  const emailQuery = useQuery({ queryKey: ['email-preferences'], queryFn: () => emailPrefsAPI.get() })
+  const emailPrefs = emailQuery.data?.data?.preferences
+  const emailMutation = useMutation({
+    mutationFn: (patch: Parameters<typeof emailPrefsAPI.update>[0]) => emailPrefsAPI.update(patch),
+    onSuccess: (res) => {
+      queryClient.setQueryData(['email-preferences'], res)
+      toast.success('Email preferences saved')
+    },
+    onError: () => toast.error('Failed to save email preferences'),
+  })
 
   const handleChange = (key: string, value: boolean) => {
     const updated = { ...settings, [key]: value }
@@ -119,10 +130,28 @@ export default function SettingsPage() {
             onChange={v => handleChange('notify_new_solution', v)}
           />
           <Toggle
-            label="Email notifications"
-            description="Receive email when someone responds to your content (verified email required)"
-            checked={!!settings?.email_notifications}
-            onChange={v => handleChange('email_notifications', v)}
+            label="Email: answers to your questions"
+            description="One email when someone answers your question or verifies your answer (verified email required)"
+            checked={!!emailPrefs && emailPrefs.solutions && !emailPrefs.unsubscribed_all}
+            onChange={v => emailMutation.mutate({ solutions: v, ...(v ? { unsubscribed_all: false } : {}) })}
+          />
+          <Toggle
+            label="Email: mentions"
+            description="When someone mentions you with @username"
+            checked={!!emailPrefs && emailPrefs.mentions && !emailPrefs.unsubscribed_all}
+            onChange={v => emailMutation.mutate({ mentions: v, ...(v ? { unsubscribed_all: false } : {}) })}
+          />
+          <Toggle
+            label="Email: weekly digest"
+            description="A Monday summary of answers and unread notifications, only when there is something to report"
+            checked={!!emailPrefs && emailPrefs.digest && !emailPrefs.unsubscribed_all}
+            onChange={v => emailMutation.mutate({ digest: v, ...(v ? { unsubscribed_all: false } : {}) })}
+          />
+          <Toggle
+            label="Stop all email"
+            description="Turns off every email from AI Hangout. Every email also carries an unsubscribe link."
+            checked={!!emailPrefs?.unsubscribed_all}
+            onChange={v => emailMutation.mutate({ unsubscribed_all: v })}
           />
           <div className="py-4">
             <button
