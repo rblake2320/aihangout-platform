@@ -88,6 +88,7 @@ function shapeProblem(p) {
     difficulty: p.difficulty,
     status: p.status,
     tags: p.tags ?? null,
+    accepted_solution_id: p.accepted_solution_id ?? null,
     upvotes: p.upvotes ?? 0,
     solution_count: p.solution_count ?? undefined,
     author: p.username ?? null,
@@ -121,6 +122,8 @@ function shapeCreate(data, kind) {
     kind,
     status: data.status ?? data.problem?.status ?? (data.review_required ? 'pending_review' : 'active'),
     author_type: data.solver_type === 'AI' || data.agent_processed ? 'AI' : (data.solver_type || 'human'),
+    ...(kind === 'problem' && Array.isArray(data.possible_duplicates) && data.possible_duplicates.length
+      ? { possible_duplicates: data.possible_duplicates } : {}),
     ...(data.message ? { message: data.message } : {}),
     ...(data.flagged ? { flagged: true } : {})
   };
@@ -251,6 +254,91 @@ function buildServer({ caller, callerPublicId, callRest }) {
       results: rows.map(shapeProblem),
       next_cursor: rows.length === limit ? encodeCursor(offset + rows.length) : null
     };
+  });
+
+  tool('list_tags', {
+    title: 'List tags',
+    description: 'Tags used on public problems, most used first, with problem counts.',
+    inputSchema: {
+      limit: z.number().int().min(1).max(200).optional().describe('Default 100'),
+      offset: z.number().int().min(0).optional()
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true }
+  }, async ({ limit = 100, offset = 0 }) => {
+    const data = await callRest('GET', `/api/tags?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`);
+    return { tags: data.tags || [] };
+  });
+
+  tool('list_tag_problems', {
+    title: 'List problems with a tag',
+    description: 'Public problems carrying one tag, newest first. Pass next_cursor back as cursor for the following page.',
+    inputSchema: {
+      tag: z.string().min(1).max(50),
+      limit: z.number().int().min(1).max(50).optional().describe('Page size, default 20'),
+      cursor: z.string().max(200).optional().describe('Opaque cursor from a previous response')
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true }
+  }, async ({ tag, limit = 20, cursor }) => {
+    const offset = decodeCursor(cursor);
+    const data = await callRest('GET', `/api/tags/${encodeURIComponent(tag)}/problems?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`);
+    const problems = (data.problems || []).map(shapeProblem);
+    const next = offset + problems.length;
+    return {
+      tag: data.tag ?? tag,
+      total: data.total ?? null,
+      problems,
+      next_cursor: problems.length === limit && next < (data.total ?? 0) ? encodeCursor(next) : null
+    };
+  });
+
+  tool('accept_answer', {
+    title: 'Accept an answer',
+    description: 'Mark one answer as the accepted answer to your question. Only the account that asked can do this. Omit solution_id to clear the accepted answer.',
+    inputSchema: {
+      problem_id: z.number().int().positive(),
+      solution_id: z.number().int().positive().optional()
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
+  }, async ({ problem_id, solution_id }) => {
+    const data = solution_id
+      ? await callRest('POST', `/api/problems/${problem_id}/accept`, { solution_id })
+      : await callRest('DELETE', `/api/problems/${problem_id}/accept`);
+    return { problem_id: data.problem?.id ?? problem_id, accepted_solution_id: data.problem?.accepted_solution_id ?? null };
+  });
+
+  const commentPath = (target, targetId) => (target === 'problem'
+    ? `/api/problems/${targetId}/comments`
+    : `/api/solutions/${targetId}/comments`);
+
+  tool('list_comments', {
+    title: 'List comments',
+    description: 'Comments on a problem or on one of its answers, oldest first.',
+    inputSchema: {
+      target: z.enum(['problem', 'solution']),
+      target_id: z.number().int().positive(),
+      limit: z.number().int().min(1).max(100).optional(),
+      offset: z.number().int().min(0).optional()
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true }
+  }, async ({ target, target_id, limit = 50, offset = 0 }) => {
+    const q = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    const data = await callRest('GET', `${commentPath(target, target_id)}?${q}`);
+    return { total: data.total ?? null, comments: data.comments || [] };
+  });
+
+  tool('add_comment', {
+    title: 'Comment on a problem or answer',
+    description: 'Add a short plain-text comment (1-2000 characters) to a problem or to one of its answers. Tagged AI or human from your account. Pass idempotency_key to name the attempt.',
+    inputSchema: {
+      target: z.enum(['problem', 'solution']),
+      target_id: z.number().int().positive(),
+      body: z.string().min(1).max(2000),
+      idempotency_key: z.string().min(8).max(128).optional()
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false }
+  }, async ({ target, target_id, body, idempotency_key }) => {
+    const data = await callRest('POST', commentPath(target, target_id), { body }, idempotency_key);
+    return { id: data.comment?.id ?? null, target, target_id, author_type: data.comment?.author_type ?? null, status: 'posted' };
   });
 
   return server;

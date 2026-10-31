@@ -13,6 +13,11 @@ import {
   profilePage, SITEMAP_CHUNK_SIZE
 } from './seo/render.js';
 import { uuidv7, isPublicId, slugify, problemPath, publicIdFor, resolvePublicPath } from './public-ids.js';
+import {
+  normalizeTag, listTags, problemsForTag, setAcceptedSolution,
+  cleanCommentBody, assertCommentable, insertComment, listComments, hideOwnComment, resolveMentions,
+  findSimilarProblems, PUBLIC_PROBLEM_SQL,
+} from './qa.js';
 
 const router = Router();
 
@@ -2646,11 +2651,21 @@ router.post('/api/problems', async (request, env) => {
       })
     });
 
+    // AIH-R7 step 4: likely duplicates are suggested to the poster. The post is already saved,
+    // so a failure here is logged and the response carries an empty list.
+    let possibleDuplicates = [];
+    try {
+      possibleDuplicates = await findSimilarProblems(env.AIHANGOUT_DB, safeTitle, { excludeId: result.meta.last_row_id });
+    } catch (dupError) {
+      console.error('[QA] duplicate check failed:', dupError?.message || dupError);
+    }
+
     const responseBody = {
       success: true,
       problemId: result.meta.last_row_id,
       public_id: problemPublicId,
       path: problemPath({ public_id: problemPublicId, title: safeTitle.trim() }),
+      possible_duplicates: possibleDuplicates,
       message: agentName
         ? 'Problem submitted for review. Agent-generated content requires human approval before appearing in the main feed.'
         : (effectiveStatus === 'pending_review'
@@ -17955,6 +17970,194 @@ router.get('/profile/:username', async (request, env) => {
   }
   if (!/^[A-Za-z0-9_.-]{1,50}$/.test(username)) return undefined;
   return renderSeoPage(request, env, (db) => loadProfilePage(db, username), profilePage);
+});
+
+// ── AIH-R7: tags (logic in src/qa.js). Tag listing and tag pages are JSON; the HTML tag page
+// and the ?tag= feed filter come from AIH-R1. ──
+const qaJson = (body, status = 200) => new Response(JSON.stringify(body), {
+  status, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+});
+const qaIntParam = (url, name, fallback, max) => {
+  const n = parseInt(url.searchParams.get(name) || '', 10);
+  return Number.isFinite(n) ? Math.min(Math.max(n, 0), max) : fallback;
+};
+
+router.get('/api/tags', async (request, env) => {
+  try {
+    const url = new URL(request.url);
+    const tags = await listTags(env.AIHANGOUT_DB, {
+      limit: Math.max(1, qaIntParam(url, 'limit', 100, 200)), offset: qaIntParam(url, 'offset', 0, 100000)
+    });
+    return qaJson({ success: true, tags });
+  } catch (error) {
+    return errResponse('Could not load tags', error);
+  }
+});
+
+router.get('/api/tags/:tag/problems', async (request, env) => {
+  try {
+    const tag = normalizeTag(decodeURIComponent(request.params.tag || ''));
+    if (!tag) return qaJson({ success: false, error: 'Unknown tag' }, 404);
+    const url = new URL(request.url);
+    const page = await problemsForTag(env.AIHANGOUT_DB, tag, {
+      limit: Math.max(1, qaIntParam(url, 'limit', 20, 50)), offset: qaIntParam(url, 'offset', 0, 100000)
+    });
+    return qaJson({
+      success: true, tag: page.tag, total: page.total,
+      problems: page.rows.map(r => ({
+        id: r.id, title: r.title, category: r.category, difficulty: r.difficulty, status: r.status,
+        upvotes: r.upvotes, created_at: r.created_at,
+        author: r.username, author_type: r.ai_agent_type && r.ai_agent_type !== 'human' ? 'AI' : 'human'
+      }))
+    });
+  } catch (error) {
+    return errResponse('Could not load tag', error);
+  }
+});
+
+// ── AIH-R7 step 2: accepted answer. Only the person who asked can accept or clear it. ──
+const qaAccept = async (request, env, ctx, solutionId) => {
+  const user = await authenticate(request, env);
+  if (!user) return qaJson({ success: false, error: 'Authentication required' }, 401);
+  const problemId = parseInt(request.params.problemId, 10);
+  const result = await setAcceptedSolution(env.AIHANGOUT_DB, { problemId, solutionId, userId: user.id });
+  if (!result.ok) return qaJson({ success: false, error: result.error }, result.status);
+  if (solutionId != null && ctx?.waitUntil) {
+    const author = await env.AIHANGOUT_DB.prepare('SELECT user_id FROM solutions WHERE id = ?').bind(solutionId).first();
+    if (author && author.user_id !== user.id) {
+      ctx.waitUntil(createNotification(env, {
+        userId: author.user_id, actorId: user.id, type: 'solution_accepted', targetType: 'problem',
+        targetId: problemId, message: `${user.username} accepted your answer`, sourceType: 'solution', sourceId: solutionId
+      }));
+    }
+  }
+  return qaJson({ success: true, problem: result.problem });
+};
+
+router.post('/api/problems/:problemId/accept', async (request, env, ctx) => {
+  try {
+    const body = await request.json().catch(() => ({}));
+    const solutionId = parseInt(body.solution_id ?? body.solutionId, 10);
+    if (!Number.isSafeInteger(solutionId) || solutionId < 1) {
+      return qaJson({ success: false, error: 'solution_id must be a positive integer' }, 400);
+    }
+    return await qaAccept(request, env, ctx, solutionId);
+  } catch (error) {
+    return errResponse('Could not accept answer', error);
+  }
+});
+
+router.delete('/api/problems/:problemId/accept', async (request, env, ctx) => {
+  try {
+    return await qaAccept(request, env, ctx, null);
+  } catch (error) {
+    return errResponse('Could not clear accepted answer', error);
+  }
+});
+
+// ── AIH-R7 step 3: comments on problems and answers (logic in src/qa.js) ──
+const qaCleanDeps = { sanitizeHtml, stripDangerousUnicode, sanitizeLLMTokens };
+
+// Comments on problems and solutions. Same ToS gate and posting rate limit as answers.
+const qaCommentRoutes = (target) => {
+  const base = target === 'problem' ? '/api/problems/:targetId/comments' : '/api/solutions/:targetId/comments';
+
+  router.get(base, async (request, env) => {
+    try {
+      const targetId = parseInt(request.params.targetId, 10);
+      if (!await assertCommentable(env.AIHANGOUT_DB, target, targetId)) return qaJson({ success: false, error: 'Not found' }, 404);
+      const url = new URL(request.url);
+      const page = await listComments(env.AIHANGOUT_DB, {
+        target, targetId, limit: Math.max(1, qaIntParam(url, 'limit', 50, 100)), offset: qaIntParam(url, 'offset', 0, 100000)
+      });
+      return qaJson({ success: true, total: page.total, comments: page.comments });
+    } catch (error) {
+      return errResponse('Could not load comments', error);
+    }
+  });
+
+  router.post(base, async (request, env, ctx) => {
+    try {
+      const user = await authenticate(request, env);
+      if (!user) return qaJson({ success: false, error: 'Authentication required' }, 401);
+      if (user.tos_accepted_version !== TOS_CURRENT_VERSION) {
+        return qaJson({ success: false, error: 'You must accept the current Terms of Service before contributing content.', code: 'TOS_ACCEPTANCE_REQUIRED', current_tos_version: TOS_CURRENT_VERSION }, 403);
+      }
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'post');
+      if (rl.limited) return rateLimitResponse(rl);
+
+      const targetId = parseInt(request.params.targetId, 10);
+      const parent = await assertCommentable(env.AIHANGOUT_DB, target, targetId);
+      if (!parent) return qaJson({ success: false, error: 'Not found' }, 404);
+
+      const payload = await request.json().catch(() => null);
+      const text = cleanCommentBody(payload?.body ?? payload?.comment, qaCleanDeps);
+      if (!text) return qaJson({ success: false, error: `Comment must be 1-${2000} characters of text` }, 400);
+      const scan = scanForInjection(text);
+      if (scan.risk === 'high') return qaJson({ success: false, error: 'Comment could not be posted' }, 400);
+
+      const comment = await insertComment(env.AIHANGOUT_DB, { target, targetId, userId: user.id, body: text });
+      const problemId = target === 'problem' ? targetId : parent.problem_id;
+      const ownerId = parent.user_id;
+      if (ctx?.waitUntil) {
+        ctx.waitUntil((async () => {
+          try {
+            if (ownerId !== user.id) {
+              await createNotification(env, {
+                userId: ownerId, actorId: user.id, type: 'comment', targetType: 'problem', targetId: problemId,
+                message: target === 'problem' ? `${user.username} commented on your question` : `${user.username} commented on your answer`,
+                sourceType: 'comment', sourceId: comment.id
+              });
+            }
+            const mentioned = await resolveMentions(env.AIHANGOUT_DB, text, { excludeUserIds: [user.id, ownerId] });
+            for (const m of mentioned) {
+              await createNotification(env, {
+                userId: m.id, actorId: user.id, type: 'mention', targetType: 'problem', targetId: problemId,
+                message: `${user.username} mentioned you in a comment`, sourceType: 'comment', sourceId: comment.id
+              });
+            }
+          } catch (e) { console.error('[QA] comment notification failed:', e?.message || e); }
+        })());
+      }
+      return qaJson({ success: true, comment: { id: comment.id, body: comment.body, author: user.username, author_type: user.ai_agent_type && user.ai_agent_type !== 'human' ? 'AI' : 'human' } });
+    } catch (error) {
+      return errResponse('Could not post comment', error);
+    }
+  });
+};
+qaCommentRoutes('problem');
+qaCommentRoutes('solution');
+
+// Author-only removal (soft: the row is hidden, not deleted).
+router.delete('/api/comments/:kind/:commentId', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return qaJson({ success: false, error: 'Authentication required' }, 401);
+    const kind = request.params.kind;
+    if (kind !== 'problem' && kind !== 'solution') return qaJson({ success: false, error: 'Unknown comment kind' }, 404);
+    const commentId = parseInt(request.params.commentId, 10);
+    if (!await hideOwnComment(env.AIHANGOUT_DB, { target: kind, commentId, userId: user.id })) {
+      return qaJson({ success: false, error: 'Comment not found' }, 404);
+    }
+    return qaJson({ success: true });
+  } catch (error) {
+    return errResponse('Could not delete comment', error);
+  }
+});
+
+
+// ── AIH-R7 step 4: likely duplicates ──
+router.get('/api/problems/:problemId/similar', async (request, env) => {
+  try {
+    const id = parseInt(request.params.problemId, 10);
+    if (!Number.isSafeInteger(id) || id < 1) return qaJson({ success: false, error: 'Problem not found' }, 404);
+    const row = await env.AIHANGOUT_DB.prepare(`SELECT p.title FROM problems p WHERE p.id = ? AND ${PUBLIC_PROBLEM_SQL}`).bind(id).first();
+    if (!row) return qaJson({ success: false, error: 'Problem not found' }, 404);
+    return qaJson({ success: true, similar: await findSimilarProblems(env.AIHANGOUT_DB, row.title, { excludeId: id }) });
+  } catch (error) {
+    return errResponse('Could not check for similar problems', error);
+  }
 });
 
 router.get('*', async (request, env) => {
