@@ -6,6 +6,7 @@
 
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
+import { handleMcpRequest } from './mcp/server.js';
 
 const router = Router();
 
@@ -18281,6 +18282,16 @@ export default {
       let offset = 0;
       for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
       request = new Request(request, { body });
+    }
+
+    // Agent-native front door: MCP over Streamable HTTP. Tools re-enter this same
+    // fetch handler as REST calls, so every REST guard applies unchanged.
+    if (url.pathname === '/mcp') {
+      return handleMcpRequest(request, env, {
+        authenticate,
+        checkRateLimit,
+        dispatch: (req) => this.fetch(req, env, ctx)
+      });
     }
 
     if (url.pathname.startsWith('/api/')) {

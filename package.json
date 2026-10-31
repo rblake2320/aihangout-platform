@@ -16,10 +16,12 @@
   },
   "dependencies": {
     "@cloudflare/workers-types": "^5.20260811.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "bcryptjs": "^2.4.3",
     "itty-router": "^4.0.0",
     "jose": "^5.0.0",
-    "prismjs": "^1.30.0"
+    "prismjs": "^1.30.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.21.3",
