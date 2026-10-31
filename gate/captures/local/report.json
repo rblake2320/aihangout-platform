@@ -1,0 +1,42 @@
+{
+ "baseline": null,
+ "origin": "http://127.0.0.1:8800",
+ "scenarios": {
+  "01-home-load": {
+   "diffs": [],
+   "evidence_id": "ev_7971bb792a9a2ee80d27f99c20b405d63c475af7065bb1cfb5f2b19d8d397733",
+   "steps": 3
+  },
+  "02-register-invalid": {
+   "diffs": [],
+   "evidence_id": "ev_7254937b0647b4319db5816e0ce66e61fa553edc5b2e8cf440aa5b95077e9510",
+   "steps": 9
+  },
+  "03-register-valid": {
+   "diffs": [],
+   "evidence_id": "ev_2f6d87ff8973935407b4bb2b4dc208604f7d805cf49732e548b2dd563665d12e",
+   "steps": 10
+  },
+  "04-login-bad-password": {
+   "diffs": [],
+   "evidence_id": "ev_449ec1bace31f755c72e0252603360a539ec258cda9b547446d30e7e72a58f23",
+   "steps": 6
+  },
+  "05-post-problem": {
+   "diffs": [],
+   "evidence_id": "ev_c73e363af2c93bceb03e8f5ec6f6e2298e59203a37ccfa069e98b574e001e4e2",
+   "steps": 16
+  },
+  "06-view-problem": {
+   "diffs": [],
+   "evidence_id": "ev_6ccc59be37d0b1cf1bc1f9821f1e528e292a53aa9cacca77597732f03b08b47c",
+   "steps": 16
+  },
+  "07-admin-ops-non-admin": {
+   "diffs": [],
+   "evidence_id": "ev_9292deecc5a54fe79b460609a23c9fc32f49de8334f1549a3346947c580a54c6",
+   "steps": 11
+  }
+ },
+ "slug": "127.0.0.1_8800"
+}

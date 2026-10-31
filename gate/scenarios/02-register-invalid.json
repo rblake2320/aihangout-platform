@@ -1,0 +1,121 @@
+{
+  "start_url": {
+    "url": "__ORIGIN__/register",
+    "query": []
+  },
+  "actions": [
+    {
+      "step_id": "form-ready",
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": "#username"
+      },
+      "state": "visible",
+      "timeout_ms": 15000
+    },
+    {
+      "step_id": "fill-username",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#username"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gateUsername"
+      }
+    },
+    {
+      "step_id": "fill-email",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#email"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gateEmail"
+      }
+    },
+    {
+      "step_id": "fill-password",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#password"
+      },
+      "value": {
+        "source": "literal",
+        "value": "password1234"
+      }
+    },
+    {
+      "step_id": "fill-confirm",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#confirmPassword"
+      },
+      "value": {
+        "source": "literal",
+        "value": "password1234"
+      }
+    },
+    {
+      "step_id": "accept-tos",
+      "action": "check",
+      "locator": {
+        "kind": "css",
+        "selector": "#acceptTos"
+      }
+    },
+    {
+      "step_id": "submit",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "button[type=submit]"
+      }
+    },
+    {
+      "step_id": "error-shown",
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": "[role=alert]"
+      },
+      "state": "visible",
+      "timeout_ms": 15000
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "url",
+      "dom",
+      "storage"
+    ],
+    "at_end": [
+      "url"
+    ],
+    "events": [
+      "network",
+      "page-errors"
+    ],
+    "network": {
+      "request_body": true,
+      "response_body": true,
+      "header_values": false
+    }
+  },
+  "secrets": [
+    {
+      "secret_id": "gateUsername",
+      "environment_variable": "GATE_USERNAME"
+    },
+    {
+      "secret_id": "gateEmail",
+      "environment_variable": "GATE_EMAIL"
+    }
+  ]
+}

@@ -74,3 +74,8 @@ test-coverage-analysis/
 backup-prod-*.sql
 # Local acceptance state, temporary credentials and logs
 .local/
+
+# Capture gate scratch / run output
+.gate-tmp/
+/gate-run/
+!/gate/**/*.json

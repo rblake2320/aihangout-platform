@@ -1,0 +1,55 @@
+{
+  "02-register-invalid": {
+    "submit": {
+      "responses": [
+        "POST <ORIGIN>/api/auth/register 400"
+      ]
+    }
+  },
+  "03-register-valid": {
+    "submit": {
+      "responses": [
+        "POST <ORIGIN>/api/auth/register 200"
+      ]
+    }
+  },
+  "04-login-bad-password": {
+    "submit": {
+      "responses": [
+        "POST <ORIGIN>/api/auth/login 401"
+      ]
+    }
+  },
+  "05-post-problem": {
+    "submit": {
+      "responses": [
+        "POST <ORIGIN>/api/auth/register 200"
+      ]
+    },
+    "post": {
+      "responses": [
+        "POST <ORIGIN>/api/problems 200"
+      ]
+    }
+  },
+  "06-view-problem": {
+    "post": {
+      "responses": [
+        "POST <ORIGIN>/api/problems 200",
+        "GET <ORIGIN>/api/problems/:id 200"
+      ]
+    }
+  },
+  "07-admin-ops-non-admin": {
+    "submit": {
+      "responses": [
+        "POST <ORIGIN>/api/auth/register 200"
+      ]
+    },
+    "open-admin": {
+      "responses": [
+        "GET <ORIGIN>/api/bug-reports?limit=50 403"
+      ]
+    }
+  }
+}

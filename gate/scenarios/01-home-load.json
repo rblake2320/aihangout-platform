@@ -1,0 +1,43 @@
+{
+  "start_url": {
+    "url": "__ORIGIN__/",
+    "query": []
+  },
+  "actions": [
+    {
+      "step_id": "feed-ready",
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": "#root nav, #root header"
+      },
+      "state": "visible",
+      "timeout_ms": 15000
+    },
+    {
+      "step_id": "settle",
+      "action": "wait_for_timeout",
+      "duration_ms": 800
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "url",
+      "dom",
+      "storage"
+    ],
+    "at_end": [
+      "url"
+    ],
+    "events": [
+      "network",
+      "page-errors"
+    ],
+    "network": {
+      "request_body": true,
+      "response_body": true,
+      "header_values": false
+    }
+  },
+  "secrets": []
+}
