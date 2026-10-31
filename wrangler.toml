@@ -28,6 +28,10 @@ id = "c8a1217f6f2a43028e6b8051fd2ab9d7"
 
 # Workers Logs: retain invocation + console logs (3d free / 7d paid) and feed Workers
 # Issues, so a failure is visible after the fact instead of only during a live tail.
+[[env.staging.r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "aihangout-backups-staging"
+
 [env.staging.observability]
 enabled = true
 head_sampling_rate = 1
@@ -55,6 +59,10 @@ database_id = "88deba8c-079c-412e-a41a-826e8916f334"
 binding = "AIHANGOUT_KV"
 id = "9cd27d12b2c341b3a5b77f47b69a89c0"
 
+[[env.production.r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "aihangout-backups"
+
 [env.production.observability]
 enabled = true
 head_sampling_rate = 1
@@ -72,7 +80,7 @@ enabled = true
 head_sampling_rate = 1
 
 [triggers]
-crons = ["0 6 * * *"]   # 6 AM UTC daily harvest
+crons = ["0 6 * * *", "30 3 * * *"]   # 6 AM UTC daily harvest; 03:30 UTC nightly D1 -> R2 backup (src/backup.js)
 
 [build]
 command = "npm run build:worker"
