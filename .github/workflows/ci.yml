@@ -129,3 +129,27 @@ jobs:
       # are needed for a dry run, so this is safe to run on pull requests.
       - name: Validate production config
         run: npx wrangler deploy --env production --dry-run
+
+  bundle-recon:
+    name: Bundle recon (built frontend, no live site)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: frontend
+
+      # Serves the freshly built frontend/dist locally, extracts routes, admin
+      # routes, external hosts and secret-shaped literals, and diffs against the
+      # committed baseline. Fails on a new suspicious literal, a new admin route
+      # or a newly exposed source map. Accept an intended change by committing a
+      # new baseline: node scripts/bundle-recon.mjs --dist frontend/dist --label local-dist
+      - name: Recon built bundle and diff against baseline
+        run: node scripts/bundle-recon.mjs --dist frontend/dist --label local-dist --no-write --diff recon/local-dist

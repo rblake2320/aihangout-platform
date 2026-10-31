@@ -1,0 +1,196 @@
+{
+  "schema": "bundle-recon/1",
+  "origin": "local-dist",
+  "fetchedAt": "2026-10-31T16:40:32.810Z",
+  "index": {
+    "sha256": "04aebfe16f40058766883ec570582714afd5fc2c326e737d86b2adbd8c1be0d9",
+    "bytes": 2258
+  },
+  "assets": [
+    {
+      "path": "/assets/index-Bv9XazIt.css",
+      "status": 200,
+      "bytes": 42973,
+      "sha256": "5e56f428280651c048878391c42002bf14e157b61066d57cae5ccba02a4639f2",
+      "sourceMapExposed": false
+    },
+    {
+      "path": "/assets/index-CDxjmwRw.js",
+      "status": 200,
+      "bytes": 349676,
+      "sha256": "e58484835fca9dbef5428a7eaff9951ba13d2696109c830334a154d158195be3",
+      "sourceMapExposed": false
+    },
+    {
+      "path": "/assets/rolldown-runtime-NMqb_1LM.js",
+      "status": 200,
+      "bytes": 690,
+      "sha256": "55145894ae53e3b9862b73a794c8df6ca96e6766497d00f7449994b875eefd01",
+      "sourceMapExposed": false
+    },
+    {
+      "path": "/assets/state-tNdC39m3.js",
+      "status": 200,
+      "bytes": 36100,
+      "sha256": "31f2923c8587960255ebd8f7376d93692fb8f25c606ce6ee0d51424289024d81",
+      "sourceMapExposed": false
+    },
+    {
+      "path": "/assets/ui-CU4180iU.js",
+      "status": 200,
+      "bytes": 37891,
+      "sha256": "0e39ade2289b6b7d77d8a1d8bd1e64b772cfed8207f2f124ffa118d730ff0441",
+      "sourceMapExposed": false
+    },
+    {
+      "path": "/assets/utils-BIj3xgju.js",
+      "status": 200,
+      "bytes": 54942,
+      "sha256": "370a5d11f7698c9a3d2918728a9194caadb0ed1502d37b92854530420619b8f0",
+      "sourceMapExposed": false
+    },
+    {
+      "path": "/assets/vendor-DYDQj1ul.js",
+      "status": 200,
+      "bytes": 176834,
+      "sha256": "d6606a25ef5227c1502796135c4a6229995b4be43b223c82c80d2dfd241e50b1",
+      "sourceMapExposed": false
+    }
+  ],
+  "inventory": {
+    "apiRoutes": [
+      "/api/analytics/",
+      "/api/analytics/batch",
+      "/api/auth/logout",
+      "/api/chat/events/1",
+      "/api/chat/events/ticket",
+      "/api/chat/message",
+      "/api/chat/messages/1",
+      "/api/chat/users/online",
+      "/api/events/batch",
+      "/api/learning",
+      "/api/learning/categories",
+      "/api/learning/featured",
+      "/api/learning/{}",
+      "/api/live/count",
+      "/api/problem-bank",
+      "/api/problem-bank/featured",
+      "/api/sessions/guest-heartbeat",
+      "/api/sessions/heartbeat",
+      "/api/versions"
+    ],
+    "clientCalls": [
+      "DELETE /bookmarks/{}/{}",
+      "DELETE /notifications/{}",
+      "GET /admin/flagged-content",
+      "GET /admin/ops-summary",
+      "GET /admin/reports",
+      "GET /auth/me",
+      "GET /bookmarks",
+      "GET /bug-reports",
+      "GET /bug-reports/{}",
+      "GET /notifications",
+      "GET /notifications/count",
+      "GET /pathbooks",
+      "GET /problems",
+      "GET /problems/{}",
+      "GET /users/by-username/${encodeURIComponent",
+      "GET /users/by-username/{}",
+      "GET /users/me/settings",
+      "GET /users/{}/followers",
+      "GET /users/{}/following",
+      "GET /users/{}/is-following",
+      "PATCH /bug-reports/{}/status",
+      "POST /auth/accept-tos",
+      "POST /auth/email/resend",
+      "POST /auth/email/verify",
+      "POST /auth/login",
+      "POST /auth/password/forgot",
+      "POST /auth/password/reset",
+      "POST /auth/register",
+      "POST /bookmarks",
+      "POST /bookmarks/check",
+      "POST /bug-reports",
+      "POST /notifications/read",
+      "POST /pathbooks/${encodeURIComponent",
+      "POST /pathbooks/lookup",
+      "POST /problems",
+      "POST /problems/{}/solutions",
+      "POST /problems/{}/solutions/{}/accept",
+      "POST /reports",
+      "POST /users/is-following-batch",
+      "POST /users/{}/follow",
+      "POST /vote",
+      "PUT /users/me/live-profile",
+      "PUT /users/me/settings"
+    ],
+    "baseUrls": [
+      "/api"
+    ],
+    "pageRoutes": [
+      "/",
+      "/*",
+      "/admin",
+      "/bookmarks",
+      "/bug-report",
+      "/changelog",
+      "/create-problem",
+      "/dmca",
+      "/forgot-password",
+      "/how-bounties-work",
+      "/learning",
+      "/learning/:id",
+      "/login",
+      "/pathbooks",
+      "/privacy",
+      "/problem-bank",
+      "/problem/:id",
+      "/profile/:username",
+      "/register",
+      "/reset-password",
+      "/settings",
+      "/signup",
+      "/terms",
+      "/verify-email"
+    ],
+    "adminRoutes": [
+      "/admin",
+      "/api/admin/flagged-content",
+      "/api/admin/ops-summary",
+      "/api/admin/reports"
+    ],
+    "externalHosts": [
+      "https://aihangout.ai",
+      "https://electionclock.com"
+    ],
+    "storageKeys": [
+      "ai-hangout-auth",
+      "guestSessionId"
+    ],
+    "flags": [],
+    "emails": [
+      "dmca@aihangout.ai",
+      "legal@aihangout.ai",
+      "privacy@aihangout.ai"
+    ],
+    "sourceMapRefs": [],
+    "suspicious": [],
+    "adminGuards": [
+      {
+        "sha256": "48023abf731b2a19",
+        "context": "auth/me\");n.data.success&&n.data.user&&e({user:{...t().user,is_admin:!!n.data.user.is_admin}})}catch{}}}}),{name:\"ai-hangout-auth\",partializ",
+        "asset": "/assets/index-CDxjmwRw.js"
+      },
+      {
+        "sha256": "62b14b5667f9bffc",
+        "context": "s&&n.data.user&&e({user:{...t().user,is_admin:!!n.data.user.is_admin}})}catch{}}}}),{name:\"ai-hangout-auth\",partialize:e=>({user:e.user,toke",
+        "asset": "/assets/index-CDxjmwRw.js"
+      },
+      {
+        "sha256": "a1575da526a0df19",
+        "context": "Settings\",children:(0,Sn.jsx)(K,{className:\"w-5 h-5\"})}),t?.is_admin&&(0,Sn.jsx)(q,{to:\"/admin\",className:\"p-1 text-gray-400 hover:text-blue",
+        "asset": "/assets/index-CDxjmwRw.js"
+      }
+    ]
+  }
+}
