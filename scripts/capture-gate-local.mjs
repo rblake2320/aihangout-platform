@@ -50,8 +50,9 @@ try {
   if (stale) throw new Error(`something is already serving ${origin}; refusing to gate against a server with unknown state (stop it or pass --port)`);
   const mig = run(['wrangler', 'd1', 'migrations', 'apply', 'aihangout-dev', '--local', '--env', 'development', '--persist-to', state]);
   if (mig.status !== 0) throw new Error(`migrations failed (exit ${mig.status})`);
-  dev = spawn(npx, ['wrangler', 'dev', '--env', 'development', '--local', '--port', String(port), '--inspector-port', String(await freePort()),
-    '--persist-to', state, '--var', 'JWT_SECRET:gate-local-secret-32-chars-xxxxxx'], { cwd: root, stdio: 'ignore', shell: isWin, windowsHide: true });
+  // Run wrangler's JS entry directly (no shell/npx wrapper) so the pid we kill owns workerd.
+  dev = spawn(process.execPath, [path.join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js'), 'dev', '--env', 'development', '--local', '--port', String(port), '--inspector-port', String(await freePort()),
+    '--persist-to', state, '--var', 'JWT_SECRET:gate-local-secret-32-chars-xxxxxx'], { cwd: root, stdio: 'ignore', windowsHide: true });
   await waitHealthy(`${origin}/api/health`, 90_000);
   const gate = spawnSync(process.execPath, [path.join(root, 'scripts', 'capture-gate.mjs'), '--origin', origin, '--slug', 'local', '--pause-ms', '15000', ...argv],
     { cwd: root, stdio: 'inherit' });
