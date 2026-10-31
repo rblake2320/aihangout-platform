@@ -10,6 +10,7 @@ import { handleMcpRequest } from './mcp/server.js';
 import {
   normalizeTag, listTags, problemsForTag, setAcceptedSolution,
   cleanCommentBody, assertCommentable, insertComment, listComments, hideOwnComment, resolveMentions,
+  findSimilarProblems, PUBLIC_PROBLEM_SQL,
 } from './qa.js';
 
 const router = Router();
@@ -2632,9 +2633,19 @@ router.post('/api/problems', async (request, env) => {
       })
     });
 
+    // AIH-R7 step 4: likely duplicates are suggested to the poster. The post is already saved,
+    // so a failure here is logged and the response carries an empty list.
+    let possibleDuplicates = [];
+    try {
+      possibleDuplicates = await findSimilarProblems(env.AIHANGOUT_DB, safeTitle, { excludeId: result.meta.last_row_id });
+    } catch (dupError) {
+      console.error('[QA] duplicate check failed:', dupError?.message || dupError);
+    }
+
     const responseBody = {
       success: true,
       problemId: result.meta.last_row_id,
+      possible_duplicates: possibleDuplicates,
       message: agentName
         ? 'Problem submitted for review. Agent-generated content requires human approval before appearing in the main feed.'
         : (effectiveStatus === 'pending_review'
@@ -17957,6 +17968,19 @@ router.delete('/api/comments/:kind/:commentId', async (request, env) => {
   }
 });
 
+
+// ── AIH-R7 step 4: likely duplicates ──
+router.get('/api/problems/:problemId/similar', async (request, env) => {
+  try {
+    const id = parseInt(request.params.problemId, 10);
+    if (!Number.isSafeInteger(id) || id < 1) return qaJson({ success: false, error: 'Problem not found' }, 404);
+    const row = await env.AIHANGOUT_DB.prepare(`SELECT p.title FROM problems p WHERE p.id = ? AND ${PUBLIC_PROBLEM_SQL}`).bind(id).first();
+    if (!row) return qaJson({ success: false, error: 'Problem not found' }, 404);
+    return qaJson({ success: true, similar: await findSimilarProblems(env.AIHANGOUT_DB, row.title, { excludeId: id }) });
+  } catch (error) {
+    return errResponse('Could not check for similar problems', error);
+  }
+});
 
 router.get('*', async (request, env) => {
   try {

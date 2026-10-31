@@ -62,6 +62,52 @@ export async function setAcceptedSolution(db, { problemId, solutionId, userId })
 
 export const COMMENT_MAX = 2000;
 
+const DUPLICATE_THRESHOLD = 0.5;
+const DUPLICATE_LIMIT = 3;
+
+const STOP = new Set([
+  'the', 'and', 'for', 'with', 'how', 'what', 'why', 'when', 'does', 'not', 'from', 'this', 'that',
+  'can', 'help', 'need', 'issue', 'problem', 'question', 'using', 'use', 'get', 'into', 'your', 'have',
+  'are', 'was', 'will', 'should', 'would', 'could', 'about', 'there', 'their', 'than', 'then',
+]);
+
+// ---- similar problems (duplicate suggestion) ------------------------------------------------
+
+export function titleTokens(title) {
+  return new Set(
+    String(title ?? '').toLowerCase().split(/[^a-z0-9+#.]+/)
+      .map((w) => w.replace(/^\.+|\.+$/g, ''))
+      .filter((w) => w.length >= 3 && !STOP.has(w))
+  );
+}
+
+export function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/**
+ * Likely duplicates of a title: candidates share at least one distinctive word (found in SQL),
+ * then are ranked by Jaccard similarity of their word sets. Returns at most 3 at or above 0.5.
+ */
+export async function findSimilarProblems(db, title, { excludeId = null } = {}) {
+  const mine = titleTokens(title);
+  if (!mine.size) return [];
+  const probe = [...mine].sort((x, y) => y.length - x.length).slice(0, 4);
+  const likes = probe.map(() => 'lower(p.title) LIKE ?').join(' OR ');
+  const rows = (await db.prepare(`
+    SELECT p.id, p.title FROM problems p
+    WHERE ${PUBLIC_PROBLEM_SQL} AND p.id IS NOT ? AND (${likes})
+    ORDER BY p.id DESC LIMIT 200`).bind(excludeId, ...probe.map((w) => `%${w}%`)).all()).results || [];
+  return rows
+    .map((r) => ({ id: r.id, title: r.title, score: Math.round(jaccard(mine, titleTokens(r.title)) * 100) / 100 }))
+    .filter((r) => r.score >= DUPLICATE_THRESHOLD)
+    .sort((x, y) => y.score - x.score || y.id - x.id)
+    .slice(0, DUPLICATE_LIMIT);
+}
+
 // ---- comments -------------------------------------------------------------------------------
 
 /** Plain text only: tags, handlers and control characters are removed before storage. */

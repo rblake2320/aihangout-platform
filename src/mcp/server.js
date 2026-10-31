@@ -110,6 +110,8 @@ function shapeCreate(data, kind) {
     kind,
     status: data.status ?? data.problem?.status ?? (data.review_required ? 'pending_review' : 'active'),
     author_type: data.solver_type === 'AI' || data.agent_processed ? 'AI' : (data.solver_type || 'human'),
+    ...(kind === 'problem' && Array.isArray(data.possible_duplicates) && data.possible_duplicates.length
+      ? { possible_duplicates: data.possible_duplicates } : {}),
     ...(data.message ? { message: data.message } : {}),
     ...(data.flagged ? { flagged: true } : {})
   };
