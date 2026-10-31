@@ -2,6 +2,7 @@ import { SELF, env } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
 import shellHtml from '../frontend/index.html?raw';
 import { renderIntoShell, sitemapIndex, problemsSitemap } from '../src/seo/render.js';
+import { problemPath } from '../src/public-ids.js';
 
 // AIH-R1: what a crawler or AI assistant sees with no JavaScript. Real workerd, real D1
 // with real migrations, content created through the real REST routes.
@@ -48,7 +49,8 @@ function jsonLd(html) {
 }
 
 const XSS_TITLE = 'Why does </script><script>alert(1)</script> <img src=x onerror=alert(2)> break my parser?';
-let asker, agent, publicId, xssId, pendingId, privateId, solutionId;
+let asker, agent, publicId, xssId, pendingId, privateId, solutionId, solutionPublicId, canon;
+const canonicalOf = async (id) => problemPath(await env.AIHANGOUT_DB.prepare('SELECT public_id, title FROM problems WHERE id = ?').bind(id).first());
 
 beforeAll(async () => {
   asker = await register('seo_asker');
@@ -75,13 +77,15 @@ beforeAll(async () => {
   });
   expect(sol.res.status).toBe(200);
   solutionId = sol.json.solutionId;
+  solutionPublicId = sol.json.public_id;
   const accept = await api(`/api/problems/${publicId}/solutions/${solutionId}/accept`, { method: 'POST', token: asker.token, body: {} });
   expect(accept.res.status).toBe(200);
+  canon = await canonicalOf(publicId);
 });
 
 describe('server-rendered problem page', () => {
   it('returns question, answers and QAPage JSON-LD in the first HTML response', async () => {
-    const { res, html } = await page(`/problem/${publicId}`);
+    const { res, html } = await page(canon);
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toContain('text/html');
     expect(res.headers.get('Content-Security-Policy')).toMatch(/script-src 'self' 'nonce-/);
@@ -90,7 +94,7 @@ describe('server-rendered problem page', () => {
     expect(html).toContain('Close each socket in a finally block.');
     expect(html).toContain('<strong>Accepted answer</strong>');
     expect(html).toMatch(/Answer by <a href="\/profile\/seo_agent_\d+">seo_agent_\d+<\/a> \(AI agent\)/);
-    expect(html).toContain(`<link rel="canonical" href="${BASE}/problem/${publicId}" />`);
+    expect(html).toContain(`<link rel="canonical" href="${BASE}${canon}" />`);
     expect(html).toContain('<meta property="og:title" content="Socket leak under load in a Node worker pool | AI Hangout" />');
     expect(html).toContain('<title>Socket leak under load in a Node worker pool | AI Hangout</title>');
     expect(html).toContain('<a href="/tags/nodejs" rel="tag">nodejs</a>');
@@ -103,14 +107,14 @@ describe('server-rendered problem page', () => {
     expect(q.dateCreated).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     expect(q.author).toMatchObject({ '@type': 'Person', name: asker.username, url: `${BASE}/profile/${asker.username}` });
     expect(q.author.description).toBeUndefined(); // human
-    expect(q.acceptedAnswer).toMatchObject({ '@type': 'Answer', url: `${BASE}/problem/${publicId}#solution-${solutionId}` });
+    expect(q.acceptedAnswer).toMatchObject({ '@type': 'Answer', url: `${BASE}${canon}#solution-${solutionPublicId}` });
     expect(q.acceptedAnswer.author.description).toBe('AI agent account');
     expect(q.acceptedAnswer.text).toContain('s.destroy()');
     expect(q.suggestedAnswer).toBeUndefined();
   });
 
   it('escapes hostile titles in HTML and keeps JSON-LD intact', async () => {
-    const { res, html } = await page(`/problem/${xssId}`);
+    const { res, html } = await page(await canonicalOf(xssId));
     expect(res.status).toBe(200);
     expect(html).not.toContain('<script>alert(1)</script>');
     expect(html).not.toContain('<img src=x onerror');
@@ -132,8 +136,8 @@ describe('server-rendered problem page', () => {
   });
 
   it('www host canonicalises to the apex domain', async () => {
-    const { html } = await page(`/problem/${publicId}`, 'https://www.aihangout.ai');
-    expect(html).toContain(`<link rel="canonical" href="https://aihangout.ai/problem/${publicId}" />`);
+    const { html } = await page(canon, 'https://www.aihangout.ai');
+    expect(html).toContain(`<link rel="canonical" href="https://aihangout.ai${canon}" />`);
   });
 });
 
@@ -172,13 +176,14 @@ describe('sitemaps', () => {
     const xml = await (await SELF.fetch(`${BASE}/sitemaps/problems-1.xml`)).text();
     const listed = locs(xml);
     const approved = (await env.AIHANGOUT_DB.prepare(
-      "SELECT id FROM problems WHERE status IN ('open','approved') AND (is_public = 1 OR is_public IS NULL) AND (moderation_score IS NULL OR moderation_score >= 0.6) ORDER BY id"
-    ).all()).results.map(r => `${BASE}/problem/${r.id}`);
+      "SELECT public_id, title FROM problems WHERE status IN ('open','approved') AND (is_public = 1 OR is_public IS NULL) AND (moderation_score IS NULL OR moderation_score >= 0.6) ORDER BY id"
+    ).all()).results.map(r => BASE + problemPath(r));
     expect(listed).toEqual(approved);
-    expect(listed).toContain(`${BASE}/problem/${publicId}`);
-    expect(listed).not.toContain(`${BASE}/problem/${pendingId}`);
-    expect(listed).not.toContain(`${BASE}/problem/${privateId}`);
-    expect(xml).toMatch(new RegExp(`<loc>${BASE}/problem/${publicId}</loc><lastmod>\\d{4}-\\d{2}-\\d{2}T`));
+    expect(listed).toContain(BASE + canon);
+    expect(listed).not.toContain(BASE + await canonicalOf(pendingId));
+    expect(listed).not.toContain(BASE + await canonicalOf(privateId));
+    expect(listed.some(u => /\/problem\/\d+$/.test(u))).toBe(false); // integers stay internal
+    expect(xml).toMatch(new RegExp(`<loc>${BASE}${canon}</loc><lastmod>\\d{4}-\\d{2}-\\d{2}T`));
   });
 
   it('chunks partition the problem set exactly (no gaps, no duplicates)', async () => {
@@ -231,10 +236,10 @@ describe('tag and profile pages', () => {
     const { res, html } = await page('/tags/sockets');
     expect(res.status).toBe(200);
     expect(html).toContain('<h1>Problems tagged sockets</h1>');
-    expect(html).toContain(`<a href="/problem/${publicId}">Socket leak under load in a Node worker pool</a>`);
+    expect(html).toContain(`<a href="${canon}">Socket leak under load in a Node worker pool</a>`);
     const ld = jsonLd(html);
     expect(ld['@type']).toBe('CollectionPage');
-    expect(ld.mainEntity.itemListElement[0].url).toBe(`${BASE}/problem/${publicId}`);
+    expect(ld.mainEntity.itemListElement[0].url).toBe(BASE + canon);
   });
 
   it('empty tag page is served but noindex; feed API filters by tag', async () => {

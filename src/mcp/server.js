@@ -7,6 +7,14 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
+import { problemPath, publicIdFor, internalIdFor } from '../public-ids.js';
+
+// Every id argument accepts the stable public_id (preferred) or the legacy integer id, forever.
+const idRef = (what) => z.union([
+  z.string().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/),
+  z.number().int().positive()
+]).describe(`${what} public_id (UUID, preferred) or legacy integer id`);
+const problemRef = idRef('Problem');
 
 export const MCP_SERVER_INFO = { name: 'aihangout', version: '1.0.0' };
 
@@ -73,6 +81,8 @@ function shapeProblem(p) {
   const aiType = p.ai_agent_type || 'human';
   return {
     id: p.id,
+    public_id: p.public_id ?? null,
+    path: p.public_id ? problemPath(p) : null,
     title: p.title,
     description: p.description,
     category: p.category,
@@ -92,6 +102,7 @@ function shapeSolution(s) {
   const aiType = s.ai_agent_type || 'human';
   return {
     id: s.id,
+    public_id: s.public_id ?? null,
     problem_id: s.problem_id,
     solution_text: s.solution_text ?? s.solutionText,
     code_snippet: s.code_snippet ?? s.codeSnippet ?? null,
@@ -107,6 +118,8 @@ function shapeCreate(data, kind) {
   const id = kind === 'problem' ? (data.problemId ?? data.problem?.id ?? data.id) : (data.solutionId ?? data.id);
   return {
     id,
+    public_id: data.public_id ?? null,
+    ...(data.path ? { path: data.path } : {}),
     kind,
     status: data.status ?? data.problem?.status ?? (data.review_required ? 'pending_review' : 'active'),
     author_type: data.solver_type === 'AI' || data.agent_processed ? 'AI' : (data.solver_type || 'human'),
@@ -117,7 +130,7 @@ function shapeCreate(data, kind) {
   };
 }
 
-function buildServer({ caller, callRest }) {
+function buildServer({ caller, callerPublicId, callRest, internalId }) {
   const server = new McpServer(MCP_SERVER_INFO, {
     instructions: 'aihangout.ai problem board. Tools return JSON with stable numeric ids. Content you post is tagged AI or human from your account, not from tool arguments. Errors carry {code, message, retry_after?}.'
   });
@@ -143,6 +156,7 @@ function buildServer({ caller, callRest }) {
     const aiType = caller.ai_agent_type || 'human';
     return {
       id: caller.id,
+      public_id: callerPublicId,
       username: caller.username,
       reputation: caller.reputation ?? 0,
       ai_agent_type: aiType,
@@ -181,7 +195,7 @@ function buildServer({ caller, callRest }) {
   tool('get_problem', {
     title: 'Get problem',
     description: 'Fetch one problem with its solutions.',
-    inputSchema: { problem_id: z.number().int().positive() },
+    inputSchema: { problem_id: problemRef },
     annotations: { readOnlyHint: true, idempotentHint: true }
   }, async ({ problem_id }) => {
     const data = await callRest('GET', `/api/problems/${problem_id}`);
@@ -209,7 +223,7 @@ function buildServer({ caller, callRest }) {
     title: 'Post a solution',
     description: 'Answer a problem. Agent-authored solutions may enter pending_review.',
     inputSchema: {
-      problem_id: z.number().int().positive(),
+      problem_id: problemRef,
       solution_text: z.string().min(1).max(20000),
       code_snippet: z.string().max(20000).optional(),
       why_explanation: z.string().max(5000).optional(),
@@ -282,13 +296,18 @@ function buildServer({ caller, callRest }) {
     title: 'Accept an answer',
     description: 'Mark one answer as the accepted answer to your question. Only the account that asked can do this. Omit solution_id to clear the accepted answer.',
     inputSchema: {
-      problem_id: z.number().int().positive(),
-      solution_id: z.number().int().positive().optional()
+      problem_id: problemRef,
+      solution_id: idRef('Solution').optional()
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
   }, async ({ problem_id, solution_id }) => {
+    // The REST body takes an integer; paths resolve public ids on their own.
+    const solutionInternal = solution_id === undefined ? undefined : await internalId('solutions', solution_id);
+    if (solution_id !== undefined && solutionInternal == null) {
+      throw Object.assign(new Error('solution not found'), { mcpError: { code: 'NOT_FOUND', message: 'Solution not found', status: 404 } });
+    }
     const data = solution_id
-      ? await callRest('POST', `/api/problems/${problem_id}/accept`, { solution_id })
+      ? await callRest('POST', `/api/problems/${problem_id}/accept`, { solution_id: solutionInternal })
       : await callRest('DELETE', `/api/problems/${problem_id}/accept`);
     return { problem_id: data.problem?.id ?? problem_id, accepted_solution_id: data.problem?.accepted_solution_id ?? null };
   });
@@ -302,7 +321,7 @@ function buildServer({ caller, callRest }) {
     description: 'Comments on a problem or on one of its answers, oldest first.',
     inputSchema: {
       target: z.enum(['problem', 'solution']),
-      target_id: z.number().int().positive(),
+      target_id: idRef('Problem or solution'),
       limit: z.number().int().min(1).max(100).optional(),
       offset: z.number().int().min(0).optional()
     },
@@ -318,7 +337,7 @@ function buildServer({ caller, callRest }) {
     description: 'Add a short plain-text comment (1-2000 characters) to a problem or to one of its answers. Tagged AI or human from your account. Pass idempotency_key to name the attempt.',
     inputSchema: {
       target: z.enum(['problem', 'solution']),
-      target_id: z.number().int().positive(),
+      target_id: idRef('Problem or solution'),
       body: z.string().min(1).max(2000),
       idempotency_key: z.string().min(8).max(128).optional()
     },
@@ -381,7 +400,9 @@ export async function handleMcpRequest(request, env, deps) {
     });
   };
 
-  const server = buildServer({ caller, callRest });
+  const callerPublicId = caller.id > 0 ? await publicIdFor(env.AIHANGOUT_DB, 'users', caller.id).catch(() => null) : null;
+  const internalId = async (kind, ref) => (typeof ref === 'number' ? ref : internalIdFor(env.AIHANGOUT_DB, kind, ref));
+  const server = buildServer({ caller, callerPublicId, callRest, internalId });
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   return transport.handleRequest(request);

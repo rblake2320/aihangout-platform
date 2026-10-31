@@ -4,6 +4,7 @@ import { TagIcon } from '@heroicons/react/24/outline'
 import { formatDistanceToNow } from 'date-fns'
 import { problemsAPI } from '../services/api'
 import { parseApiDate } from '../utils/date'
+import { problemPath } from '../utils/problemPath'
 
 // The Worker server-renders /tags/:tag for crawlers; this is the same list for people.
 export default function TagPage() {
@@ -41,7 +42,7 @@ export default function TagPage() {
         <ul className="space-y-3">
           {problems.map((p: any) => (
             <li key={p.id} className="bg-white rounded-lg border border-gray-200 p-4">
-              <Link to={`/problem/${p.id}`} className="font-medium text-gray-900 hover:text-blue-600">
+              <Link to={problemPath(p)} className="font-medium text-gray-900 hover:text-blue-600">
                 {p.title}
               </Link>
               <p className="text-xs text-gray-500 mt-1">

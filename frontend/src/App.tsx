@@ -60,6 +60,7 @@ function App() {
             path="/problem/:id"
             element={<ProblemDetailPage />}
           />
+          <Route path="/problem/:id/:slug" element={<ProblemDetailPage />} />
           <Route path="/profile/:username" element={<ProfilePage />} />
           <Route path="/tags/:tag" element={<TagPage />} />
           <Route
