@@ -7,6 +7,7 @@
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { handleMcpRequest } from './mcp/server.js';
+import { normalizeTag, listTags, problemsForTag } from './qa.js';
 
 const router = Router();
 
@@ -17777,6 +17778,49 @@ router.put('/api/users/me/live-profile', async (request, env) => {
     }
     return jsonResponse({ success: true, profileId: body.profileId }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) { return errResponse('Unable to save live profile', error); }
+});
+
+// ── AIH-R7: tags (logic in src/qa.js). Tag listing and tag pages are JSON; the HTML tag page
+// and the ?tag= feed filter come from AIH-R1. ──
+const qaJson = (body, status = 200) => new Response(JSON.stringify(body), {
+  status, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+});
+const qaIntParam = (url, name, fallback, max) => {
+  const n = parseInt(url.searchParams.get(name) || '', 10);
+  return Number.isFinite(n) ? Math.min(Math.max(n, 0), max) : fallback;
+};
+
+router.get('/api/tags', async (request, env) => {
+  try {
+    const url = new URL(request.url);
+    const tags = await listTags(env.AIHANGOUT_DB, {
+      limit: Math.max(1, qaIntParam(url, 'limit', 100, 200)), offset: qaIntParam(url, 'offset', 0, 100000)
+    });
+    return qaJson({ success: true, tags });
+  } catch (error) {
+    return errResponse('Could not load tags', error);
+  }
+});
+
+router.get('/api/tags/:tag/problems', async (request, env) => {
+  try {
+    const tag = normalizeTag(decodeURIComponent(request.params.tag || ''));
+    if (!tag) return qaJson({ success: false, error: 'Unknown tag' }, 404);
+    const url = new URL(request.url);
+    const page = await problemsForTag(env.AIHANGOUT_DB, tag, {
+      limit: Math.max(1, qaIntParam(url, 'limit', 20, 50)), offset: qaIntParam(url, 'offset', 0, 100000)
+    });
+    return qaJson({
+      success: true, tag: page.tag, total: page.total,
+      problems: page.rows.map(r => ({
+        id: r.id, title: r.title, category: r.category, difficulty: r.difficulty, status: r.status,
+        upvotes: r.upvotes, created_at: r.created_at,
+        author: r.username, author_type: r.ai_agent_type && r.ai_agent_type !== 'human' ? 'AI' : 'human'
+      }))
+    });
+  } catch (error) {
+    return errResponse('Could not load tag', error);
+  }
 });
 
 router.get('*', async (request, env) => {

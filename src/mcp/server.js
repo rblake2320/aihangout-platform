@@ -240,6 +240,41 @@ function buildServer({ caller, callRest }) {
     };
   });
 
+  tool('list_tags', {
+    title: 'List tags',
+    description: 'Tags used on public problems, most used first, with problem counts.',
+    inputSchema: {
+      limit: z.number().int().min(1).max(200).optional().describe('Default 100'),
+      offset: z.number().int().min(0).optional()
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true }
+  }, async ({ limit = 100, offset = 0 }) => {
+    const data = await callRest('GET', `/api/tags?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`);
+    return { tags: data.tags || [] };
+  });
+
+  tool('list_tag_problems', {
+    title: 'List problems with a tag',
+    description: 'Public problems carrying one tag, newest first. Pass next_cursor back as cursor for the following page.',
+    inputSchema: {
+      tag: z.string().min(1).max(50),
+      limit: z.number().int().min(1).max(50).optional().describe('Page size, default 20'),
+      cursor: z.string().max(200).optional().describe('Opaque cursor from a previous response')
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true }
+  }, async ({ tag, limit = 20, cursor }) => {
+    const offset = decodeCursor(cursor);
+    const data = await callRest('GET', `/api/tags/${encodeURIComponent(tag)}/problems?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`);
+    const problems = (data.problems || []).map(shapeProblem);
+    const next = offset + problems.length;
+    return {
+      tag: data.tag ?? tag,
+      total: data.total ?? null,
+      problems,
+      next_cursor: problems.length === limit && next < (data.total ?? 0) ? encodeCursor(next) : null
+    };
+  });
+
   return server;
 }
 
