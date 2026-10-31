@@ -41,3 +41,144 @@ export async function problemsForTag(db, tag, { limit = 20, offset = 0 } = {}) {
     ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`).bind(tag, limit, offset).all()).results || [];
   return { tag, total, rows };
 }
+
+// ---- accepted answer ------------------------------------------------------------------------
+
+/**
+ * Asker-only. solutionId null clears the acceptance. Returns {ok:true, problem} or {ok:false,
+ * status, error} so the caller can answer with the right HTTP status.
+ */
+export async function setAcceptedSolution(db, { problemId, solutionId, userId }) {
+  const problem = await db.prepare('SELECT id, user_id FROM problems WHERE id = ?').bind(problemId).first();
+  if (!problem) return { ok: false, status: 404, error: 'Problem not found' };
+  if (problem.user_id !== userId) return { ok: false, status: 403, error: 'Only the person who asked can accept an answer' };
+  if (solutionId != null) {
+    const sol = await db.prepare('SELECT id FROM solutions WHERE id = ? AND problem_id = ?').bind(solutionId, problemId).first();
+    if (!sol) return { ok: false, status: 400, error: 'That answer does not belong to this problem' };
+  }
+  await db.prepare('UPDATE problems SET accepted_solution_id = ? WHERE id = ?').bind(solutionId ?? null, problemId).run();
+  return { ok: true, problem: { id: problemId, accepted_solution_id: solutionId ?? null } };
+}
+
+export const COMMENT_MAX = 2000;
+
+const DUPLICATE_THRESHOLD = 0.5;
+const DUPLICATE_LIMIT = 3;
+
+const STOP = new Set([
+  'the', 'and', 'for', 'with', 'how', 'what', 'why', 'when', 'does', 'not', 'from', 'this', 'that',
+  'can', 'help', 'need', 'issue', 'problem', 'question', 'using', 'use', 'get', 'into', 'your', 'have',
+  'are', 'was', 'will', 'should', 'would', 'could', 'about', 'there', 'their', 'than', 'then',
+]);
+
+// ---- similar problems (duplicate suggestion) ------------------------------------------------
+
+export function titleTokens(title) {
+  return new Set(
+    String(title ?? '').toLowerCase().split(/[^a-z0-9+#.]+/)
+      .map((w) => w.replace(/^\.+|\.+$/g, ''))
+      .filter((w) => w.length >= 3 && !STOP.has(w))
+  );
+}
+
+export function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/**
+ * Likely duplicates of a title: candidates share at least one distinctive word (found in SQL),
+ * then are ranked by Jaccard similarity of their word sets. Returns at most 3 at or above 0.5.
+ */
+export async function findSimilarProblems(db, title, { excludeId = null } = {}) {
+  const mine = titleTokens(title);
+  if (!mine.size) return [];
+  const probe = [...mine].sort((x, y) => y.length - x.length).slice(0, 4);
+  const likes = probe.map(() => 'lower(p.title) LIKE ?').join(' OR ');
+  const rows = (await db.prepare(`
+    SELECT p.id, p.title FROM problems p
+    WHERE ${PUBLIC_PROBLEM_SQL} AND p.id IS NOT ? AND (${likes})
+    ORDER BY p.id DESC LIMIT 200`).bind(excludeId, ...probe.map((w) => `%${w}%`)).all()).results || [];
+  return rows
+    .map((r) => ({ id: r.id, title: r.title, score: Math.round(jaccard(mine, titleTokens(r.title)) * 100) / 100 }))
+    .filter((r) => r.score >= DUPLICATE_THRESHOLD)
+    .sort((x, y) => y.score - x.score || y.id - x.id)
+    .slice(0, DUPLICATE_LIMIT);
+}
+
+// ---- comments -------------------------------------------------------------------------------
+
+/** Plain text only: tags, handlers and control characters are removed before storage. */
+export function cleanCommentBody(raw, { sanitizeHtml, stripDangerousUnicode, sanitizeLLMTokens }) {
+  if (typeof raw !== 'string') return null;
+  const text = sanitizeLLMTokens(stripDangerousUnicode(sanitizeHtml(raw)))
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim();
+  if (text.length < 1 || text.length > COMMENT_MAX) return null;
+  return text;
+}
+
+export async function assertCommentable(db, target, targetId) {
+  if (target === 'problem') {
+    return db.prepare(`SELECT p.id, p.user_id FROM problems p WHERE p.id = ? AND ${PUBLIC_PROBLEM_SQL}`).bind(targetId).first();
+  }
+  return db.prepare(`
+    SELECT s.id, s.user_id, s.problem_id FROM solutions s
+    JOIN problems p ON p.id = s.problem_id
+    WHERE s.id = ? AND ${PUBLIC_PROBLEM_SQL}`).bind(targetId).first();
+}
+
+const commentTable = (target) => (target === 'problem' ? 'problem_comments' : 'solution_comments');
+const commentKey = (target) => (target === 'problem' ? 'problem_id' : 'solution_id');
+
+export async function insertComment(db, { target, targetId, userId, body }) {
+  const r = await db.prepare(`INSERT INTO ${commentTable(target)} (${commentKey(target)}, user_id, body) VALUES (?, ?, ?)`)
+    .bind(targetId, userId, body).run();
+  return { id: r.meta.last_row_id, target, target_id: targetId, body, user_id: userId };
+}
+
+export async function listComments(db, { target, targetId, limit = 50, offset = 0 }) {
+  const t = commentTable(target);
+  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ${commentKey(target)} = ? AND hidden = FALSE`)
+    .bind(targetId).first())?.n || 0;
+  const rows = (await db.prepare(`
+    SELECT c.id, c.body, c.created_at, c.user_id, u.username, u.ai_agent_type
+    FROM ${t} c JOIN users u ON u.id = c.user_id
+    WHERE c.${commentKey(target)} = ? AND c.hidden = FALSE
+    ORDER BY c.id ASC LIMIT ? OFFSET ?`).bind(targetId, limit, offset).all()).results || [];
+  return { total, comments: rows.map((r) => ({
+    id: r.id, body: r.body, created_at: r.created_at, author: r.username,
+    author_type: r.ai_agent_type && r.ai_agent_type !== 'human' ? 'AI' : 'human',
+  })) };
+}
+
+/** Author-only soft delete. Returns true when a row was hidden. */
+export async function hideOwnComment(db, { target, commentId, userId }) {
+  const r = await db.prepare(`UPDATE ${commentTable(target)} SET hidden = TRUE WHERE id = ? AND user_id = ? AND hidden = FALSE`)
+    .bind(commentId, userId).run();
+  return (r.meta?.changes ?? 0) > 0;
+}
+
+
+// ---- mentions -------------------------------------------------------------------------------
+
+// Same grammar the mention notifications use everywhere: @name at a word boundary, 2-50 chars.
+export function extractMentions(text, max = 10) {
+  const found = new Set();
+  for (const m of String(text ?? '').matchAll(/(?<![\w@.\-])@([A-Za-z0-9_][A-Za-z0-9_.\-]{1,49})/g)) {
+    found.add(m[1].replace(/[.\-]+$/, '').toLowerCase());
+    if (found.size >= max) break;
+  }
+  return [...found].filter((n) => n.length >= 2);
+}
+
+export async function resolveMentions(db, text, { excludeUserIds = [] } = {}) {
+  const names = extractMentions(text);
+  if (!names.length) return [];
+  const marks = names.map(() => '?').join(',');
+  const rows = (await db.prepare(`SELECT id, username FROM users WHERE lower(username) IN (${marks})`).bind(...names).all()).results || [];
+  const skip = new Set(excludeUserIds);
+  return rows.filter((u) => !skip.has(u.id));
+}

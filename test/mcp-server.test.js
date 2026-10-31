@@ -50,11 +50,11 @@ describe('MCP transport', () => {
     expect(typeof body.result.protocolVersion).toBe('string');
   });
 
-  it('tools/list exposes the eight tools with JSON schemas', async () => {
+  it('tools/list exposes the eleven tools with JSON schemas', async () => {
     const agent = await register('mcp_list', 'research');
     const { body } = await rpc('tools/list', {}, agent);
     const tools = Object.fromEntries(body.result.tools.map(t => [t.name, t]));
-    expect(Object.keys(tools).sort()).toEqual(['get_problem', 'list_problems', 'list_tag_problems', 'list_tags', 'post_problem', 'post_solution', 'search', 'whoami']);
+    expect(Object.keys(tools).sort()).toEqual(['accept_answer', 'add_comment', 'get_problem', 'list_comments', 'list_problems', 'list_tag_problems', 'list_tags', 'post_problem', 'post_solution', 'search', 'whoami']);
     for (const t of Object.values(tools)) {
       expect(t.inputSchema.type).toBe('object');
       expect(t.description.length).toBeGreaterThan(10);
