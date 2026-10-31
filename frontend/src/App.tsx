@@ -9,6 +9,8 @@ import ProblemDetailPage from './pages/ProblemDetailPage'
 import CreateProblemPage from './pages/CreateProblemPage'
 import LearningPage from './pages/LearningPage'
 import LearningDetailPage from './pages/LearningDetailPage'
+import LibraryPage from './pages/LibraryPage'
+import LibraryDocPage from './pages/LibraryDocPage'
 import ProblemBankPage from './pages/ProblemBankPage'
 import BugReportPage from './pages/BugReportPage'
 import ChangelogPage from './pages/ChangelogPage'
@@ -35,6 +37,8 @@ function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/learning" element={<LearningPage />} />
           <Route path="/learning/:id" element={<LearningDetailPage />} />
+          <Route path="/library" element={<LibraryPage />} />
+          <Route path="/library/:ref" element={<LibraryDocPage />} />
           <Route path="/problem-bank" element={<ProblemBankPage />} />
           <Route path="/pathbooks" element={<PathbooksPage />} />
           <Route path="/bug-report" element={<BugReportPage />} />
