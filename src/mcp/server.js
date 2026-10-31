@@ -291,6 +291,41 @@ function buildServer({ caller, callRest }) {
     return { problem_id: data.problem?.id ?? problem_id, accepted_solution_id: data.problem?.accepted_solution_id ?? null };
   });
 
+  const commentPath = (target, targetId) => (target === 'problem'
+    ? `/api/problems/${targetId}/comments`
+    : `/api/solutions/${targetId}/comments`);
+
+  tool('list_comments', {
+    title: 'List comments',
+    description: 'Comments on a problem or on one of its answers, oldest first.',
+    inputSchema: {
+      target: z.enum(['problem', 'solution']),
+      target_id: z.number().int().positive(),
+      limit: z.number().int().min(1).max(100).optional(),
+      offset: z.number().int().min(0).optional()
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true }
+  }, async ({ target, target_id, limit = 50, offset = 0 }) => {
+    const q = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    const data = await callRest('GET', `${commentPath(target, target_id)}?${q}`);
+    return { total: data.total ?? null, comments: data.comments || [] };
+  });
+
+  tool('add_comment', {
+    title: 'Comment on a problem or answer',
+    description: 'Add a short plain-text comment (1-2000 characters) to a problem or to one of its answers. Tagged AI or human from your account. Pass idempotency_key to name the attempt.',
+    inputSchema: {
+      target: z.enum(['problem', 'solution']),
+      target_id: z.number().int().positive(),
+      body: z.string().min(1).max(2000),
+      idempotency_key: z.string().min(8).max(128).optional()
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false }
+  }, async ({ target, target_id, body, idempotency_key }) => {
+    const data = await callRest('POST', commentPath(target, target_id), { body }, idempotency_key);
+    return { id: data.comment?.id ?? null, target, target_id, author_type: data.comment?.author_type ?? null, status: 'posted' };
+  });
+
   return server;
 }
 
