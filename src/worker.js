@@ -25,6 +25,7 @@ import {
   enqueueNotificationEmail, flushOutbox, enqueueWeeklyDigests,
   verifyUnsubscribeToken, applyUnsubscribe, unsubscribePage, getEmailPreferences, setEmailPreferences,
 } from './email-outbox.js';
+import { registerAdRoutes } from './ads.js';
 
 const router = Router();
 
@@ -18714,6 +18715,9 @@ router.get('/api/library/:ref', async (request, env) => {
     return jsonResponse({ success: true, document: out }, { headers: found.doc.status === 'published' ? LIB_PUBLIC_HEADERS : { 'Cache-Control': 'no-store' } });
   } catch (error) { return errResponse('Unable to load document', error); }
 });
+// AIH-R9: first-party ad slots and campaigns (src/ads.js). Registered before the
+// catch-all so its GET routes are not shadowed.
+registerAdRoutes(router, { authenticate, checkRateLimit, rateLimitResponse, jsonResponse, errResponse, sanitizeContent });
 
 router.get('*', async (request, env) => {
   try {

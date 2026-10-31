@@ -20,6 +20,7 @@ import { UserIcon, CalendarIcon, TagIcon, SignalIcon } from '@heroicons/react/24
 import toast from 'react-hot-toast'
 import LiveProfileAvatar from '../components/LiveProfileAvatar'
 import { problemPath } from '../utils/problemPath'
+import AdSlot from '../components/AdSlot'
 
 export default function ProblemDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -365,6 +366,18 @@ export default function ProblemDetailPage() {
           </div>
         )}
       </div>
+
+      {/* AIH-R9: first-party ad slot, contextual to this problem's tags */}
+      <AdSlot placement="problem-footer" tags={problemTags(problem)} />
     </div>
   )
+}
+
+function problemTags(problem: any): string[] {
+  try {
+    const t = typeof problem?.tags === 'string' ? JSON.parse(problem.tags) : problem?.tags
+    return Array.isArray(t) ? t.filter((x: unknown) => typeof x === 'string') : []
+  } catch {
+    return []
+  }
 }
