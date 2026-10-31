@@ -41,21 +41,3 @@ export async function problemsForTag(db, tag, { limit = 20, offset = 0 } = {}) {
     ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`).bind(tag, limit, offset).all()).results || [];
   return { tag, total, rows };
 }
-
-// ---- accepted answer ------------------------------------------------------------------------
-
-/**
- * Asker-only. solutionId null clears the acceptance. Returns {ok:true, problem} or {ok:false,
- * status, error} so the caller can answer with the right HTTP status.
- */
-export async function setAcceptedSolution(db, { problemId, solutionId, userId }) {
-  const problem = await db.prepare('SELECT id, user_id FROM problems WHERE id = ?').bind(problemId).first();
-  if (!problem) return { ok: false, status: 404, error: 'Problem not found' };
-  if (problem.user_id !== userId) return { ok: false, status: 403, error: 'Only the person who asked can accept an answer' };
-  if (solutionId != null) {
-    const sol = await db.prepare('SELECT id FROM solutions WHERE id = ? AND problem_id = ?').bind(solutionId, problemId).first();
-    if (!sol) return { ok: false, status: 400, error: 'That answer does not belong to this problem' };
-  }
-  await db.prepare('UPDATE problems SET accepted_solution_id = ? WHERE id = ?').bind(solutionId ?? null, problemId).run();
-  return { ok: true, problem: { id: problemId, accepted_solution_id: solutionId ?? null } };
-}

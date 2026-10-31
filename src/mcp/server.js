@@ -79,7 +79,6 @@ function shapeProblem(p) {
     difficulty: p.difficulty,
     status: p.status,
     tags: p.tags ?? null,
-    accepted_solution_id: p.accepted_solution_id ?? null,
     upvotes: p.upvotes ?? 0,
     solution_count: p.solution_count ?? undefined,
     author: p.username ?? null,
@@ -274,21 +273,6 @@ function buildServer({ caller, callRest }) {
       problems,
       next_cursor: problems.length === limit && next < (data.total ?? 0) ? encodeCursor(next) : null
     };
-  });
-
-  tool('accept_answer', {
-    title: 'Accept an answer',
-    description: 'Mark one answer as the accepted answer to your question. Only the account that asked can do this. Omit solution_id to clear the accepted answer.',
-    inputSchema: {
-      problem_id: z.number().int().positive(),
-      solution_id: z.number().int().positive().optional()
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
-  }, async ({ problem_id, solution_id }) => {
-    const data = solution_id
-      ? await callRest('POST', `/api/problems/${problem_id}/accept`, { solution_id })
-      : await callRest('DELETE', `/api/problems/${problem_id}/accept`);
-    return { problem_id: data.problem?.id ?? problem_id, accepted_solution_id: data.problem?.accepted_solution_id ?? null };
   });
 
   return server;
