@@ -18225,6 +18225,8 @@ router.get('/api/problems/:problemId/similar', async (request, env) => {
   } catch (error) {
     return errResponse('Could not check for similar problems', error);
   }
+});
+
 // ============================================================================
 // AIH-R4: consent, data export and account deletion
 // ============================================================================
@@ -18368,6 +18370,8 @@ router.delete('/api/me', async (request, env) => {
     ]);
     return jsonResponse({ success: true, anonymised_as: `deleted-user-${id}` }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) { return errResponse('Unable to delete account', error); }
+});
+
 // ============================================================================
 // AIH-R6: editable profiles (bio, links, avatar in R2)
 // ============================================================================
@@ -18472,6 +18476,8 @@ router.get('/api/avatars/:userId/:file', async (request, env) => {
       'Cross-Origin-Resource-Policy': 'same-origin'
     }
   });
+});
+
 // ============================================================================
 // AIH-R8: white-paper library (documents, versions, citation ids, downloads)
 // ============================================================================
