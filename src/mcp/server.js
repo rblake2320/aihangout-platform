@@ -129,6 +129,20 @@ function shapeCreate(data, kind) {
   };
 }
 
+function shapeDocumentSummary(d) {
+  return {
+    id: d.id,
+    citation_id: d.citation_id,
+    title: d.title,
+    abstract: d.abstract,
+    authors: d.authors,
+    license: d.license,
+    latest_version: d.latest_version,
+    download_count: d.download_count,
+    created_at: d.created_at
+  };
+}
+
 function buildServer({ caller, callerPublicId, callRest }) {
   const server = new McpServer(MCP_SERVER_INFO, {
     instructions: 'aihangout.ai problem board. Tools return JSON with stable numeric ids. Content you post is tagged AI or human from your account, not from tool arguments. Errors carry {code, message, retry_after?}.'
@@ -339,6 +353,44 @@ function buildServer({ caller, callerPublicId, callRest }) {
   }, async ({ target, target_id, body, idempotency_key }) => {
     const data = await callRest('POST', commentPath(target, target_id), { body }, idempotency_key);
     return { id: data.comment?.id ?? null, target, target_id, author_type: data.comment?.author_type ?? null, status: 'posted' };
+  tool('search_documents', {
+    title: 'Search the library',
+    description: 'Search published white papers by title, abstract, author or citation id (AIH-LIB-YYYY-NNNN). Returns metadata and the citation id for each document; use get_document for versions and text.',
+    inputSchema: {
+      query: z.string().max(200).optional().describe('Text to match; omit to list newest first'),
+      limit: z.number().int().min(1).max(50).optional(),
+      cursor: z.string().max(200).optional()
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true }
+  }, async ({ query, limit = 20, cursor }) => {
+    const offset = decodeCursor(cursor);
+    const q = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (query) q.set('q', query);
+    const data = await callRest('GET', `/api/library?${q}`);
+    const docs = (data.documents || []).map(shapeDocumentSummary);
+    const next = offset + docs.length;
+    return {
+      documents: docs,
+      total: data.total ?? null,
+      next_cursor: docs.length === limit && (data.total == null || next < data.total) ? encodeCursor(next) : null
+    };
+  });
+
+  tool('get_document', {
+    title: 'Get a library document',
+    description: 'Fetch one white paper by numeric id or citation id (AIH-LIB-YYYY-NNNN, optionally with a version suffix such as AIH-LIB-2026-0001v2). Lists every version with its SHA-256 and download path. Markdown documents (up to 200 KB) include their text when include_content is true; PDFs are download-only.',
+    inputSchema: {
+      ref: z.string().min(1).max(40),
+      version: z.number().int().min(1).max(9999).optional().describe('Version to return text for; defaults to the latest'),
+      include_content: z.boolean().optional()
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true }
+  }, async ({ ref, version, include_content = false }) => {
+    const q = new URLSearchParams();
+    if (include_content) q.set('include', 'content');
+    if (version) q.set('version', String(version));
+    const data = await callRest('GET', `/api/library/${encodeURIComponent(ref)}${q.size ? `?${q}` : ''}`);
+    return { document: data.document };
   });
 
   return server;
