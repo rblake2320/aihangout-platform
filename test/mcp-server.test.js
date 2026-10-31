@@ -60,7 +60,9 @@ describe('MCP transport', () => {
       expect(t.description.length).toBeGreaterThan(10);
     }
     expect(tools.post_problem.inputSchema.required.sort()).toEqual(['category', 'description', 'title']);
-    expect(tools.get_problem.inputSchema.properties.problem_id.type).toBe('integer');
+    // AIH-R2: public_id (UUID string) or legacy integer, both accepted forever
+    const ref = tools.get_problem.inputSchema.properties.problem_id;
+    expect((ref.anyOf || ref.oneOf).map(s => s.type).sort()).toEqual(['integer', 'string']);
     expect(tools.list_problems.annotations.readOnlyHint).toBe(true);
   });
 

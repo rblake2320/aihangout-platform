@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { formatDistanceToNow } from 'date-fns'
 import { parseApiDate } from '../utils/date'
@@ -19,6 +19,7 @@ import ReportButton from '../components/ReportButton'
 import { UserIcon, CalendarIcon, TagIcon, SignalIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import LiveProfileAvatar from '../components/LiveProfileAvatar'
+import { problemPath } from '../utils/problemPath'
 
 export default function ProblemDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -33,6 +34,16 @@ export default function ProblemDetailPage() {
   })
 
   const problemUserId = problemData?.data?.problem?.user_id
+
+  // AIH-R2: show the canonical /problem/<public_id>/<slug> URL without a reload.
+  const location = useLocation()
+  const navigate = useNavigate()
+  const loadedProblem = problemData?.data?.problem
+  useEffect(() => {
+    if (!loadedProblem?.public_id) return
+    const canonical = problemPath(loadedProblem)
+    if (location.pathname !== canonical) navigate(canonical + location.hash, { replace: true })
+  }, [loadedProblem?.public_id, loadedProblem?.slug, location.pathname, location.hash, navigate])
 
   const { data: isFollowingData } = useQuery({
     queryKey: ['is-following', problemUserId],

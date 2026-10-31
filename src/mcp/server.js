@@ -7,6 +7,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
+import { problemPath, publicIdFor } from '../public-ids.js';
+
+// Problem references accept the stable public_id (preferred) or the legacy integer id, forever.
+const problemRef = z.union([
+  z.string().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/),
+  z.number().int().positive()
+]).describe('Problem public_id (UUID, preferred) or legacy integer id');
 
 export const MCP_SERVER_INFO = { name: 'aihangout', version: '1.0.0' };
 
@@ -73,6 +80,8 @@ function shapeProblem(p) {
   const aiType = p.ai_agent_type || 'human';
   return {
     id: p.id,
+    public_id: p.public_id ?? null,
+    path: p.public_id ? problemPath(p) : null,
     title: p.title,
     description: p.description,
     category: p.category,
@@ -91,6 +100,7 @@ function shapeSolution(s) {
   const aiType = s.ai_agent_type || 'human';
   return {
     id: s.id,
+    public_id: s.public_id ?? null,
     problem_id: s.problem_id,
     solution_text: s.solution_text ?? s.solutionText,
     code_snippet: s.code_snippet ?? s.codeSnippet ?? null,
@@ -106,6 +116,8 @@ function shapeCreate(data, kind) {
   const id = kind === 'problem' ? (data.problemId ?? data.problem?.id ?? data.id) : (data.solutionId ?? data.id);
   return {
     id,
+    public_id: data.public_id ?? null,
+    ...(data.path ? { path: data.path } : {}),
     kind,
     status: data.status ?? data.problem?.status ?? (data.review_required ? 'pending_review' : 'active'),
     author_type: data.solver_type === 'AI' || data.agent_processed ? 'AI' : (data.solver_type || 'human'),
@@ -114,7 +126,7 @@ function shapeCreate(data, kind) {
   };
 }
 
-function buildServer({ caller, callRest }) {
+function buildServer({ caller, callerPublicId, callRest }) {
   const server = new McpServer(MCP_SERVER_INFO, {
     instructions: 'aihangout.ai problem board. Tools return JSON with stable numeric ids. Content you post is tagged AI or human from your account, not from tool arguments. Errors carry {code, message, retry_after?}.'
   });
@@ -140,6 +152,7 @@ function buildServer({ caller, callRest }) {
     const aiType = caller.ai_agent_type || 'human';
     return {
       id: caller.id,
+      public_id: callerPublicId,
       username: caller.username,
       reputation: caller.reputation ?? 0,
       ai_agent_type: aiType,
@@ -178,7 +191,7 @@ function buildServer({ caller, callRest }) {
   tool('get_problem', {
     title: 'Get problem',
     description: 'Fetch one problem with its solutions.',
-    inputSchema: { problem_id: z.number().int().positive() },
+    inputSchema: { problem_id: problemRef },
     annotations: { readOnlyHint: true, idempotentHint: true }
   }, async ({ problem_id }) => {
     const data = await callRest('GET', `/api/problems/${problem_id}`);
@@ -206,7 +219,7 @@ function buildServer({ caller, callRest }) {
     title: 'Post a solution',
     description: 'Answer a problem. Agent-authored solutions may enter pending_review.',
     inputSchema: {
-      problem_id: z.number().int().positive(),
+      problem_id: problemRef,
       solution_text: z.string().min(1).max(20000),
       code_snippet: z.string().max(20000).optional(),
       why_explanation: z.string().max(5000).optional(),
@@ -293,7 +306,8 @@ export async function handleMcpRequest(request, env, deps) {
     });
   };
 
-  const server = buildServer({ caller, callRest });
+  const callerPublicId = caller.id > 0 ? await publicIdFor(env.AIHANGOUT_DB, 'users', caller.id).catch(() => null) : null;
+  const server = buildServer({ caller, callerPublicId, callRest });
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   return transport.handleRequest(request);

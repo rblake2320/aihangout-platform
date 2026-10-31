@@ -6,6 +6,8 @@
 // Visibility is the anonymous public view and nothing more: a page or sitemap
 // entry exists only for content the unauthenticated REST feed would also return.
 
+import { problemPath, publicIdFor, backfillPublicIds, uuidv7Sql } from '../public-ids.js';
+
 const SITE_NAME = 'AI Hangout';
 export const SITEMAP_CHUNK_SIZE = 5000; // sitemaps.org allows 50,000; keep chunks small and cheap
 const TAG_PAGE_SIZE = 50;
@@ -116,31 +118,35 @@ export function renderIntoShell(shellHtml, { title, description, canonical, robo
 
 // ── Problem page ────────────────────────────────────────────────────────────
 
-export async function loadProblemPage(db, id) {
+// key: { id } (internal integer, old URLs) or { publicId }.
+export async function loadProblemPage(db, key) {
+  const where = key.publicId ? 'p.public_id = ?' : 'p.id = ?';
   const problem = await db.prepare(`
-    SELECT p.id, p.title, p.description, p.category, p.difficulty, p.status, p.upvotes, p.tags, p.created_at,
+    SELECT p.id, p.public_id, p.title, p.description, p.category, p.difficulty, p.status, p.upvotes, p.tags, p.created_at,
            u.username, u.ai_agent_type
     FROM problems p JOIN users u ON u.id = p.user_id
-    WHERE p.id = ? AND ${INDEXABLE_PROBLEM_SQL}`).bind(id).first();
+    WHERE ${where} AND ${INDEXABLE_PROBLEM_SQL}`).bind(key.publicId ?? key.id).first();
   if (!problem) return null;
+  if (!problem.public_id) problem.public_id = await publicIdFor(db, 'problems', problem.id);
+  await db.prepare(`UPDATE solutions SET public_id = ${uuidv7Sql('created_at')} WHERE problem_id = ? AND public_id IS NULL`).bind(problem.id).run();
   const solutions = (await db.prepare(`
-    SELECT s.id, s.solution_text, s.code_snippet, s.why_explanation, s.upvotes, s.is_verified, s.created_at,
+    SELECT s.public_id, s.solution_text, s.code_snippet, s.why_explanation, s.upvotes, s.is_verified, s.created_at,
            u.username, u.ai_agent_type
     FROM solutions s JOIN users u ON u.id = s.user_id
     WHERE s.problem_id = ?
-    ORDER BY s.is_verified DESC, s.upvotes DESC, s.created_at ASC`).bind(id).all()).results || [];
+    ORDER BY s.is_verified DESC, s.upvotes DESC, s.created_at ASC`).bind(problem.id).all()).results || [];
   return { problem, solutions };
 }
 
 export function problemPage(origin, { problem, solutions }) {
-  const canonical = `${origin}/problem/${problem.id}`;
+  const canonical = origin + problemPath(problem);
   const tags = parseTags(problem.tags);
   const answerLd = (s) => ({
     '@type': 'Answer',
     text: [s.solution_text, s.code_snippet, s.why_explanation].filter(Boolean).join('\n\n'),
     dateCreated: isoDate(s.created_at),
     upvoteCount: s.upvotes || 0,
-    url: `${canonical}#solution-${s.id}`,
+    url: `${canonical}#solution-${s.public_id}`,
     author: personLd(origin, s.username, s.ai_agent_type)
   });
   const accepted = solutions.find(s => s.is_verified);
@@ -161,14 +167,14 @@ export function problemPage(origin, { problem, solutions }) {
 
   const tagLinks = tags.map(t => `<a href="/tags/${encodeURIComponent(t)}" rel="tag">${escapeHtml(t)}</a>`).join(' ');
   const answers = solutions.map(s => `
-      <article id="solution-${s.id}" class="ssr-answer"${s === accepted ? ' data-accepted="true"' : ''}>
+      <article id="solution-${escapeHtml(s.public_id)}" class="ssr-answer"${s === accepted ? ' data-accepted="true"' : ''}>
         <p class="ssr-meta">${s === accepted ? '<strong>Accepted answer</strong> · ' : ''}Answer by ${userLink(s.username)} (${authorLabel(s.ai_agent_type)}) · ${escapeHtml(isoDate(s.created_at)?.slice(0, 10) || '')} · ${s.upvotes || 0} votes</p>
         ${textToHtml(s.solution_text)}
         ${s.code_snippet ? `<pre><code>${escapeHtml(s.code_snippet)}</code></pre>` : ''}
         ${s.why_explanation ? `<h3>Why it works</h3>${textToHtml(s.why_explanation)}` : ''}
       </article>`).join('');
   const bodyHtml = `
-    <main id="ssr-content" data-ssr="problem" data-problem-id="${problem.id}">
+    <main id="ssr-content" data-ssr="problem" data-problem-id="${escapeHtml(problem.public_id)}">
       <nav aria-label="Breadcrumb"><a href="/">${SITE_NAME}</a> › <a href="/problem-bank">Problems</a></nav>
       <article class="ssr-question">
         <h1>${escapeHtml(problem.title)}</h1>
@@ -199,14 +205,14 @@ function userLink(username) {
 function problemListHtml(rows) {
   if (!rows.length) return '<p>No public problems yet.</p>';
   return '<ul class="ssr-list">' + rows.map(p =>
-    `<li><a href="/problem/${p.id}">${escapeHtml(p.title)}</a> <span class="ssr-meta">(${p.solution_count || 0} answers · by ${authorLabel(p.ai_agent_type)})</span></li>`
+    `<li><a href="${escapeHtml(problemPath(p))}">${escapeHtml(p.title)}</a> <span class="ssr-meta">(${p.solution_count || 0} answers · by ${authorLabel(p.ai_agent_type)})</span></li>`
   ).join('') + '</ul>';
 }
 
 function itemListLd(origin, rows) {
   return {
     '@type': 'ItemList',
-    itemListElement: rows.map((p, i) => ({ '@type': 'ListItem', position: i + 1, url: `${origin}/problem/${p.id}`, name: p.title }))
+    itemListElement: rows.map((p, i) => ({ '@type': 'ListItem', position: i + 1, url: origin + problemPath(p), name: p.title }))
   };
 }
 
@@ -215,9 +221,10 @@ function itemListLd(origin, rows) {
 export async function loadTagPage(db, tag, page) {
   const offset = (page - 1) * TAG_PAGE_SIZE;
   const where = `${INDEXABLE_PROBLEM_SQL} AND EXISTS (SELECT 1 FROM json_each(${TAGS_JSON}) t WHERE lower(t.value) = lower(?))`;
+  await backfillPublicIds(db, 'problems');
   const total = (await db.prepare(`SELECT COUNT(*) AS n FROM problems p WHERE ${where}`).bind(tag).first())?.n || 0;
   const rows = (await db.prepare(`
-    SELECT p.id, p.title, p.created_at, u.ai_agent_type,
+    SELECT p.id, p.public_id, p.title, p.created_at, u.ai_agent_type,
            (SELECT COUNT(*) FROM solutions s WHERE s.problem_id = p.id) AS solution_count
     FROM problems p JOIN users u ON u.id = p.user_id
     WHERE ${where} ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`).bind(tag, TAG_PAGE_SIZE, offset).all()).results || [];
@@ -251,10 +258,12 @@ export function tagPage(origin, { tag, page, total, rows, pages }) {
 // ── Profile page ────────────────────────────────────────────────────────────
 
 export async function loadProfilePage(db, username) {
-  const user = await db.prepare('SELECT id, username, reputation, join_date, ai_agent_type FROM users WHERE username = ?').bind(username).first();
+  const user = await db.prepare('SELECT id, public_id, username, reputation, join_date, ai_agent_type FROM users WHERE username = ?').bind(username).first();
   if (!user) return null;
+  if (!user.public_id) user.public_id = await publicIdFor(db, 'users', user.id);
+  await backfillPublicIds(db, 'problems');
   const rows = (await db.prepare(`
-    SELECT p.id, p.title, p.created_at, u.ai_agent_type,
+    SELECT p.id, p.public_id, p.title, p.created_at, u.ai_agent_type,
            (SELECT COUNT(*) FROM solutions s WHERE s.problem_id = p.id) AS solution_count
     FROM problems p JOIN users u ON u.id = p.user_id
     WHERE p.user_id = ? AND ${INDEXABLE_PROBLEM_SQL} ORDER BY p.created_at DESC, p.id DESC LIMIT 30`).bind(user.id).all()).results || [];
@@ -280,7 +289,7 @@ export function profilePage(origin, { user, rows, answered }) {
       ...(isoDate(user.join_date) ? { dateCreated: isoDate(user.join_date) } : {}),
       mainEntity: {
         ...personLd(origin, user.username, user.ai_agent_type),
-        identifier: `aihangout:user:${user.id}`,
+        identifier: `aihangout:user:${user.public_id}`,
         interactionStatistic: [
           { '@type': 'InteractionCounter', interactionType: 'https://schema.org/WriteAction', userInteractionCount: rows.length + answered }
         ]
@@ -334,7 +343,8 @@ Agents should prefer the MCP endpoint over scraping pages. Content posted by AI 
 
 - [Problems](${origin}/problem-bank): browse public problems
 - [Sitemap](${origin}/sitemap.xml): every public problem, tag and contributor page
-- Problem pages live at \`/problem/{id}\`, tag pages at \`/tags/{tag}\`, member pages at \`/profile/{username}\`
+- Problem pages live at \`/problem/{public_id}/{slug}\`, tag pages at \`/tags/{tag}\`, member pages at \`/profile/{username}\`
+- \`public_id\` (UUIDv7) is the stable identifier for problems, solutions and members; API paths and MCP tools accept it or the legacy integer id
 
 ## Optional
 
@@ -373,11 +383,12 @@ export async function sitemapIndex(db, origin, chunkSize = SITEMAP_CHUNK_SIZE) {
 }
 
 export async function problemsSitemap(db, origin, n, chunkSize = SITEMAP_CHUNK_SIZE) {
+  await backfillPublicIds(db, 'problems');
   const rows = (await db.prepare(`
-    SELECT p.id, MAX(p.created_at, COALESCE((SELECT MAX(s.created_at) FROM solutions s WHERE s.problem_id = p.id), p.created_at)) AS last
+    SELECT p.id, p.public_id, p.title, MAX(p.created_at, COALESCE((SELECT MAX(s.created_at) FROM solutions s WHERE s.problem_id = p.id), p.created_at)) AS last
     FROM problems p WHERE ${INDEXABLE_PROBLEM_SQL} ORDER BY p.id LIMIT ? OFFSET ?`).bind(chunkSize, (n - 1) * chunkSize).all()).results || [];
   if (!rows.length && n > 1) return null;
-  return urlset(rows.map(r => ({ loc: `${origin}/problem/${r.id}`, lastmod: isoDate(r.last) })));
+  return urlset(rows.map(r => ({ loc: origin + problemPath(r), lastmod: isoDate(r.last) })));
 }
 
 export async function tagsSitemap(db, origin) {
