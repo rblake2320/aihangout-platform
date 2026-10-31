@@ -9,6 +9,10 @@ binding = "AIHANGOUT_DB"
 database_name = "aihangout-dev"
 database_id = "local"
 
+[[env.development.kv_namespaces]]
+binding = "AIHANGOUT_KV"
+id = "local"
+
 [env.development.vars]
 ENVIRONMENT = "development"
 API_VERSION = "v1"

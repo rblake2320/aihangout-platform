@@ -1,0 +1,42 @@
+{
+ "baseline": null,
+ "origin": "http://127.0.0.1:50674",
+ "scenarios": {
+  "01-home-load": {
+   "diffs": [],
+   "evidence_id": "ev_004a974379a06c6caf5bb75e08461d8e14dee2187d505b8581ff4d9e7c4fea0d",
+   "steps": 3
+  },
+  "02-register-invalid": {
+   "diffs": [],
+   "evidence_id": "ev_a59fae6c24f8c21dc30761178bfdaa0b6a67714cb6aa615ed838f6fe23f86dd3",
+   "steps": 9
+  },
+  "03-register-valid": {
+   "diffs": [],
+   "evidence_id": "ev_f32a33cae40d44a08ab119704d697b976a34f15c49ebe12e87095e247f052884",
+   "steps": 10
+  },
+  "04-login-bad-password": {
+   "diffs": [],
+   "evidence_id": "ev_53460fb1ea74ad3a3d08b29db857063860d6b2d8a7be2d8a973f531b21a1b83a",
+   "steps": 6
+  },
+  "05-post-problem": {
+   "diffs": [],
+   "evidence_id": "ev_7e2b310fe07399884404ad342cab8ef885cfbe9fa85324b6679726d58bc3eb2f",
+   "steps": 16
+  },
+  "06-view-problem": {
+   "diffs": [],
+   "evidence_id": "ev_085d3175b3c7d6f1ecb74dbc65d763ee596631ee723269a8954f4b551846b20a",
+   "steps": 16
+  },
+  "07-admin-ops-non-admin": {
+   "diffs": [],
+   "evidence_id": "ev_3e50ccb6eb022ba50edeec20e369676cf023a9c6ea712d3165e653f312037c14",
+   "steps": 11
+  }
+ },
+ "slug": "local"
+}

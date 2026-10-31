@@ -1,0 +1,194 @@
+{
+  "start_url": {
+    "url": "__ORIGIN__/register",
+    "query": []
+  },
+  "actions": [
+    {
+      "step_id": "form-ready",
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": "#username"
+      },
+      "state": "visible",
+      "timeout_ms": 30000
+    },
+    {
+      "step_id": "fill-username",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#username"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gateUsername"
+      }
+    },
+    {
+      "step_id": "fill-email",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#email"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gateEmail"
+      }
+    },
+    {
+      "step_id": "fill-password",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#password"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gatePassword"
+      }
+    },
+    {
+      "step_id": "fill-confirm",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#confirmPassword"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gatePassword"
+      }
+    },
+    {
+      "step_id": "accept-tos",
+      "action": "check",
+      "locator": {
+        "kind": "css",
+        "selector": "#acceptTos"
+      }
+    },
+    {
+      "step_id": "submit",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "button[type=submit]"
+      }
+    },
+    {
+      "step_id": "registered",
+      "action": "wait_for",
+      "locator": {
+        "kind": "role",
+        "role": "link",
+        "name": "Ask Question"
+      },
+      "state": "visible",
+      "timeout_ms": 30000
+    },
+    {
+      "step_id": "open-create",
+      "action": "click",
+      "locator": {
+        "kind": "role",
+        "role": "link",
+        "name": "Ask Question"
+      }
+    },
+    {
+      "step_id": "create-form",
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": "#title"
+      },
+      "state": "visible",
+      "timeout_ms": 30000
+    },
+    {
+      "step_id": "fill-title",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#title"
+      },
+      "value": {
+        "source": "literal",
+        "value": "Gate probe: worker returns 500 on empty payload"
+      }
+    },
+    {
+      "step_id": "pick-category",
+      "action": "select_option",
+      "locator": {
+        "kind": "css",
+        "selector": "#category"
+      },
+      "value": {
+        "source": "literal",
+        "value": "Programming"
+      }
+    },
+    {
+      "step_id": "fill-description",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#description"
+      },
+      "value": {
+        "source": "literal",
+        "value": "Gate probe description. Posting a request with an empty JSON body returns a server error instead of a validation error. Steps: send POST with {} and observe the response status and body shape."
+      }
+    },
+    {
+      "step_id": "post",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "button[type=submit]"
+      }
+    },
+    {
+      "step_id": "view-settle",
+      "action": "wait_for_timeout",
+      "duration_ms": 3000
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "url",
+      "dom",
+      "storage"
+    ],
+    "at_end": [
+      "url"
+    ],
+    "events": [
+      "network",
+      "page-errors"
+    ],
+    "network": {
+      "request_body": true,
+      "response_body": true,
+      "header_values": false
+    }
+  },
+  "secrets": [
+    {
+      "secret_id": "gateUsername",
+      "environment_variable": "GATE_USERNAME"
+    },
+    {
+      "secret_id": "gateEmail",
+      "environment_variable": "GATE_EMAIL"
+    },
+    {
+      "secret_id": "gatePassword",
+      "environment_variable": "GATE_PASSWORD"
+    }
+  ]
+}

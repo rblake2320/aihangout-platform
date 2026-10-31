@@ -1,0 +1,139 @@
+{
+  "start_url": {
+    "url": "__ORIGIN__/register",
+    "query": []
+  },
+  "actions": [
+    {
+      "step_id": "form-ready",
+      "action": "wait_for",
+      "locator": {
+        "kind": "css",
+        "selector": "#username"
+      },
+      "state": "visible",
+      "timeout_ms": 30000
+    },
+    {
+      "step_id": "fill-username",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#username"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gateUsername"
+      }
+    },
+    {
+      "step_id": "fill-email",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#email"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gateEmail"
+      }
+    },
+    {
+      "step_id": "fill-password",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#password"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gatePassword"
+      }
+    },
+    {
+      "step_id": "fill-confirm",
+      "action": "fill",
+      "locator": {
+        "kind": "css",
+        "selector": "#confirmPassword"
+      },
+      "value": {
+        "source": "secret",
+        "secret_id": "gatePassword"
+      }
+    },
+    {
+      "step_id": "accept-tos",
+      "action": "check",
+      "locator": {
+        "kind": "css",
+        "selector": "#acceptTos"
+      }
+    },
+    {
+      "step_id": "submit",
+      "action": "click",
+      "locator": {
+        "kind": "css",
+        "selector": "button[type=submit]"
+      }
+    },
+    {
+      "step_id": "registered",
+      "action": "wait_for",
+      "locator": {
+        "kind": "role",
+        "role": "link",
+        "name": "Ask Question"
+      },
+      "state": "visible",
+      "timeout_ms": 30000
+    },
+    {
+      "step_id": "open-admin",
+      "action": "goto",
+      "destination": {
+        "url": "__ORIGIN__/admin"
+      },
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "step_id": "admin-settle",
+      "action": "wait_for_timeout",
+      "duration_ms": 2500
+    }
+  ],
+  "capture": {
+    "after_each_step": [
+      "url",
+      "dom",
+      "storage"
+    ],
+    "at_end": [
+      "url"
+    ],
+    "events": [
+      "network",
+      "page-errors"
+    ],
+    "network": {
+      "request_body": true,
+      "response_body": true,
+      "header_values": false
+    }
+  },
+  "secrets": [
+    {
+      "secret_id": "gateUsername",
+      "environment_variable": "GATE_USERNAME"
+    },
+    {
+      "secret_id": "gateEmail",
+      "environment_variable": "GATE_EMAIL"
+    },
+    {
+      "secret_id": "gatePassword",
+      "environment_variable": "GATE_PASSWORD"
+    }
+  ]
+}
