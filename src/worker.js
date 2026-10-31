@@ -7,6 +7,11 @@
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { handleMcpRequest } from './mcp/server.js';
+import {
+  canonicalOrigin, renderIntoShell, robotsTxt, llmsTxt, sitemapIndex, problemsSitemap, tagsSitemap,
+  profilesSitemap, staticSitemap, loadProblemPage, problemPage, loadTagPage, tagPage, loadProfilePage,
+  profilePage, SITEMAP_CHUNK_SIZE
+} from './seo/render.js';
 
 const router = Router();
 
@@ -1988,6 +1993,11 @@ router.get('/api/problems', async (request, env, ctx) => {
     if (category) {
       whereClause += ' AND p.category = ?';
       whereParams.push(category);
+    }
+    const tagFilter = (url.searchParams.get('tag') || '').trim().slice(0, 60);
+    if (tagFilter) {
+      whereClause += " AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(p.tags) AND json_type(p.tags) = 'array' THEN p.tags ELSE '[]' END) t WHERE lower(t.value) = lower(?))";
+      whereParams.push(tagFilter);
     }
     if (search) {
       const searchTerms = String(search).trim().split(/\s+/)
@@ -17777,6 +17787,138 @@ router.put('/api/users/me/live-profile', async (request, env) => {
     }
     return jsonResponse({ success: true, profileId: body.profileId }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) { return errResponse('Unable to save live profile', error); }
+});
+
+// ── Crawler and assistant surface (AIH-R1) ────────────────────────────────
+// robots.txt, llms.txt, sitemaps and server-rendered problem/tag/profile pages.
+// Rendering lives in src/seo/render.js; these handlers only load data and wrap
+// the result in the same nonce-CSP HTML response the SPA catch-all uses.
+function spaContentSecurityPolicy(nonce) {
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' https://static.cloudflareinsights.com`,
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "img-src 'self' data: https: blob:",
+    "connect-src 'self' https://aihangout.ai https://cloudflareinsights.com wss://aihangout.ai",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'"
+  ].join('; ');
+}
+
+function spaHtmlResponse(html, { status = 200, baseHeaders, headers: extra = {} } = {}) {
+  const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+  const headers = new Headers(baseHeaders || {});
+  headers.set('Content-Type', 'text/html; charset=utf-8');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+  headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  headers.set('Content-Security-Policy', spaContentSecurityPolicy(nonce));
+  headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
+  for (const [k, v] of Object.entries(extra)) headers.set(k, v);
+  return new Response(html.replace(/<script\b/gi, `<script nonce="${nonce}"`), { status, headers });
+}
+
+// The built SPA shell, or null when no asset binding exists (tests, misconfigured env).
+async function loadSpaShell(env, origin) {
+  try {
+    const res = await env.ASSETS?.fetch(new Request(new URL('/index.html', origin)));
+    if (res && res.ok) return await res.text();
+  } catch (_) { /* fall back to the built-in minimal shell */ }
+  return null;
+}
+
+const crawlerText = (body, type, status = 200) => new Response(body, {
+  status,
+  headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff' }
+});
+
+async function renderSeoPage(request, env, load, render) {
+  const url = new URL(request.url);
+  const origin = canonicalOrigin(url);
+  const shell = await loadSpaShell(env, url.origin);
+  try {
+    const data = await load(env.AIHANGOUT_DB);
+    if (!data) {
+      // Unknown or not public: no content, not indexable. The SPA still mounts, so an
+      // owner viewing their own pending post is served by the authenticated API.
+      const html = renderIntoShell(shell, { title: 'Not found | AI Hangout', description: 'This page is not available.', robots: 'noindex', bodyHtml: '' });
+      return spaHtmlResponse(html, { status: 404, headers: { 'X-Robots-Tag': 'noindex' } });
+    }
+    return spaHtmlResponse(renderIntoShell(shell, render(origin, data)));
+  } catch (error) {
+    console.error('[SEO] render failed', url.pathname, error?.message || error);
+    const html = renderIntoShell(shell, { title: 'AI Hangout', description: 'Temporarily unavailable.', robots: 'noindex', bodyHtml: '' });
+    return spaHtmlResponse(html, { status: 503, headers: { 'Retry-After': '120', 'X-Robots-Tag': 'noindex' } });
+  }
+}
+
+function decodeParam(value) {
+  try { return decodeURIComponent(value || '').trim(); } catch (_) { return ''; }
+}
+
+router.get('/robots.txt', (request) =>
+  crawlerText(robotsTxt(canonicalOrigin(new URL(request.url))), 'text/plain; charset=utf-8'));
+
+router.get('/llms.txt', (request) =>
+  crawlerText(llmsTxt(canonicalOrigin(new URL(request.url))), 'text/plain; charset=utf-8'));
+
+router.get('/sitemap.xml', async (request, env) => {
+  try {
+    return crawlerText(await sitemapIndex(env.AIHANGOUT_DB, canonicalOrigin(new URL(request.url))), 'application/xml; charset=utf-8');
+  } catch (error) {
+    console.error('[SEO] sitemap index failed', error?.message || error);
+    return new Response('Sitemap temporarily unavailable', { status: 503, headers: { 'Retry-After': '300' } });
+  }
+});
+
+router.get('/sitemaps/:file', async (request, env) => {
+  const origin = canonicalOrigin(new URL(request.url));
+  const file = request.params.file || '';
+  const xml = 'application/xml; charset=utf-8';
+  try {
+    if (file === 'static.xml') return crawlerText(staticSitemap(origin), xml);
+    if (file === 'tags.xml') return crawlerText(await tagsSitemap(env.AIHANGOUT_DB, origin), xml);
+    const m = /^(problems|profiles)-([1-9]\d{0,5})\.xml$/.exec(file);
+    if (m) {
+      const n = Number(m[2]);
+      const body = m[1] === 'problems'
+        ? await problemsSitemap(env.AIHANGOUT_DB, origin, n, SITEMAP_CHUNK_SIZE)
+        : await profilesSitemap(env.AIHANGOUT_DB, origin, n, SITEMAP_CHUNK_SIZE);
+      if (body) return crawlerText(body, xml);
+    }
+    return new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  } catch (error) {
+    console.error('[SEO] sitemap failed', file, error?.message || error);
+    return new Response('Sitemap temporarily unavailable', { status: 503, headers: { 'Retry-After': '300' } });
+  }
+});
+
+router.get('/problem/:id', (request, env) => {
+  const id = request.params.id;
+  if (!/^[1-9]\d{0,15}$/.test(id || '')) return undefined; // not ours: fall through to the SPA
+  return renderSeoPage(request, env, (db) => loadProblemPage(db, Number(id)), problemPage);
+});
+
+router.get('/tags/:tag', (request, env) => {
+  const tag = decodeParam(request.params.tag).slice(0, 60);
+  if (!tag) return undefined;
+  const rawPage = new URL(request.url).searchParams.get('page') || '1';
+  const page = /^[1-9]\d{0,4}$/.test(rawPage) ? Number(rawPage) : 1;
+  return renderSeoPage(request, env, async (db) => {
+    const data = await loadTagPage(db, tag, page);
+    return page > 1 && data.rows.length === 0 ? null : data;
+  }, tagPage);
+});
+
+router.get('/profile/:username', (request, env) => {
+  const username = decodeParam(request.params.username);
+  if (!/^[A-Za-z0-9_.-]{1,50}$/.test(username)) return undefined;
+  return renderSeoPage(request, env, (db) => loadProfilePage(db, username), profilePage);
 });
 
 router.get('*', async (request, env) => {
