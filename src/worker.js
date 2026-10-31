@@ -18484,8 +18484,12 @@ export default {
       // Health probes and telemetry beacons are high-volume and carry no user
       // intent; logging them would bury the signal this table exists to keep.
       !url.pathname.startsWith('/api/health') && url.pathname !== '/api/events/batch';
+    // Binary uploads (avatars, multipart) are not text: decoding them wastes CPU and would write
+    // garbage into the audit payload. They are still logged, with a null payload.
+    const uploadType = (request.headers.get('Content-Type') || '').toLowerCase();
+    const isBinaryUpload = uploadType.startsWith('multipart/form-data') || uploadType.startsWith('image/');
     let capturedBody = null;
-    if (shouldLogActivity) {
+    if (shouldLogActivity && !isBinaryUpload) {
       try {
         capturedBody = await request.clone().text();
       } catch {

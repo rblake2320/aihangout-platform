@@ -178,3 +178,20 @@ describe('avatar upload', () => {
     }
   });
 });
+
+describe('audit log and binary uploads', () => {
+  it('logs the avatar upload without decoding the image bytes into the audit payload', async () => {
+    const u = await register('av_audit');
+    expect((await upload(u.token, 'image/png', PNG)).status).toBe(200);
+    // the audit write runs in ctx.waitUntil, so poll briefly for it
+    let row = null;
+    for (let i = 0; i < 40 && !row; i++) {
+      row = await env.AIHANGOUT_DB.prepare(
+        "SELECT payload, payload_bytes FROM activity_log WHERE path = '/api/users/me/avatar' AND method = 'POST' AND user_id = ? ORDER BY id DESC LIMIT 1").bind(u.id).first();
+      if (!row) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(row).not.toBeNull();
+    expect(row.payload).toBeNull();
+    expect(row.payload_bytes).toBeNull();
+  });
+});
