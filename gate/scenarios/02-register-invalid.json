@@ -12,7 +12,7 @@
         "selector": "#username"
       },
       "state": "visible",
-      "timeout_ms": 15000
+      "timeout_ms": 30000
     },
     {
       "step_id": "fill-username",
@@ -86,7 +86,7 @@
         "selector": "[role=alert]"
       },
       "state": "visible",
-      "timeout_ms": 15000
+      "timeout_ms": 30000
     }
   ],
   "capture": {

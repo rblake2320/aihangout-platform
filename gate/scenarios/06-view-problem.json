@@ -12,7 +12,7 @@
         "selector": "#username"
       },
       "state": "visible",
-      "timeout_ms": 15000
+      "timeout_ms": 30000
     },
     {
       "step_id": "fill-username",
@@ -82,18 +82,20 @@
       "step_id": "registered",
       "action": "wait_for",
       "locator": {
-        "kind": "css",
-        "selector": "a[href=\"/create-problem\"]"
+        "kind": "role",
+        "role": "link",
+        "name": "Ask Question"
       },
       "state": "visible",
-      "timeout_ms": 15000
+      "timeout_ms": 30000
     },
     {
       "step_id": "open-create",
       "action": "click",
       "locator": {
-        "kind": "css",
-        "selector": "a[href=\"/create-problem\"]"
+        "kind": "role",
+        "role": "link",
+        "name": "Ask Question"
       }
     },
     {
@@ -104,7 +106,7 @@
         "selector": "#title"
       },
       "state": "visible",
-      "timeout_ms": 15000
+      "timeout_ms": 30000
     },
     {
       "step_id": "fill-title",

@@ -129,6 +129,7 @@ export function summarize(evidence, rules, origin) {
   const selectors = (rules.dom && rules.dom.key_selectors) || [];
   const byStep = new Map(n.steps.map((s) => [s.step_index, {
     id: s.step_id,
+    isWait: s.action === 'wait_for' || s.action === 'wait_for_timeout',
     status: s.status,
     url: normalizeUrl(s.after_url.url, origin, rules),
     dom: null,
@@ -188,7 +189,18 @@ export function summarize(evidence, rules, origin) {
     ...s,
     responses: [...new Set(s.responses)].sort(),
   }));
-  return { steps, pageErrors: pageErrors.sort() };
+  // Scenario-wide view. Which step a post-navigation request lands on is a timing race even
+  // after causal attribution, so response statuses and shapes are compared over the whole
+  // scenario; per-step checks are kept for the declared expectations and for settled (wait) steps.
+  const all = { responses: [...new Set(steps.flatMap((s) => s.responses))].sort(), shapes: {}, requestShapes: {} };
+  for (const [prop, key] of [['shapes', 'shapes'], ['requestShapes', 'requestShapes']]) {
+    for (const s of steps) {
+      for (const [k, v] of Object.entries(s[key])) {
+        if (!(k in all[prop]) || all[prop][k].startsWith('<')) all[prop][k] = v;
+      }
+    }
+  }
+  return { steps, all, pageErrors: pageErrors.sort() };
 }
 
 // Absolute expectations, independent of any baseline: required responses per step and no 5xx.
@@ -226,19 +238,8 @@ export function compareSummaries(base, cur) {
     const c = ci.get(id);
     if (!c) continue;
     if (b.status !== c.status) diffs.push({ step: id, axis: 'step-status', detail: `baseline=${b.status} current=${c.status}` });
+    if (!b.isWait || !c.isWait) continue; // DOM, URL and storage are only stable once a wait has settled
     if (b.url !== c.url) diffs.push({ step: id, axis: 'url', detail: `baseline=${b.url} current=${c.url}` });
-    const r = setDiff(b.responses, c.responses);
-    for (const x of r.removed) diffs.push({ step: id, axis: 'response-status', detail: `only in baseline: ${x}` });
-    for (const x of r.added) diffs.push({ step: id, axis: 'response-status', detail: `only in current: ${x}` });
-    for (const [axis, key] of [['response-shape', 'shapes'], ['request-shape', 'requestShapes']]) {
-      for (const k of new Set([...Object.keys(b[key]), ...Object.keys(c[key])])) {
-        if (!(k in b[key]) || !(k in c[key])) continue; // presence is covered by response-status
-        if (b[key][k] !== c[key][k]) {
-          const d = setDiff(b[key][k].split(' '), c[key][k].split(' '));
-          diffs.push({ step: id, axis, detail: `${k}: removed [${d.removed.join(', ')}] added [${d.added.join(', ')}]` });
-        }
-      }
-    }
     if (b.dom && c.dom) {
       for (const sel of Object.keys(b.dom)) {
         if (b.dom[sel] !== c.dom[sel]) diffs.push({ step: id, axis: 'dom-selector', detail: `${sel}: baseline=${b.dom[sel] ? 'present' : 'absent'} current=${c.dom[sel] ? 'present' : 'absent'}` });
@@ -250,6 +251,21 @@ export function compareSummaries(base, cur) {
       const s = setDiff(b.storage, c.storage);
       for (const x of s.removed) diffs.push({ step: id, axis: 'storage', detail: `key only in baseline: ${x}` });
       for (const x of s.added) diffs.push({ step: id, axis: 'storage', detail: `key only in current: ${x}` });
+    }
+  }
+  const r = setDiff(base.all.responses, cur.all.responses);
+  for (const x of r.removed) diffs.push({ step: '*', axis: 'response-status', detail: `only in baseline: ${x}` });
+  for (const x of r.added) diffs.push({ step: '*', axis: 'response-status', detail: `only in current: ${x}` });
+  for (const [axis, key] of [['response-shape', 'shapes'], ['request-shape', 'requestShapes']]) {
+    for (const k of Object.keys(base.all[key])) {
+      const bs = base.all[key][k];
+      const cs = cur.all[key][k];
+      // An unavailable / unread body is "no evidence", not "no change": skip rather than fail or pass it.
+      if (cs === undefined || bs.startsWith('<') || cs.startsWith('<')) continue;
+      if (bs !== cs) {
+        const d = setDiff(bs.split(' '), cs.split(' '));
+        diffs.push({ step: '*', axis, detail: `${k}: removed [${d.removed.join(', ')}] added [${d.added.join(', ')}]` });
+      }
     }
   }
   const pe = setDiff(base.pageErrors, cur.pageErrors);

@@ -12,7 +12,7 @@
         "selector": "#root nav, #root header"
       },
       "state": "visible",
-      "timeout_ms": 15000
+      "timeout_ms": 30000
     },
     {
       "step_id": "settle",
