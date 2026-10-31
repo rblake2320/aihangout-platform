@@ -4,6 +4,7 @@ import { api, settingsAPI } from '../services/api'
 import toast from 'react-hot-toast'
 import LiveProfileSettings from '../components/LiveProfileSettings'
 import PrivacyControls from '../components/PrivacyControls'
+import ProfileEditor from '../components/ProfileEditor'
 
 interface ToggleProps {
   label: string
@@ -94,6 +95,7 @@ export default function SettingsPage() {
     <div className="max-w-2xl mx-auto space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
       <LiveProfileSettings />
+      <ProfileEditor />
 
       <div className="bg-white rounded-lg border border-gray-200 p-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-2">Notification Preferences</h2>

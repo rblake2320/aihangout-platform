@@ -32,6 +32,10 @@ id = "c8a1217f6f2a43028e6b8051fd2ab9d7"
 binding = "BACKUP_BUCKET"
 bucket_name = "aihangout-backups-staging"
 
+[[env.staging.r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "aihangout-media-staging"
+
 [env.staging.observability]
 enabled = true
 head_sampling_rate = 1
@@ -62,6 +66,10 @@ id = "9cd27d12b2c341b3a5b77f47b69a89c0"
 [[env.production.r2_buckets]]
 binding = "BACKUP_BUCKET"
 bucket_name = "aihangout-backups"
+
+[[env.production.r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "aihangout-media"
 
 [env.production.observability]
 enabled = true

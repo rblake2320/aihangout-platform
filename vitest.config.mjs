@@ -20,7 +20,7 @@ export default defineConfig({
           compatibilityDate: '2024-01-15',
           compatibilityFlags: ['nodejs_compat'],
           d1Databases: { AIHANGOUT_DB: 'aihangout-test', SCRATCH_DB: 'aihangout-scratch' },
-          r2Buckets: ['BACKUP_BUCKET'],
+          r2Buckets: ['BACKUP_BUCKET', 'MEDIA_BUCKET'],
           kvNamespaces: ['AIHANGOUT_KV'],
           bindings: {
             // Real migrations, read off disk, applied to a real D1 (SQLite) instance
