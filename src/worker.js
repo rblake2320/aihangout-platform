@@ -7,7 +7,10 @@
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { handleMcpRequest } from './mcp/server.js';
-import { normalizeTag, listTags, problemsForTag, setAcceptedSolution } from './qa.js';
+import {
+  normalizeTag, listTags, problemsForTag, setAcceptedSolution,
+  cleanCommentBody, assertCommentable, insertComment, listComments, hideOwnComment, resolveMentions,
+} from './qa.js';
 
 const router = Router();
 
@@ -17862,6 +17865,98 @@ router.delete('/api/problems/:problemId/accept', async (request, env, ctx) => {
     return errResponse('Could not clear accepted answer', error);
   }
 });
+
+// ── AIH-R7 step 3: comments on problems and answers (logic in src/qa.js) ──
+const qaCleanDeps = { sanitizeHtml, stripDangerousUnicode, sanitizeLLMTokens };
+
+// Comments on problems and solutions. Same ToS gate and posting rate limit as answers.
+const qaCommentRoutes = (target) => {
+  const base = target === 'problem' ? '/api/problems/:targetId/comments' : '/api/solutions/:targetId/comments';
+
+  router.get(base, async (request, env) => {
+    try {
+      const targetId = parseInt(request.params.targetId, 10);
+      if (!await assertCommentable(env.AIHANGOUT_DB, target, targetId)) return qaJson({ success: false, error: 'Not found' }, 404);
+      const url = new URL(request.url);
+      const page = await listComments(env.AIHANGOUT_DB, {
+        target, targetId, limit: Math.max(1, qaIntParam(url, 'limit', 50, 100)), offset: qaIntParam(url, 'offset', 0, 100000)
+      });
+      return qaJson({ success: true, total: page.total, comments: page.comments });
+    } catch (error) {
+      return errResponse('Could not load comments', error);
+    }
+  });
+
+  router.post(base, async (request, env, ctx) => {
+    try {
+      const user = await authenticate(request, env);
+      if (!user) return qaJson({ success: false, error: 'Authentication required' }, 401);
+      if (user.tos_accepted_version !== TOS_CURRENT_VERSION) {
+        return qaJson({ success: false, error: 'You must accept the current Terms of Service before contributing content.', code: 'TOS_ACCEPTANCE_REQUIRED', current_tos_version: TOS_CURRENT_VERSION }, 403);
+      }
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, user.id, 'post');
+      if (rl.limited) return rateLimitResponse(rl);
+
+      const targetId = parseInt(request.params.targetId, 10);
+      const parent = await assertCommentable(env.AIHANGOUT_DB, target, targetId);
+      if (!parent) return qaJson({ success: false, error: 'Not found' }, 404);
+
+      const payload = await request.json().catch(() => null);
+      const text = cleanCommentBody(payload?.body ?? payload?.comment, qaCleanDeps);
+      if (!text) return qaJson({ success: false, error: `Comment must be 1-${2000} characters of text` }, 400);
+      const scan = scanForInjection(text);
+      if (scan.risk === 'high') return qaJson({ success: false, error: 'Comment could not be posted' }, 400);
+
+      const comment = await insertComment(env.AIHANGOUT_DB, { target, targetId, userId: user.id, body: text });
+      const problemId = target === 'problem' ? targetId : parent.problem_id;
+      const ownerId = parent.user_id;
+      if (ctx?.waitUntil) {
+        ctx.waitUntil((async () => {
+          try {
+            if (ownerId !== user.id) {
+              await createNotification(env, {
+                userId: ownerId, actorId: user.id, type: 'comment', targetType: 'problem', targetId: problemId,
+                message: target === 'problem' ? `${user.username} commented on your question` : `${user.username} commented on your answer`,
+                sourceType: 'comment', sourceId: comment.id
+              });
+            }
+            const mentioned = await resolveMentions(env.AIHANGOUT_DB, text, { excludeUserIds: [user.id, ownerId] });
+            for (const m of mentioned) {
+              await createNotification(env, {
+                userId: m.id, actorId: user.id, type: 'mention', targetType: 'problem', targetId: problemId,
+                message: `${user.username} mentioned you in a comment`, sourceType: 'comment', sourceId: comment.id
+              });
+            }
+          } catch (e) { console.error('[QA] comment notification failed:', e?.message || e); }
+        })());
+      }
+      return qaJson({ success: true, comment: { id: comment.id, body: comment.body, author: user.username, author_type: user.ai_agent_type && user.ai_agent_type !== 'human' ? 'AI' : 'human' } });
+    } catch (error) {
+      return errResponse('Could not post comment', error);
+    }
+  });
+};
+qaCommentRoutes('problem');
+qaCommentRoutes('solution');
+
+// Author-only removal (soft: the row is hidden, not deleted).
+router.delete('/api/comments/:kind/:commentId', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user) return qaJson({ success: false, error: 'Authentication required' }, 401);
+    const kind = request.params.kind;
+    if (kind !== 'problem' && kind !== 'solution') return qaJson({ success: false, error: 'Unknown comment kind' }, 404);
+    const commentId = parseInt(request.params.commentId, 10);
+    if (!await hideOwnComment(env.AIHANGOUT_DB, { target: kind, commentId, userId: user.id })) {
+      return qaJson({ success: false, error: 'Comment not found' }, 404);
+    }
+    return qaJson({ success: true });
+  } catch (error) {
+    return errResponse('Could not delete comment', error);
+  }
+});
+
 
 router.get('*', async (request, env) => {
   try {
