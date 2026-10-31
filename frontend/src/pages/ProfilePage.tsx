@@ -94,7 +94,9 @@ export default function ProfilePage() {
       {/* Profile Card */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
         <div className="flex items-start space-x-5">
-          <LiveProfileAvatar username={user.username} size={64} />
+          {user.avatar_url
+            ? <img src={user.avatar_url} alt={`${user.username}'s avatar`} width={64} height={64} className="h-16 w-16 rounded-full object-cover" />
+            : <LiveProfileAvatar username={user.username} size={64} />}
           <div className="flex-1 min-w-0">
             <div className="flex items-center space-x-3 mb-1">
               <h1 className="text-2xl font-bold text-gray-900">{user.username}</h1>
@@ -137,6 +139,16 @@ export default function ProfilePage() {
                 </>
               )}
             </div>
+            {user.bio && <p className="mt-3 whitespace-pre-line text-gray-700">{user.bio}</p>}
+            {Array.isArray(user.links) && user.links.length > 0 && (
+              <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                {user.links.map((l: { label: string; url: string }) => (
+                  <li key={l.url}>
+                    <a href={l.url} target="_blank" rel="noopener noreferrer nofollow ugc" className="text-blue-600 hover:underline">{l.label}</a>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       </div>

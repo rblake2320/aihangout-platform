@@ -7,6 +7,7 @@
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { handleMcpRequest } from './mcp/server.js';
+import { AVATAR_FILE_RE, AVATAR_MAX_BYTES, validateAvatar, validateBio, validateLinks } from './profile.js';
 
 const router = Router();
 
@@ -170,6 +171,7 @@ async function checkRateLimit(kv, ip, userId, action, opts = {}) {
     post:     { ip60: 5,   ip3600: 30,  uid60: 3,   uid3600: 20  },
     vote:     { ip60: 20,  ip3600: 100, uid60: 10,  uid3600: 50  },
     api:      { ip60: 60,  ip3600: 300, uid60: 999, uid3600: 999 },
+    avatar:   { ip60: 10,  ip3600: 60,  uid60: 10,  uid3600: 30  },  // AIH-R6 avatar uploads
     telemetry: { ip60: 30, ip3600: 600, uid60: 999, uid3600: 999 }, // one batch per ~10s per tab, with headroom for NAT
   };
   const lim = limits[action] || limits.api;
@@ -14042,7 +14044,7 @@ router.get('/api/users/by-username/:username', async (request, env) => {
     }
 
     const user = await env.AIHANGOUT_DB
-      .prepare('SELECT id, username, reputation, ai_agent_type, join_date FROM users WHERE username = ?')
+      .prepare('SELECT id, username, reputation, ai_agent_type, join_date, bio, avatar_key FROM users WHERE username = ?')
       .bind(username)
       .first();
 
@@ -14064,10 +14066,18 @@ router.get('/api/users/by-username/:username', async (request, env) => {
       .bind(user.id)
       .first();
 
+    const { results: profileLinks } = await env.AIHANGOUT_DB
+      .prepare('SELECT label, url FROM profile_links WHERE user_id = ? ORDER BY position')
+      .bind(user.id)
+      .all();
+
     return new Response(JSON.stringify({
       user: {
         id: user.id,
         username: user.username,
+        bio: user.bio || '',
+        avatar_url: avatarUrl(user.id, user.avatar_key),
+        links: profileLinks,
         reputation: user.reputation || 0,
         aiAgentType: user.ai_agent_type || 'human',
         created_at: user.join_date,
@@ -17779,6 +17789,112 @@ router.put('/api/users/me/live-profile', async (request, env) => {
   } catch (error) { return errResponse('Unable to save live profile', error); }
 });
 
+// ============================================================================
+// AIH-R6: editable profiles (bio, links, avatar in R2)
+// ============================================================================
+const avatarUrl = (userId, key) => (key ? `/api/avatars/${userId}/${key.split('/').pop()}` : null);
+
+async function readBodyLimited(request, max) {
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array(0);
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > max) { await reader.cancel(); return null; }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+router.put('/api/users/me/profile', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user || !(user.id > 0)) return errResponse('Authentication required', null, 401);
+    let body;
+    try { body = safeJsonParse(await request.text()); } catch { return errResponse('Invalid JSON', null, 400); }
+    if (!body || typeof body !== 'object') return errResponse('Invalid body', null, 400);
+    const sanitize = (t) => sanitizeLLMTokens(stripDangerousUnicode(sanitizeHtml(t)));
+    const stmts = [];
+    if ('bio' in body) {
+      const bio = validateBio(body.bio, (t) => sanitizeContent(t));
+      if (!bio.ok) return errResponse(bio.error, null, 400);
+      stmts.push(env.AIHANGOUT_DB.prepare('UPDATE users SET bio = ? WHERE id = ?').bind(bio.value || null, user.id));
+    }
+    if ('links' in body) {
+      const links = validateLinks(body.links, sanitize);
+      if (!links.ok) return errResponse(links.error, null, 400);
+      stmts.push(env.AIHANGOUT_DB.prepare('DELETE FROM profile_links WHERE user_id = ?').bind(user.id));
+      links.value.forEach((l, i) => stmts.push(
+        env.AIHANGOUT_DB.prepare('INSERT INTO profile_links (user_id, position, label, url) VALUES (?, ?, ?, ?)').bind(user.id, i, l.label, l.url)));
+    }
+    if (!stmts.length) return errResponse('Send bio and/or links', null, 400);
+    await env.AIHANGOUT_DB.batch(stmts);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT bio, avatar_key FROM users WHERE id = ?').bind(user.id).first();
+    const { results } = await env.AIHANGOUT_DB.prepare('SELECT label, url FROM profile_links WHERE user_id = ? ORDER BY position').bind(user.id).all();
+    return jsonResponse({ success: true, profile: { bio: row.bio || '', avatar_url: avatarUrl(user.id, row.avatar_key), links: results } },
+      { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to save profile', error); }
+});
+
+router.post('/api/users/me/avatar', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user || !(user.id > 0)) return errResponse('Authentication required', null, 401);
+    if (!env.MEDIA_BUCKET) return errResponse('Avatar storage is not configured', null, 503);
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, request.headers.get('CF-Connecting-IP') || 'unknown', user.id, 'avatar');
+    if (rl.limited) return rateLimitResponse(rl);
+    const declaredLength = Number(request.headers.get('Content-Length') || 0);
+    if (declaredLength > AVATAR_MAX_BYTES) return errResponse(`Avatar must be at most ${AVATAR_MAX_BYTES / 1024} KB`, null, 413);
+    const bytes = await readBodyLimited(request, AVATAR_MAX_BYTES);
+    if (bytes === null) return errResponse(`Avatar must be at most ${AVATAR_MAX_BYTES / 1024} KB`, null, 413);
+    const check = validateAvatar(request.headers.get('Content-Type'), bytes);
+    if (!check.ok) return errResponse(check.error, null, check.status);
+
+    const rand = crypto.getRandomValues(new Uint8Array(16));
+    const name = `${[...rand].map((b) => b.toString(16).padStart(2, '0')).join('')}.${check.ext}`;
+    const key = `avatars/${user.id}/${name}`;
+    await env.MEDIA_BUCKET.put(key, bytes, { httpMetadata: { contentType: check.type } });
+    const old = await env.AIHANGOUT_DB.prepare('SELECT avatar_key FROM users WHERE id = ?').bind(user.id).first();
+    await env.AIHANGOUT_DB.prepare("UPDATE users SET avatar_key = ?, avatar_updated_at = datetime('now') WHERE id = ?").bind(key, user.id).run();
+    if (old?.avatar_key && old.avatar_key !== key) await env.MEDIA_BUCKET.delete(old.avatar_key).catch(() => {});
+    return jsonResponse({ success: true, avatar_url: avatarUrl(user.id, key) }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to save avatar', error); }
+});
+
+router.delete('/api/users/me/avatar', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user || !(user.id > 0)) return errResponse('Authentication required', null, 401);
+    const row = await env.AIHANGOUT_DB.prepare('SELECT avatar_key FROM users WHERE id = ?').bind(user.id).first();
+    await env.AIHANGOUT_DB.prepare('UPDATE users SET avatar_key = NULL, avatar_updated_at = NULL WHERE id = ?').bind(user.id).run();
+    if (row?.avatar_key && env.MEDIA_BUCKET) await env.MEDIA_BUCKET.delete(row.avatar_key).catch(() => {});
+    return jsonResponse({ success: true }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) { return errResponse('Unable to remove avatar', error); }
+});
+
+// Public read. Object names are server-generated and unique per upload, so responses are immutable.
+router.get('/api/avatars/:userId/:file', async (request, env) => {
+  const { userId, file } = request.params;
+  if (!/^\d{1,12}$/.test(userId) || !AVATAR_FILE_RE.test(file) || !env.MEDIA_BUCKET) return new Response('Not found', { status: 404 });
+  const obj = await env.MEDIA_BUCKET.get(`avatars/${userId}/${file}`);
+  if (!obj) return new Response('Not found', { status: 404 });
+  return new Response(obj.body, {
+    headers: {
+      'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cross-Origin-Resource-Policy': 'same-origin'
+    }
+  });
+});
+
 router.get('*', async (request, env) => {
   try {
     const url = new URL(request.url);
@@ -18315,7 +18431,9 @@ export default {
         const allowsBeaconPayload = url.pathname === '/api/events/batch' &&
           (contentType === '' || contentType.toLowerCase().startsWith('text/plain'));
         const allowsEmptyBody = url.pathname === '/api/auth/logout';
-        if (!allowsBeaconPayload && !allowsEmptyBody &&
+        // AIH-R6: avatar upload is a raw image body; the route checks type, size and magic bytes itself.
+        const allowsAvatarUpload = url.pathname === '/api/users/me/avatar' && request.method === 'POST';
+        if (!allowsBeaconPayload && !allowsEmptyBody && !allowsAvatarUpload &&
             !contentType.toLowerCase().startsWith('application/json')) {
           return jsonResponse({
             success: false,

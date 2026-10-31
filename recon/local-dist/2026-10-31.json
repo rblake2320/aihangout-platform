@@ -1,24 +1,24 @@
 {
   "schema": "bundle-recon/1",
   "origin": "local-dist",
-  "fetchedAt": "2026-10-31T16:40:32.810Z",
+  "fetchedAt": "2026-10-31T17:52:41.953Z",
   "index": {
-    "sha256": "04aebfe16f40058766883ec570582714afd5fc2c326e737d86b2adbd8c1be0d9",
+    "sha256": "a055fb83e91c8e95ea999c49043866644256ab9838c6c098b2f0c7ca704cd41f",
     "bytes": 2258
   },
   "assets": [
     {
-      "path": "/assets/index-Bv9XazIt.css",
+      "path": "/assets/index-C-w9Eb0M.js",
       "status": 200,
-      "bytes": 42973,
-      "sha256": "5e56f428280651c048878391c42002bf14e157b61066d57cae5ccba02a4639f2",
+      "bytes": 354006,
+      "sha256": "80bd84b185e757f7cdbaa47b489f2b30af3526eaf1ffd1a0e8149523d14ebab1",
       "sourceMapExposed": false
     },
     {
-      "path": "/assets/index-CDxjmwRw.js",
+      "path": "/assets/index-jIOyI6HA.css",
       "status": 200,
-      "bytes": 349676,
-      "sha256": "e58484835fca9dbef5428a7eaff9951ba13d2696109c830334a154d158195be3",
+      "bytes": 43111,
+      "sha256": "6777dcf920a4629ae84f06d344b1afdf8fcab92a6f41902e8c6e9e30762eded5",
       "sourceMapExposed": false
     },
     {
@@ -82,6 +82,7 @@
     "clientCalls": [
       "DELETE /bookmarks/{}/{}",
       "DELETE /notifications/{}",
+      "DELETE /users/me/avatar",
       "GET /admin/flagged-content",
       "GET /admin/ops-summary",
       "GET /admin/reports",
@@ -119,9 +120,11 @@
       "POST /problems/{}/solutions/{}/accept",
       "POST /reports",
       "POST /users/is-following-batch",
+      "POST /users/me/avatar",
       "POST /users/{}/follow",
       "POST /vote",
       "PUT /users/me/live-profile",
+      "PUT /users/me/profile",
       "PUT /users/me/settings"
     ],
     "baseUrls": [
@@ -179,17 +182,17 @@
       {
         "sha256": "48023abf731b2a19",
         "context": "auth/me\");n.data.success&&n.data.user&&e({user:{...t().user,is_admin:!!n.data.user.is_admin}})}catch{}}}}),{name:\"ai-hangout-auth\",partializ",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "asset": "/assets/index-C-w9Eb0M.js"
       },
       {
         "sha256": "62b14b5667f9bffc",
         "context": "s&&n.data.user&&e({user:{...t().user,is_admin:!!n.data.user.is_admin}})}catch{}}}}),{name:\"ai-hangout-auth\",partialize:e=>({user:e.user,toke",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "asset": "/assets/index-C-w9Eb0M.js"
       },
       {
-        "sha256": "a1575da526a0df19",
-        "context": "Settings\",children:(0,Sn.jsx)(K,{className:\"w-5 h-5\"})}),t?.is_admin&&(0,Sn.jsx)(q,{to:\"/admin\",className:\"p-1 text-gray-400 hover:text-blue",
-        "asset": "/assets/index-CDxjmwRw.js"
+        "sha256": "b6ffd089efb95775",
+        "context": "Settings\",children:(0,Sn.jsx)(V,{className:\"w-5 h-5\"})}),t?.is_admin&&(0,Sn.jsx)(q,{to:\"/admin\",className:\"p-1 text-gray-400 hover:text-blue",
+        "asset": "/assets/index-C-w9Eb0M.js"
       }
     ]
   }
