@@ -1160,6 +1160,38 @@ async function sendVerificationEmail(env, user) {
   });
 }
 
+// Ops failure ledger (2026-10-30). Every server-side failure on the account path
+// (registration rejections, failed logins, email delivery errors, reset/verify
+// rejections) used to end at console.error, which only exists while someone runs a
+// live `wrangler tail`. Persist them as analytics_events rows (event_type
+// 'ops_failure') so they are queryable by the admin ops summary and the daily
+// digest. Never stores passwords or raw tokens — `reason` is a short code/message.
+async function recordOpsFailure(env, request, { kind, reason, userId = null, detail = {} }) {
+  try {
+    await logAnalyticsEvent(env, {
+      event_type: 'ops_failure',
+      user_id: userId,
+      user_type: 'system',
+      page_url: request ? new URL(request.url).pathname : null,
+      user_agent: request?.headers.get('User-Agent') || null,
+      ip_address: request?.headers.get('CF-Connecting-IP') || null,
+      event_data: JSON.stringify({ kind, reason: String(reason || 'unknown').slice(0, 300), ...detail })
+    });
+  } catch (error) {
+    console.error('[Ops] Failed to record ops failure:', error?.message || error);
+  }
+}
+
+async function sendWelcomeEmail(env, user) {
+  return sendTransactionalEmail(env, {
+    to: user.email,
+    subject: 'Welcome to AI Hangout',
+    text: `Hi ${user.username}, your email is verified and your account is ready. Sign in at https://aihangout.ai/login — if you ever forget your password, use https://aihangout.ai/forgot-password to get a reset link.`,
+    html: `<p>Hi ${escapeEmailHtml(user.username)},</p><p>Your email is verified and your AI Hangout account is ready.</p><p><a href="https://aihangout.ai/login">Sign in</a> · <a href="https://aihangout.ai/forgot-password">Forgot your password?</a></p><p>Your password is never stored or emailed; the reset link is always the way back in.</p>`,
+    idempotencyKey: `welcome-${user.id}`
+  });
+}
+
 // Non-reversible 16-char session identifier for analytics logging.
 // Stores a prefix of the SHA-256 hash — enough to correlate events, never enough to recover the token.
 async function hashSessionId(token) {
@@ -1462,31 +1494,41 @@ router.post('/api/auth/register', async (request, env, ctx) => {
     const password = body.password;
     const aiAgentType = body.aiAgentType || 'human';
 
+    // Every rejection is recorded (reason code only — never the password) so a user
+    // saying "signup failed" can be answered from the ops summary instead of guessed.
+    const reject = async (reason, payload, status = 400) => {
+      await recordOpsFailure(env, request, {
+        kind: 'register', reason,
+        detail: { username, email_domain: email.includes('@') ? email.split('@')[1] : null, status }
+      });
+      return new Response(JSON.stringify(payload), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    };
+
     // Chain-of-title (2026-08-18): explicit clickwrap acceptance recorded at
     // registration, not implied by "using the Service". See TOS_CURRENT_VERSION.
     if (body.accept_tos !== true) {
-      return new Response(JSON.stringify({
+      return reject('tos_not_accepted', {
         success: false,
         error: 'You must accept the Terms of Service to register.',
         code: 'TOS_ACCEPTANCE_REQUIRED',
         current_tos_version: TOS_CURRENT_VERSION
-      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      });
     }
 
-    if (!username || username.length > 50) return new Response(JSON.stringify({ success: false, error: 'Username must be 1-50 characters' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (!username || username.length > 50) return reject('username_length', { success: false, error: 'Username must be 1-50 characters' });
     // Restrict usernames to a safe character set. This is the one user field that is echoed
     // into stored notification text and AI-facing surfaces, so it must not carry HTML, quotes,
     // whitespace tricks, or LLM control tokens (<|im_start|>, [INST], etc.).
-    if (!/^[A-Za-z0-9_.-]+$/.test(username)) return new Response(JSON.stringify({ success: false, error: 'Username may only contain letters, numbers, and _ . -' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return new Response(JSON.stringify({ success: false, error: 'Invalid email' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (!/^[A-Za-z0-9_.-]+$/.test(username)) return reject('username_charset', { success: false, error: 'Username may only contain letters, numbers, and _ . -' });
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return reject('email_invalid', { success: false, error: 'Invalid email' });
     const passwordError = validateNewPassword(password);
-    if (passwordError) return new Response(JSON.stringify({ success: false, error: passwordError }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    if (passwordError) return reject('password_policy', { success: false, error: passwordError });
     const VALID_ACCOUNT_TYPES = new Set(['human', 'specialized', 'general', 'research', 'curator']);
     if (!VALID_ACCOUNT_TYPES.has(aiAgentType)) {
-      return new Response(JSON.stringify({
+      return reject('account_type_invalid', {
         success: false,
         error: 'aiAgentType must be human, specialized, general, research, or curator'
-      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      });
     }
 
     const RESERVED_USERNAMES = new Set([
@@ -1495,9 +1537,7 @@ router.post('/api/auth/register', async (request, env, ctx) => {
       'null','undefined','anonymous','guest','operator','webmaster'
     ]);
     if (RESERVED_USERNAMES.has(username?.toLowerCase())) {
-      return new Response(JSON.stringify({ success: false, error: 'This username is not available.' }), {
-        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
+      return reject('username_reserved', { success: false, error: 'This username is not available.' });
     }
 
     // Validate required fields
@@ -1532,14 +1572,13 @@ router.post('/api/auth/register', async (request, env, ctx) => {
       console.error('Database insert error:', dbError);
       const errMsg = dbError.message || '';
       if (errMsg.includes('UNIQUE constraint failed: users.email') || errMsg.includes('UNIQUE constraint failed: users.username')) {
-        return new Response(JSON.stringify({
+        // Public message stays vague (enumeration defence); the ops ledger keeps the truth.
+        return reject(errMsg.includes('users.email') ? 'duplicate_email' : 'duplicate_username', {
           success: false,
           error: 'Registration failed. Please check your details and try again.'
-        }), {
-          status: 409,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
+        }, 409);
       }
+      await recordOpsFailure(env, request, { kind: 'register', reason: `db:${errMsg}`, detail: { status: 500 } });
       return errResponse('Registration failed. Please try again.', dbError);
     }
 
@@ -1577,7 +1616,10 @@ router.post('/api/auth/register', async (request, env, ctx) => {
 
     if (ctx?.waitUntil) {
       ctx.waitUntil(sendVerificationEmail(env, { id: userId, username, email })
-        .catch(error => console.error('[Email] Registration verification failed:', error?.message || error)));
+        .catch(async error => {
+          console.error('[Email] Registration verification failed:', error?.message || error);
+          await recordOpsFailure(env, request, { kind: 'email', reason: error?.message || error, userId, detail: { purpose: 'verify_email' } });
+        }));
     }
 
     return new Response(JSON.stringify({
@@ -1616,10 +1658,11 @@ router.post('/api/auth/accept-tos', async (request, env) => {
   }
 });
 
-router.post('/api/auth/email/verify', async (request, env) => {
+router.post('/api/auth/email/verify', async (request, env, ctx) => {
   try {
     const { token } = await request.json();
     if (typeof token !== 'string' || token.length < 32 || token.length > 256) {
+      await recordOpsFailure(env, request, { kind: 'verify_email', reason: 'token_malformed' });
       return errResponse('Invalid or expired verification link', null, 400);
     }
     const tokenHash = await hashToken(token);
@@ -1629,10 +1672,21 @@ router.post('/api/auth/email/verify', async (request, env) => {
         AND expires_at > CURRENT_TIMESTAMP
       RETURNING user_id
     `).bind(tokenHash).first();
-    if (!record) return errResponse('Invalid or expired verification link', null, 400);
-    await env.AIHANGOUT_DB.prepare(
-      'UPDATE users SET email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP) WHERE id = ?'
-    ).bind(record.user_id).run();
+    if (!record) {
+      await recordOpsFailure(env, request, { kind: 'verify_email', reason: 'token_invalid_or_expired' });
+      return errResponse('Invalid or expired verification link', null, 400);
+    }
+    // First verification only: send the welcome email once, after the address is proven.
+    const verified = await env.AIHANGOUT_DB.prepare(
+      `UPDATE users SET email_verified_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND email_verified_at IS NULL RETURNING id, username, email`
+    ).bind(record.user_id).first();
+    if (verified && ctx?.waitUntil) {
+      ctx.waitUntil(sendWelcomeEmail(env, verified).catch(async error => {
+        console.error('[Email] Welcome email failed:', error?.message || error);
+        await recordOpsFailure(env, request, { kind: 'email', reason: error?.message || error, userId: verified.id, detail: { purpose: 'welcome' } });
+      }));
+    }
     return jsonResponse({ success: true, message: 'Email verified' });
   } catch (error) {
     return errResponse('Email verification failed', error);
@@ -1648,7 +1702,10 @@ router.post('/api/auth/email/resend', async (request, env, ctx) => {
     ).bind(user.id).first();
     if (current?.email_verified_at) return jsonResponse({ success: true, alreadyVerified: true });
     ctx.waitUntil(sendVerificationEmail(env, current)
-      .catch(error => console.error('[Email] Verification resend failed:', error?.message || error)));
+      .catch(async error => {
+        console.error('[Email] Verification resend failed:', error?.message || error);
+        await recordOpsFailure(env, request, { kind: 'email', reason: error?.message || error, userId: current.id, detail: { purpose: 'verify_email_resend' } });
+      }));
     return jsonResponse({ success: true, message: 'Verification email requested' });
   } catch (error) {
     return errResponse('Unable to resend verification email', error);
@@ -1677,7 +1734,13 @@ router.post('/api/auth/password/forgot', async (request, env, ctx) => {
           html: `<p>Hi ${escapeEmailHtml(user.username)},</p><p><a href="${link}">Reset your password</a></p><p>This single-use link expires in 30 minutes. If you did not request it, ignore this email.</p>`,
           idempotencyKey: `reset-${user.id}-${await hashToken(token)}`
         });
-      })().catch(error => console.error('[Email] Password reset email failed:', error?.message || error)));
+      })().catch(async error => {
+        console.error('[Email] Password reset email failed:', error?.message || error);
+        await recordOpsFailure(env, request, { kind: 'email', reason: error?.message || error, userId: user.id, detail: { purpose: 'reset_password' } });
+      }));
+    } else if (!user) {
+      // Same public response either way (enumeration defence); recorded for ops only.
+      await recordOpsFailure(env, request, { kind: 'password_forgot', reason: 'unknown_email', detail: { email_domain: normalizedEmail.split('@')[1] || null } });
     }
     return jsonResponse({
       success: true,
@@ -1704,7 +1767,10 @@ router.post('/api/auth/password/reset', async (request, env) => {
         AND expires_at > CURRENT_TIMESTAMP
       RETURNING user_id
     `).bind(tokenHash).first();
-    if (!record) return errResponse('Invalid or expired reset link', null, 400);
+    if (!record) {
+      await recordOpsFailure(env, request, { kind: 'password_reset', reason: 'token_invalid_or_expired' });
+      return errResponse('Invalid or expired reset link', null, 400);
+    }
     await env.AIHANGOUT_DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
       .bind(passwordHash, record.user_id).run();
     return jsonResponse({ success: true, message: 'Password updated' });
@@ -1749,6 +1815,7 @@ router.post('/api/auth/login', async (request, env) => {
       // Timing-equalization: perform the same PBKDF2 work as a real verification so the
       // response time cannot be used to distinguish registered from unregistered emails.
       await verifyPassword(password, DUMMY_PASSWORD_HASH);
+      await recordOpsFailure(env, request, { kind: 'login', reason: 'unknown_identifier', detail: { identifier: identifier.slice(0, 100) } });
       return new Response(JSON.stringify({
         success: false,
         error: 'Invalid credentials'
@@ -1775,6 +1842,7 @@ router.post('/api/auth/login', async (request, env) => {
     }
 
     if (!isPasswordValid) {
+      await recordOpsFailure(env, request, { kind: 'login', reason: 'bad_password', userId: user.id, detail: { username: user.username } });
       return new Response(JSON.stringify({
         success: false,
         error: 'Invalid credentials'
@@ -3449,6 +3517,20 @@ router.get('/api/analytics/dashboard', async (request, env) => {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
+  }
+});
+
+// GET /api/admin/ops-summary?hours=24 — who signed in, who failed to, what broke.
+// Admin-only. Backed by buildOpsSummary (shared with the daily digest).
+router.get('/api/admin/ops-summary', async (request, env) => {
+  try {
+    const user = await authenticate(request, env);
+    if (!user || !user.is_admin) return errResponse('Admin access required', null, 403);
+    const hours = clampNumber(new URL(request.url).searchParams.get('hours'), 1, 24 * 30, 24);
+    const summary = await buildOpsSummary(env, hours);
+    return jsonResponse({ success: true, ...summary }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) {
+    return errResponse('Unable to build ops summary', error);
   }
 });
 
@@ -18369,8 +18451,95 @@ export default {
   async scheduled(event, env, ctx) {
     console.log(`[Cron] Daily harvest triggered at ${new Date(event.scheduledTime).toISOString()}`);
     ctx.waitUntil(runDailyHarvest(env));
+    ctx.waitUntil(sendOpsDigest(env));
   },
 };
+
+// Ops summary (2026-10-30): one query set shared by the admin endpoint and the daily
+// digest. Answers "who signed in, who failed to, what broke" for the last N hours
+// from the data the platform already records (analytics_events + enhanced_sessions).
+async function buildOpsSummary(env, hours = 24) {
+  const since = `-${hours} hours`;
+  const db = env.AIHANGOUT_DB;
+  const [failuresByKind, recentFailures, logins, recentLogins, registrations, sessions, clientErrors] = await Promise.all([
+    db.prepare(`SELECT json_extract(event_data, '$.kind') AS kind, json_extract(event_data, '$.reason') AS reason, COUNT(*) AS count
+                FROM analytics_events WHERE event_type = 'ops_failure' AND timestamp > datetime('now', ?)
+                GROUP BY kind, reason ORDER BY count DESC LIMIT 50`).bind(since).all(),
+    db.prepare(`SELECT a.timestamp, a.user_id, u.username, a.ip_address, a.page_url, a.event_data
+                FROM analytics_events a LEFT JOIN users u ON u.id = a.user_id
+                WHERE a.event_type = 'ops_failure' AND a.timestamp > datetime('now', ?)
+                ORDER BY a.timestamp DESC LIMIT 100`).bind(since).all(),
+    db.prepare(`SELECT COUNT(*) AS logins, COUNT(DISTINCT user_id) AS distinct_users
+                FROM analytics_events WHERE event_type = 'user_login' AND timestamp > datetime('now', ?)`).bind(since).first(),
+    db.prepare(`SELECT a.timestamp, a.user_id, u.username, u.ai_agent_type, a.ip_address
+                FROM analytics_events a LEFT JOIN users u ON u.id = a.user_id
+                WHERE a.event_type = 'user_login' AND a.timestamp > datetime('now', ?)
+                ORDER BY a.timestamp DESC LIMIT 100`).bind(since).all(),
+    db.prepare(`SELECT COUNT(*) AS registrations,
+                       SUM(CASE WHEN email_verified_at IS NOT NULL THEN 1 ELSE 0 END) AS verified
+                FROM users WHERE join_date > datetime('now', ?)`).bind(since).first(),
+    db.prepare(`SELECT s.user_id, u.username, s.user_type, s.last_seen, s.page_count, s.activity_score, s.ip_address
+                FROM enhanced_sessions s LEFT JOIN users u ON u.id = s.user_id
+                WHERE s.last_seen > datetime('now', ?) ORDER BY s.last_seen DESC LIMIT 100`).bind(since).all(),
+    db.prepare(`SELECT COUNT(*) AS count FROM analytics_events
+                WHERE event_type IN ('error', 'chat_send_failed', 'registration_client_result')
+                  AND timestamp > datetime('now', ?)
+                  AND (event_type <> 'registration_client_result' OR json_extract(event_data, '$.success') = 0)`).bind(since).first()
+  ]);
+  const parse = row => { try { return JSON.parse(row.event_data || '{}'); } catch { return {}; } };
+  return {
+    window_hours: hours,
+    generated_at: new Date().toISOString(),
+    failures: {
+      total: (failuresByKind.results || []).reduce((n, r) => n + (r.count || 0), 0),
+      by_kind: failuresByKind.results || [],
+      recent: (recentFailures.results || []).map(r => ({
+        timestamp: r.timestamp, user_id: r.user_id, username: r.username, ip_address: r.ip_address, path: r.page_url, ...parse(r)
+      }))
+    },
+    logins: { ...logins, recent: recentLogins.results || [] },
+    registrations,
+    active_sessions: sessions.results || [],
+    client_errors: clientErrors?.count || 0
+  };
+}
+
+// Turns failures into an action: a daily email to ADMIN_ALERT_EMAIL (Cloudflare secret,
+// never committed) whenever the last 24h recorded any ops failure. Cloudflare offers no
+// built-in Workers error notification, so the platform's own mail path is the trigger.
+async function sendOpsDigest(env) {
+  try {
+    if (!env.ADMIN_ALERT_EMAIL) {
+      console.log('[Ops] ADMIN_ALERT_EMAIL not set — digest skipped');
+      return { skipped: true };
+    }
+    const summary = await buildOpsSummary(env, 24);
+    if (summary.failures.total === 0 && summary.client_errors === 0) {
+      console.log('[Ops] No failures in the last 24h — digest not sent');
+      return { sent: false, summary };
+    }
+    const lines = summary.failures.by_kind.map(r => `${r.kind} / ${r.reason}: ${r.count}`);
+    const text = [
+      `AI Hangout ops digest — last 24h (${summary.generated_at})`,
+      `Failures: ${summary.failures.total}  Client errors: ${summary.client_errors}`,
+      `Logins: ${summary.logins.logins} (${summary.logins.distinct_users} users)  Registrations: ${summary.registrations.registrations} (${summary.registrations.verified} verified)`,
+      '', 'Failures by kind:', ...lines, '',
+      'Full detail: https://aihangout.ai/admin (Ops tab)'
+    ].join('\n');
+    const html = `<pre style="font-family:monospace">${escapeEmailHtml(text)}</pre>`;
+    const result = await sendTransactionalEmail(env, {
+      to: env.ADMIN_ALERT_EMAIL,
+      subject: `[AI Hangout] ${summary.failures.total} failures, ${summary.client_errors} client errors in last 24h`,
+      text, html,
+      idempotencyKey: `ops-digest-${summary.generated_at.slice(0, 10)}`
+    });
+    console.log('[Ops] Digest sent');
+    return { sent: true, result };
+  } catch (error) {
+    console.error('[Ops] Digest failed:', error?.message || error);
+    return { sent: false, error: error?.message };
+  }
+}
 
 async function runDailyHarvest(env) {
   try {

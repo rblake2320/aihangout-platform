@@ -26,6 +26,12 @@ database_id = "0783889d-3191-46ec-b47a-9aa74147b64a"
 binding = "AIHANGOUT_KV"
 id = "c8a1217f6f2a43028e6b8051fd2ab9d7"
 
+# Workers Logs: retain invocation + console logs (3d free / 7d paid) and feed Workers
+# Issues, so a failure is visible after the fact instead of only during a live tail.
+[env.staging.observability]
+enabled = true
+head_sampling_rate = 1
+
 [env.staging.vars]
 ENVIRONMENT = "staging"
 API_VERSION = "v1"
@@ -49,11 +55,21 @@ database_id = "88deba8c-079c-412e-a41a-826e8916f334"
 binding = "AIHANGOUT_KV"
 id = "9cd27d12b2c341b3a5b77f47b69a89c0"
 
+[env.production.observability]
+enabled = true
+head_sampling_rate = 1
+
 [env.production.vars]
 ENVIRONMENT = "production"
 API_VERSION = "v1"
 # AI_ARMY_SERVER must be set via: wrangler secret put AI_ARMY_SERVER --env production
+# ADMIN_ALERT_EMAIL (daily ops digest recipient) must be set via:
+#   wrangler secret put ADMIN_ALERT_EMAIL --env production
 BETA_MODE = "false"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 [triggers]
 crons = ["0 6 * * *"]   # 6 AM UTC daily harvest
