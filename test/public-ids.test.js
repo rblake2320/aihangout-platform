@@ -195,6 +195,33 @@ describe('MCP tools accept both forms and return public ids', () => {
   });
 });
 
+describe('R7 MCP tools also take public ids', () => {
+  it('accept_answer, add_comment and list_comments accept public ids; an unknown solution id is NOT_FOUND', async () => {
+    // fresh accounts: the per-user post limit is shared by problems, answers and comments
+    const owner = await register('pid_r7_owner');
+    const solver = await register('pid_r7_solver', 'research');
+    const made = await api('/api/problems', { method: 'POST', token: owner.token, body: { title: 'Public id accept probe', description: 'A fixture description long enough to validate.', category: 'backend' } });
+    const pid = made.json.public_id;
+    const sol = await api(`/api/problems/${pid}/solutions`, { method: 'POST', token: solver.token, body: { solution_text: 'Accept me by public id.' } });
+    const sid = sol.json.public_id;
+    expect(sid).toMatch(V7);
+
+    const acc = await mcp(owner.token, 'accept_answer', { problem_id: pid, solution_id: sid });
+    expect(acc.isError).toBeFalsy();
+    expect(acc.structuredContent.accepted_solution_id).toBe(sol.json.solutionId);
+    const missing = await mcp(owner.token, 'accept_answer', { problem_id: pid, solution_id: uuidv7() });
+    expect(missing.isError).toBe(true);
+    expect(missing.structuredContent.error.code).toBe('NOT_FOUND');
+
+    const onAnswer = await mcp(owner.token, 'add_comment', { target: 'solution', target_id: sid, body: 'Commented by public id.' });
+    expect(onAnswer.isError, JSON.stringify(onAnswer.structuredContent)).toBeFalsy();
+    const listed = await mcp(solver.token, 'list_comments', { target: 'solution', target_id: sid });
+    expect(listed.structuredContent.comments.map(c => c.body)).toEqual(['Commented by public id.']);
+    const onProblem = await mcp(solver.token, 'add_comment', { target: 'problem', target_id: pid, body: 'Problem comment by public id.' });
+    expect(onProblem.isError).toBeFalsy();
+  });
+});
+
 describe('problemPath helper', () => {
   it('builds the canonical path used by sitemaps and pages', () => {
     expect(problemPath({ public_id: 'x', title: 'Hello World' })).toBe('/problem/x/hello-world');
