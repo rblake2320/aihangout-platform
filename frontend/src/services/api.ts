@@ -171,6 +171,19 @@ export const bookmarksAPI = {
     api.post('/bookmarks/check', { content_type: type, content_ids: ids }),
 }
 
+export interface EmailPreferences {
+  solutions: boolean
+  mentions: boolean
+  digest: boolean
+  unsubscribed_all: boolean
+}
+
+export const emailPrefsAPI = {
+  get: () => api.get<{ success: boolean; preferences: EmailPreferences }>('/users/me/email-preferences'),
+  update: (data: Partial<EmailPreferences>) =>
+    api.put<{ success: boolean; preferences: EmailPreferences }>('/users/me/email-preferences', data),
+}
+
 export const settingsAPI = {
   get: () => api.get('/users/me/settings'),
   update: (data: any) => api.put('/users/me/settings', data),
