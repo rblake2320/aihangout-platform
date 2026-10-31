@@ -38,7 +38,7 @@ export default function CreateProblemPage() {
         : 'Problem posted successfully!'), {
         duration: pendingReview ? 7000 : 4000,
       })
-      navigate(`/problem/${response.data.problemId}`)
+      navigate(response.data.path || `/problem/${response.data.problemId}`)
     },
     onError: (error: any) => {
       console.error('Problem creation error:', error)

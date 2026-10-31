@@ -9,6 +9,7 @@ import { StarIcon as StarIconSolid } from '@heroicons/react/24/solid'
 import toast from 'react-hot-toast'
 import ReportButton from './ReportButton'
 import LiveProfileAvatar from './LiveProfileAvatar'
+import { problemPath } from '../utils/problemPath'
 
 interface Problem {
   id: string
@@ -110,7 +111,7 @@ export default function ProblemCard({ problem, isBookmarked: initialBookmarked =
           {/* Title */}
           <h2 className="min-w-0 text-xl font-semibold text-gray-900 mb-2 hover:text-blue-600">
             <Link
-              to={`/problem/${problem.id}`}
+              to={problemPath(problem)}
               className="block max-w-full"
               style={{ overflowWrap: 'anywhere' }}
             >

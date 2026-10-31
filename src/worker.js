@@ -12,6 +12,7 @@ import {
   profilesSitemap, staticSitemap, loadProblemPage, problemPage, loadTagPage, tagPage, loadProfilePage,
   profilePage, SITEMAP_CHUNK_SIZE
 } from './seo/render.js';
+import { uuidv7, isPublicId, slugify, problemPath, publicIdFor, resolvePublicPath } from './public-ids.js';
 
 const router = Router();
 
@@ -1527,6 +1528,7 @@ router.post('/api/auth/register', async (request, env, ctx) => {
     // into stored notification text and AI-facing surfaces, so it must not carry HTML, quotes,
     // whitespace tricks, or LLM control tokens (<|im_start|>, [INST], etc.).
     if (!/^[A-Za-z0-9_.-]+$/.test(username)) return reject('username_charset', { success: false, error: 'Username may only contain letters, numbers, and _ . -' });
+    if (isPublicId(username)) return reject('username_charset', { success: false, error: 'Username may not have the shape of a public id' });
     if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return reject('email_invalid', { success: false, error: 'Invalid email' });
     const passwordError = validateNewPassword(password);
     if (passwordError) return reject('password_policy', { success: false, error: passwordError });
@@ -1568,12 +1570,13 @@ router.post('/api/auth/register', async (request, env, ctx) => {
 
     // Create user
     let result;
+    const userPublicId = uuidv7();
     try {
       result = await env.AIHANGOUT_DB
         .prepare(`INSERT INTO users
-          (username, email, password_hash, ai_agent_type, tos_accepted_version, tos_accepted_at)
-          VALUES (?, ?, ?, ?, ?, datetime('now'))`)
-        .bind(username, email, passwordHash, aiAgentType, TOS_CURRENT_VERSION)
+          (username, email, password_hash, ai_agent_type, tos_accepted_version, tos_accepted_at, public_id)
+          VALUES (?, ?, ?, ?, ?, datetime('now'), ?)`)
+        .bind(username, email, passwordHash, aiAgentType, TOS_CURRENT_VERSION, userPublicId)
         .run();
     } catch (dbError) {
       console.error('Database insert error:', dbError);
@@ -1632,7 +1635,7 @@ router.post('/api/auth/register', async (request, env, ctx) => {
     return new Response(JSON.stringify({
       success: true,
       token,
-      user: { id: userId, username, email, aiAgentType, emailVerified: false },
+      user: { id: userId, public_id: userPublicId, username, email, aiAgentType, emailVerified: false },
       verificationEmailSent: Boolean(env.RESEND_API_KEY)
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -1930,7 +1933,8 @@ router.get('/api/auth/me', async (request, env) => {
       email: user.email,
       reputation: user.reputation,
       aiAgentType: user.ai_agent_type,
-      is_admin: !!user.is_admin
+      is_admin: !!user.is_admin,
+      public_id: user.id > 0 ? await publicIdFor(env.AIHANGOUT_DB, 'users', user.id) : null
     }
   }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });
@@ -2083,6 +2087,8 @@ router.get('/api/problems', async (request, env, ctx) => {
     };
     const sanitizedProblems = (problems.results || []).map(p => ({
       id: p.id,
+      public_id: p.public_id,
+      slug: slugify(p.title),
       title: p.title,
       description: p.description ? p.description.replace(bountyPattern, '').trim() : p.description,
       category: normalizeCategory(p.category),
@@ -2275,6 +2281,7 @@ router.get('/api/problems/:id', async (request, env) => {
     };
     const sanitizedProblem = {
       ...problem,
+      slug: slugify(problem.title),
       description: problem.description ? problem.description.replace(bountyPatternSingle, '').trim() : problem.description,
       category: normalizeCategorySingle(problem.category),
     };
@@ -2546,13 +2553,14 @@ router.post('/api/problems', async (request, env) => {
       }
     }
 
+    const problemPublicId = uuidv7();
     const result = await env.AIHANGOUT_DB
       .prepare(`INSERT INTO problems
         (user_id, title, description, category, difficulty, ai_context, spof_indicators,
          bounty_amount, estimated_value, impact_level, affected_users, time_to_solve,
          industry, tags, source_url, external_id, is_harvested, is_public, moderation_flag,
-         solver_type, agent_name, status, content_flags, tos_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         solver_type, agent_name, status, content_flags, tos_version, public_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(user.id, safeTitle.trim(), safeDescription.trim(), normalizedCategory.trim(), difficulty,
             aiContextJson, spofIndicatorsJson,
             effectiveBounty, effectiveEstimated, effectiveImpactLevel, effectiveAffectedUsers,
@@ -2560,7 +2568,7 @@ router.post('/api/problems', async (request, env) => {
             external_id || crypto.randomUUID(), effectiveIsHarvested ? 1 : 0, is_public ? 1 : 0,
             problemModerationFlag || null,
             effectiveSolverType, agentName || null, effectiveStatus, problemContentFlags,
-            user.tos_accepted_version)
+            user.tos_accepted_version, problemPublicId)
       .run();
 
     // Log agent request for audit trail
@@ -2641,6 +2649,8 @@ router.post('/api/problems', async (request, env) => {
     const responseBody = {
       success: true,
       problemId: result.meta.last_row_id,
+      public_id: problemPublicId,
+      path: problemPath({ public_id: problemPublicId, title: safeTitle.trim() }),
       message: agentName
         ? 'Problem submitted for review. Agent-generated content requires human approval before appearing in the main feed.'
         : (effectiveStatus === 'pending_review'
@@ -2907,14 +2917,15 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     // but the gate logic is preserved here for when verified-by-default is introduced.)
     const solNeedsReview = !SOL_BETA_MODE && (solIsFirstPost || solScanResult.risk === 'high');
 
+    const solutionPublicId = uuidv7();
     const result = await env.AIHANGOUT_DB
       .prepare(`INSERT INTO solutions
         (problem_id, user_id, solution_text, code_snippet, why_explanation, moderation_flag, moderation_score,
-         solver_type, agent_name, content_flags, tos_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         solver_type, agent_name, content_flags, tos_version, public_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(problemId, user.id, safeSolutionText, safeCodeSnippet ?? null, safeWhyExplanation ?? null,
             solModerationFlag || null, solModerationScore,
-            solSolverType, solAgentName || null, solContentFlags, user.tos_accepted_version)
+            solSolverType, solAgentName || null, solContentFlags, user.tos_accepted_version, solutionPublicId)
       .run();
 
     // Log agent request for audit trail
@@ -2984,6 +2995,7 @@ router.post('/api/problems/:problemId/solutions', async (request, env, ctx) => {
     return new Response(JSON.stringify({
       success: true,
       solutionId: result.meta.last_row_id,
+      public_id: solutionPublicId,
       solver_type: solSolverType,
       flagged: solScanResult.flagged,
       ...(SOL_BETA_MODE ? { beta: true } : {}),
@@ -17849,7 +17861,11 @@ async function renderSeoPage(request, env, load, render) {
       const html = renderIntoShell(shell, { title: 'Not found | AI Hangout', description: 'This page is not available.', robots: 'noindex', bodyHtml: '' });
       return spaHtmlResponse(html, { status: 404, headers: { 'X-Robots-Tag': 'noindex' } });
     }
-    return spaHtmlResponse(renderIntoShell(shell, render(origin, data)));
+    const rendered = render(origin, data);
+    if (rendered.redirect) {
+      return new Response(null, { status: 301, headers: { Location: rendered.redirect, 'Cache-Control': 'public, max-age=3600' } });
+    }
+    return spaHtmlResponse(renderIntoShell(shell, rendered));
   } catch (error) {
     console.error('[SEO] render failed', url.pathname, error?.message || error);
     const html = renderIntoShell(shell, { title: 'AI Hangout', description: 'Temporarily unavailable.', robots: 'noindex', bodyHtml: '' });
@@ -17898,11 +17914,24 @@ router.get('/sitemaps/:file', async (request, env) => {
   }
 });
 
-router.get('/problem/:id', (request, env) => {
-  const id = request.params.id;
-  if (!/^[1-9]\d{0,15}$/.test(id || '')) return undefined; // not ours: fall through to the SPA
-  return renderSeoPage(request, env, (db) => loadProblemPage(db, Number(id)), problemPage);
-});
+// Old integer URLs, slug-less URLs and stale slugs 301 to the canonical URL; only
+// indexable problems redirect, everything else is the same 404 + noindex.
+function problemRoute(request, env) {
+  const { id, slug } = request.params;
+  const key = /^[1-9]\d{0,15}$/.test(id || '') ? { id: Number(id) } : isPublicId(id) ? { publicId: id.toLowerCase() } : null;
+  if (!key) return undefined; // not ours: fall through to the SPA
+  return renderSeoPage(request, env, (db) => loadProblemPage(db, key), (origin, data) => {
+    const canonicalPath = problemPath(data.problem);
+    const requested = new URL(request.url).pathname;
+    if (requested !== canonicalPath || decodeParam(slug) !== slugify(data.problem.title)) {
+      return { redirect: origin + canonicalPath };
+    }
+    return problemPage(origin, data);
+  });
+}
+
+router.get('/problem/:id', problemRoute);
+router.get('/problem/:id/:slug', problemRoute);
 
 router.get('/tags/:tag', (request, env) => {
   const tag = decodeParam(request.params.tag).slice(0, 60);
@@ -17915,8 +17944,15 @@ router.get('/tags/:tag', (request, env) => {
   }, tagPage);
 });
 
-router.get('/profile/:username', (request, env) => {
+router.get('/profile/:username', async (request, env) => {
   const username = decodeParam(request.params.username);
+  if (isPublicId(username)) {
+    // A member's public id redirects to the username URL (usernames cannot be UUID-shaped).
+    const row = await env.AIHANGOUT_DB.prepare('SELECT username FROM users WHERE public_id = ?').bind(username.toLowerCase()).first().catch(() => null);
+    if (row) {
+      return new Response(null, { status: 301, headers: { Location: `${canonicalOrigin(new URL(request.url))}/profile/${encodeURIComponent(row.username)}`, 'Cache-Control': 'public, max-age=3600' } });
+    }
+  }
   if (!/^[A-Za-z0-9_.-]{1,50}$/.test(username)) return undefined;
   return renderSeoPage(request, env, (db) => loadProfilePage(db, username), profilePage);
 });
@@ -18434,6 +18470,19 @@ export default {
         checkRateLimit,
         dispatch: (req) => this.fetch(req, env, ctx)
       });
+    }
+
+    // AIH-R2: /api/<collection>/<public_id>/... resolves to the internal integer id, so
+    // every existing route accepts both forms without per-handler changes.
+    if (url.pathname.startsWith('/api/') && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(url.pathname)) {
+      const resolved = await resolvePublicPath(env.AIHANGOUT_DB, url.pathname);
+      if (resolved.notFound) {
+        return jsonResponse({ success: false, error: 'Not found', code: 'NOT_FOUND' }, { status: 404 });
+      }
+      if (resolved.changed) {
+        url.pathname = resolved.pathname;
+        request = new Request(url.toString(), request);
+      }
     }
 
     if (url.pathname.startsWith('/api/')) {

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { problemPath } from '../utils/problemPath'
 import {
   BanknotesIcon,
   FireIcon,
@@ -185,7 +186,7 @@ export default function ProblemBankPage() {
           Source: {problem.source}
           {problem.company && ` • ${problem.company}`}
         </div>
-        <Link to={`/problem/${problem.id}`} className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors inline-block">
+        <Link to={problemPath(problem)} className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors inline-block">
           Take Challenge
         </Link>
       </div>

@@ -9,6 +9,7 @@ import FollowButton from '../components/FollowButton'
 import FollowersList from '../components/FollowersList'
 import { parseApiDate } from '../utils/date'
 import LiveProfileAvatar from '../components/LiveProfileAvatar'
+import { problemPath } from '../utils/problemPath'
 
 export default function ProfilePage() {
   const { username } = useParams<{ username: string }>()
@@ -163,7 +164,7 @@ export default function ProfilePage() {
             {problems.map((p: any) => (
               <Link
                 key={p.id}
-                to={`/problem/${p.id}`}
+                to={problemPath(p)}
                 className="block bg-white rounded-lg shadow-sm border border-gray-200 p-4 hover:border-blue-300 transition-colors"
               >
                 <div className="flex items-start justify-between">
