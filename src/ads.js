@@ -56,6 +56,59 @@ function safeUrl(value, { allowPath }) {
   }
 }
 
+// Creative images are fetched by the Worker, never by the visitor's browser, so an
+// advertiser's image host never sees a visitor's IP address, cookies or referrer.
+// The image host must be a public DNS name: no IP literals, no localhost.
+function safeImageUrl(value) {
+  const u = safeUrl(value, { allowPath: false });
+  if (!u) return null;
+  const host = new URL(u).hostname;
+  if (host === 'localhost' || host.endsWith('.localhost') || /^[\d.]+$/.test(host) || host.includes(':') || !host.includes('.')) return null;
+  return u;
+}
+
+export const creativePath = (publicId) => `/api/ads/creative/${publicId}`;
+export const CREATIVE_MAX_BYTES = 512 * 1024;
+const IMAGE_SIGNATURES = {
+  'image/png': (b) => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47,
+  'image/jpeg': (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  'image/gif': (b) => b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38,
+  'image/webp': (b) => b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
+};
+
+// Fetch one creative with a fresh request (no visitor headers are copied), no redirects,
+// a raster-image type allowlist (no SVG: it can carry script), a magic-byte check that the
+// bytes are what the header claims, and a size cap. Returns { ok, type, bytes } or { ok: false, reason }.
+export async function fetchCreative(url, fetchImpl = fetch) {
+  let res;
+  try {
+    res = await fetchImpl(new Request(url, { method: 'GET', redirect: 'manual', headers: { Accept: Object.keys(IMAGE_SIGNATURES).join(', ') } }));
+  } catch (_) {
+    return { ok: false, reason: 'fetch_failed' };
+  }
+  if (res.status !== 200) return { ok: false, reason: `status_${res.status}` };
+  const type = (res.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+  if (!IMAGE_SIGNATURES[type]) return { ok: false, reason: 'type_not_allowed' };
+  const declared = Number(res.headers.get('Content-Length') || 0);
+  if (declared > CREATIVE_MAX_BYTES) return { ok: false, reason: 'too_large' };
+  const reader = res.body?.getReader();
+  if (!reader) return { ok: false, reason: 'empty' };
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > CREATIVE_MAX_BYTES) { await reader.cancel(); return { ok: false, reason: 'too_large' }; }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { bytes.set(c, off); off += c.byteLength; }
+  if (total < 12 || !IMAGE_SIGNATURES[type](bytes)) return { ok: false, reason: 'signature_mismatch' };
+  return { ok: true, type, bytes };
+}
+
 function isoOrNull(value) {
   if (value == null || value === '') return { ok: true, value: null };
   const t = Date.parse(String(value));
@@ -103,8 +156,8 @@ export function validateCampaign(input, { partial = false, clean = (s) => s } = 
   if (has('image_url')) {
     if (input.image_url == null || input.image_url === '') out.image_url = null;
     else {
-      const u = safeUrl(input.image_url, { allowPath: false });
-      if (!u) errors.push('image_url must be an https URL');
+      const u = safeImageUrl(input.image_url);
+      if (!u) errors.push('image_url must be an https URL on a public host name');
       else out.image_url = u;
     }
   }
@@ -136,7 +189,8 @@ function publicAd(c, placement) {
     headline: c.headline,
     body: c.body || null,
     cta: c.cta || null,
-    image_url: c.image_url || null,
+    // Same-origin proxy path, never the advertiser's URL (see fetchCreative).
+    image_url: c.image_url ? creativePath(c.public_id) : null,
     url: c.click_url,
     rel: sponsored ? 'sponsored noopener noreferrer' : null
   };
@@ -238,6 +292,42 @@ export function registerAdRoutes(router, deps) {
       // An ad must never break a page: fail to "no ad".
       console.error('[Ads] serve failed', error?.message || error);
       return jsonResponse({ success: true, ad: null }, { headers: { 'Cache-Control': 'no-store' } });
+    }
+  });
+
+  router.get('/api/ads/creative/:id', async (request, env) => {
+    const notFound = () => new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
+    try {
+      const id = String(request.params.id || '').toLowerCase();
+      if (!UUID_RE.test(id)) return notFound();
+      const c = await env.AIHANGOUT_DB.prepare(
+        "SELECT public_id, image_url, updated_at FROM ad_campaigns WHERE public_id = ? AND status != 'draft'"
+      ).bind(id).first();
+      if (!c || !c.image_url) return notFound();
+      // Cache per campaign revision so one fetch serves every viewer until the campaign changes.
+      const cacheKey = new Request(`https://ads-creative.internal/${c.public_id}?v=${encodeURIComponent(c.updated_at || '')}`);
+      const cache = typeof caches !== 'undefined' ? caches.default : null;
+      const hit = cache ? await cache.match(cacheKey) : null;
+      if (hit) return hit;
+      const got = await fetchCreative(c.image_url);
+      if (!got.ok) {
+        console.error('[Ads] creative unavailable', c.public_id, got.reason);
+        return notFound();
+      }
+      const res = new Response(got.bytes, {
+        headers: {
+          'Content-Type': got.type,
+          'Cache-Control': 'public, max-age=86400',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+          'Cross-Origin-Resource-Policy': 'same-origin'
+        }
+      });
+      if (cache) await cache.put(cacheKey, res.clone());
+      return res;
+    } catch (error) {
+      console.error('[Ads] creative failed', error?.message || error);
+      return notFound();
     }
   });
 

@@ -1,6 +1,6 @@
 import { SELF, env } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
-import { selectAd, validateCampaign, normaliseTags } from '../src/ads.js';
+import { selectAd, validateCampaign, normaliseTags, fetchCreative, CREATIVE_MAX_BYTES } from '../src/ads.js';
 
 // AIH-R9: first-party ad slots. Real workerd, real D1 with migration 0026 (house-ad seed),
 // real routes. Event rows are read back from analytics_events.
@@ -210,5 +210,56 @@ describe('validation helpers', () => {
     expect(normaliseTags(' Embeddings, vector-search ,,<x>, c++ ')).toEqual(['embeddings', 'vector-search', 'c++']);
     const v = validateCampaign({ status: 'paused' }, { partial: true });
     expect(v).toEqual({ ok: true, errors: [], value: { status: 'paused' } });
+  });
+});
+
+describe('creative images never expose visitors to the advertiser host', () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 1, 2, 3]);
+  const fake = (response, seen = []) => async (req) => { seen.push(req); return response; };
+
+  it('served ads carry a same-origin proxy path, never the advertiser image URL', async () => {
+    const created = await call('/api/admin/campaigns', {
+      method: 'POST', token: admin.token,
+      body: { ...sponsor, name: 'With image', placements: ['feed-inline'], target_tags: ['imgtag'], image_url: 'https://img.vectors.example.com/banner.png' }
+    });
+    expect(created.res.status).toBe(201);
+    const { json } = await call('/api/ads/serve?placement=feed-inline&tags=imgtag');
+    expect(json.ad.campaign_id).toBe(created.json.campaign.id);
+    expect(json.ad.image_url).toBe(`/api/ads/creative/${created.json.campaign.id}`);
+    expect(JSON.stringify(json)).not.toContain('img.vectors.example.com');
+  });
+
+  it('image URLs must be https on a public host name', async () => {
+    for (const image_url of ['http://img.example.com/a.png', 'https://127.0.0.1/a.png', 'https://localhost/a.png', 'https://[::1]/a.png', 'https://intranet/a.png']) {
+      const { res } = await call('/api/admin/campaigns', { method: 'POST', token: admin.token, body: { ...sponsor, image_url } });
+      expect(res.status, image_url).toBe(400);
+    }
+  });
+
+  it('fetchCreative sends a fresh request with no visitor headers and refuses redirects', async () => {
+    const seen = [];
+    const ok = await fetchCreative('https://img.example.com/a.png', fake(new Response(PNG, { headers: { 'Content-Type': 'image/png' } }), seen));
+    expect(ok).toMatchObject({ ok: true, type: 'image/png' });
+    expect(ok.bytes).toEqual(PNG);
+    expect(seen[0].redirect).toBe('manual');
+    expect([...seen[0].headers.keys()]).toEqual(['accept']); // nothing about the visitor
+    const redirected = await fetchCreative('https://img.example.com/a.png', fake(new Response(null, { status: 302, headers: { Location: 'https://elsewhere.example.com/' } })));
+    expect(redirected).toEqual({ ok: false, reason: 'status_302' });
+  });
+
+  it('fetchCreative refuses SVG, mislabelled bytes, oversized bodies and network errors', async () => {
+    expect((await fetchCreative('https://i.example.com/x', fake(new Response('<svg onload="alert(1)"/>', { headers: { 'Content-Type': 'image/svg+xml' } })))).reason).toBe('type_not_allowed');
+    expect((await fetchCreative('https://i.example.com/x', fake(new Response('<html>not an image</html>', { headers: { 'Content-Type': 'image/png' } })))).reason).toBe('signature_mismatch');
+    const big = new Uint8Array(CREATIVE_MAX_BYTES + 1); big.set(PNG);
+    expect((await fetchCreative('https://i.example.com/x', fake(new Response(big, { headers: { 'Content-Type': 'image/png' } })))).reason).toBe('too_large');
+    expect((await fetchCreative('https://i.example.com/x', fake(new Response(PNG, { headers: { 'Content-Type': 'image/png', 'Content-Length': String(CREATIVE_MAX_BYTES + 1) } })))).reason).toBe('too_large');
+    expect((await fetchCreative('https://i.example.com/x', async () => { throw new Error('dns'); })).reason).toBe('fetch_failed');
+  });
+
+  it('the proxy route 404s for unknown ids, image-less campaigns and drafts', async () => {
+    expect((await call('/api/ads/creative/not-a-uuid')).res.status).toBe(404);
+    expect((await call('/api/ads/creative/00000000-0000-4000-8000-000000000000')).res.status).toBe(404);
+    expect((await call(`/api/ads/creative/${sponsor.id}`)).res.status).toBe(404); // no image on this campaign
+    expect((await call('/api/ads/creative/8f0a2c1e-5b4d-4e6f-9a1b-2c3d4e5f6a01')).res.status).toBe(404); // house ad, no image
   });
 });
