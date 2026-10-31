@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { problemsAPI, bookmarksAPI } from '../services/api'
 import ProblemCard from '../components/ProblemCard'
+import AdSlot from '../components/AdSlot'
 import CategoryFilter from '../components/CategoryFilter'
 import { useAuthStore } from '../stores/authStore'
 import {
@@ -444,8 +445,11 @@ export default function HomePage() {
         </div>
       ) : (
         <div className="space-y-4">
-          {problems.map((problem: any) => (
-            <ProblemCard key={problem.id} problem={problem} isBookmarked={bookmarkedIds.has(parseInt(problem.id))} />
+          {problems.map((problem: any, index: number) => (
+            <div key={problem.id} className="space-y-4">
+              <ProblemCard problem={problem} isBookmarked={bookmarkedIds.has(parseInt(problem.id))} />
+              {index === 2 && <AdSlot placement="feed-inline" />}
+            </div>
           ))}
         </div>
       )}

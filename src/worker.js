@@ -7,6 +7,7 @@
 import { Router } from 'itty-router';
 import { EncryptJWT, jwtDecrypt } from 'jose';
 import { handleMcpRequest } from './mcp/server.js';
+import { registerAdRoutes } from './ads.js';
 import {
   normalizeTag, listTags, problemsForTag, setAcceptedSolution,
   cleanCommentBody, assertCommentable, insertComment, listComments, hideOwnComment, resolveMentions,
@@ -17794,6 +17795,9 @@ router.put('/api/users/me/live-profile', async (request, env) => {
   } catch (error) { return errResponse('Unable to save live profile', error); }
 });
 
+// AIH-R9: first-party ad slots and campaigns (src/ads.js). Registered before the
+// catch-all so its GET routes are not shadowed.
+registerAdRoutes(router, { authenticate, checkRateLimit, rateLimitResponse, jsonResponse, errResponse, sanitizeContent });
 // ── AIH-R7: tags (logic in src/qa.js). Tag listing and tag pages are JSON; the HTML tag page
 // and the ?tag= feed filter come from AIH-R1. ──
 const qaJson = (body, status = 200) => new Response(JSON.stringify(body), {
