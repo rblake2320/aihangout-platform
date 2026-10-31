@@ -19530,6 +19530,7 @@ export default {
     if (cron === '0 6 * * *') {
       ctx.waitUntil(runDailyHarvest(env));
       ctx.waitUntil(sendOpsDigest(env));
+      ctx.waitUntil(pruneTelemetryEvents(env));
       return;
     }
     // Email pipeline (AIH-R5): Monday 14:00 UTC queues the weekly digests; every run flushes.
@@ -19556,6 +19557,20 @@ async function runNightlyBackup(env, now) {
   } catch (error) {
     console.error('[Backup] failed:', error?.message || error);
     await recordOpsFailure(env, null, { kind: 'backup', reason: error?.message || error });
+  }
+}
+
+// Session telemetry is high-volume and only useful recent; keep 30 days. Other
+// analytics_events types are untouched.
+const TELEMETRY_RETENTION_DAYS = 30;
+async function pruneTelemetryEvents(env) {
+  try {
+    const r = await env.AIHANGOUT_DB.prepare(
+      `DELETE FROM analytics_events WHERE event_type LIKE 'tel\\_%' ESCAPE '\\' AND timestamp < datetime('now', ?)`
+    ).bind(`-${TELEMETRY_RETENTION_DAYS} days`).run();
+    console.log(`[Cron] Telemetry prune removed ${r.meta?.changes ?? 0} rows`);
+  } catch (error) {
+    console.error('[Cron] Telemetry prune failed:', error?.message || error);
   }
 }
 

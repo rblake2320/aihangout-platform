@@ -162,3 +162,19 @@ it('exposes duration buckets, median active time, frustration, errors and scroll
   expect(summary.failures).toBeDefined();
   expect(summary.logins).toBeDefined();
 });
+
+it('the daily cron prunes telemetry older than 30 days and leaves every other event alone', async () => {
+  const { createScheduledController, createExecutionContext, waitOnExecutionContext } = await import('cloudflare:test');
+  const worker = (await import('../src/worker.js')).default;
+  const db = env.AIHANGOUT_DB;
+  const ins = (type, age) => db.prepare(`INSERT INTO analytics_events (event_type, session_id, timestamp) VALUES (?, 'prune-test', datetime('now', ?))`).bind(type, age).run();
+  await ins('tel_page_view', '-31 days');
+  await ins('tel_rage_click', '-40 days');
+  await ins('tel_page_view', '-29 days');
+  await ins('user_login', '-400 days'); // not telemetry: must survive however old
+  const ctx = createExecutionContext();
+  await worker.scheduled(createScheduledController({ scheduledTime: Date.now(), cron: '0 6 * * *' }), env, ctx);
+  await waitOnExecutionContext(ctx);
+  const left = (await db.prepare(`SELECT event_type FROM analytics_events WHERE session_id = 'prune-test' ORDER BY id`).all()).results.map(r => r.event_type);
+  expect(left).toEqual(['tel_page_view', 'user_login']);
+});
