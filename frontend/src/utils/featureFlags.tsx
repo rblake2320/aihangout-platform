@@ -7,6 +7,8 @@ interface FeatureFlags {
   newDesign: boolean;
   debugSSE: boolean;
   enableDevFeatures: boolean;
+  /** Kill switch for session telemetry. On by default; build with VITE_SESSION_TELEMETRY=false to disable. */
+  sessionTelemetry: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -14,6 +16,7 @@ export const featureFlags: FeatureFlags = {
   newDesign: import.meta.env.VITE_NEW_DESIGN === 'true',
   debugSSE: import.meta.env.VITE_DEBUG_SSE === 'true',
   enableDevFeatures: import.meta.env.VITE_ENABLE_DEV_FEATURES === 'true',
+  sessionTelemetry: import.meta.env.VITE_SESSION_TELEMETRY !== 'false',
   logLevel: (import.meta.env.VITE_LOG_LEVEL as FeatureFlags['logLevel']) || 'info',
 };
 

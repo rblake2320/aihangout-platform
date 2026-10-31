@@ -169,6 +169,7 @@ async function checkRateLimit(kv, ip, userId, action, opts = {}) {
     post:     { ip60: 5,   ip3600: 30,  uid60: 3,   uid3600: 20  },
     vote:     { ip60: 20,  ip3600: 100, uid60: 10,  uid3600: 50  },
     api:      { ip60: 60,  ip3600: 300, uid60: 999, uid3600: 999 },
+    telemetry: { ip60: 30, ip3600: 600, uid60: 999, uid3600: 999 }, // one batch per ~10s per tab, with headroom for NAT
   };
   const lim = limits[action] || limits.api;
   const keys = [
@@ -3531,6 +3532,104 @@ router.get('/api/admin/ops-summary', async (request, env) => {
     return jsonResponse({ success: true, ...summary }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return errResponse('Unable to build ops summary', error);
+  }
+});
+
+// ============================================================================
+// SESSION TELEMETRY — POST /api/analytics/batch
+// Browser client: frontend/src/telemetry. Rows land in analytics_events as tel_<type>.
+// Allowlist is per event type and per field: unknown keys are dropped, so a stray
+// `value` (or anything else the client was never meant to send) cannot reach D1.
+// ============================================================================
+const TELEMETRY_MAX_BODY_BYTES = 64 * 1024;
+const TELEMETRY_MAX_EVENTS = 50;
+const T_STR = (max) => ({ t: 'str', max });
+const T_NUM = (min, max) => ({ t: 'num', min, max });
+const T_BOOL = { t: 'bool' };
+const TELEMETRY_SPECS = {
+  page_view: { resumed: T_BOOL, viewport_w: T_NUM(0, 20000), viewport_h: T_NUM(0, 20000), referrer_host: T_STR(100) },
+  page_leave: { duration_ms: T_NUM(0, 86400000), active_ms: T_NUM(0, 86400000), idle_ms: T_NUM(0, 86400000), scroll_max_pct: T_NUM(0, 100), route_next: T_STR(200) },
+  rage_click: { selector: T_STR(120), count: T_NUM(1, 1000), window_ms: T_NUM(0, 60000), navigated: T_BOOL },
+  dead_click: { selector: T_STR(120), wait_ms: T_NUM(0, 60000) },
+  form_abandon: { form: T_STR(120), fields_touched: T_NUM(0, 1000), fields_total: T_NUM(0, 1000), last_field: T_STR(40), ms_in_form: T_NUM(0, 86400000) },
+  client_error: { source: T_STR(30), message: T_STR(300), stack: T_STR(1000), filename: T_STR(200), fingerprint: T_STR(16) },
+  net_fail: { method: T_STR(10), path: T_STR(200), status: T_NUM(0, 999), duration_ms: T_NUM(0, 3600000), kind: T_STR(10) }
+};
+
+function scrubTelemetryString(value, max) {
+  return String(value)
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>')
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '<token>')
+    .slice(0, max);
+}
+
+function normalizeTelemetryEvent(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const spec = Object.prototype.hasOwnProperty.call(TELEMETRY_SPECS, raw.type) ? TELEMETRY_SPECS[raw.type] : null;
+  if (!spec) return null;
+  const data = {};
+  const input = raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data) ? raw.data : {};
+  for (const [key, rule] of Object.entries(spec)) {
+    const v = input[key];
+    if (rule.t === 'str' && typeof v === 'string') data[key] = scrubTelemetryString(v, rule.max);
+    else if (rule.t === 'num' && typeof v === 'number' && Number.isFinite(v)) data[key] = Math.min(rule.max, Math.max(rule.min, Math.round(v)));
+    else if (rule.t === 'bool' && typeof v === 'boolean') data[key] = v;
+  }
+  const route = typeof raw.route === 'string' && raw.route.startsWith('/') ? raw.route.split(/[?#]/)[0].slice(0, 200) : '/';
+  const skew = typeof raw.ts === 'number' ? Math.abs(Date.now() - raw.ts) : Infinity;
+  if (skew <= 24 * 3600 * 1000) data.client_ts = Math.round(raw.ts);
+  return { event_type: `tel_${raw.type}`, route, data };
+}
+
+router.post('/api/analytics/batch', async (request, env) => {
+  try {
+    if (env.TELEMETRY_DISABLED === 'true') return new Response(null, { status: 204, headers: corsHeaders });
+    const ip = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
+    const rl = await checkRateLimit(env.AIHANGOUT_KV, ip, null, 'telemetry');
+    if (rl.limited) return rateLimitResponse(rl);
+
+    const declared = Number(request.headers.get('Content-Length') || 0);
+    if (declared > TELEMETRY_MAX_BODY_BYTES) return errResponse('Batch too large', null, 413);
+    const text = await request.text();
+    if (text.length > TELEMETRY_MAX_BODY_BYTES) return errResponse('Batch too large', null, 413);
+    let body;
+    try { body = JSON.parse(text); } catch { return errResponse('Invalid JSON', null, 400); }
+    if (!body || typeof body.session_id !== 'string' || !/^[a-f0-9]{16,64}$/.test(body.session_id)) return errResponse('Invalid session_id', null, 400);
+    if (!Array.isArray(body.events) || body.events.length === 0) return errResponse('events must be a non-empty array', null, 400);
+    if (body.events.length > TELEMETRY_MAX_EVENTS) return errResponse(`At most ${TELEMETRY_MAX_EVENTS} events per batch`, null, 400);
+
+    // Attribute to the bearer token when present. Beacons cannot carry headers, so fall back
+    // to the user already bound to this (random, unguessable) session id by earlier batches.
+    let user = null;
+    try { user = await authenticate(request, env); } catch { user = null; }
+    let userId = user && user.id > 0 ? user.id : null;
+    let userType = user && user.id > 0 ? (user.ai_agent_type || 'human') : null;
+    if (!userId) {
+      const prior = await env.AIHANGOUT_DB.prepare(
+        `SELECT a.user_id, a.user_type FROM analytics_events a WHERE a.session_id = ? AND a.user_id IS NOT NULL AND a.event_type LIKE 'tel\\_%' ESCAPE '\\' LIMIT 1`
+      ).bind(body.session_id).first();
+      if (prior) { userId = prior.user_id; userType = prior.user_type; }
+    }
+
+    const accepted = [];
+    let rejected = 0;
+    for (const raw of body.events) {
+      const ev = normalizeTelemetryEvent(raw);
+      if (ev) accepted.push(ev); else rejected++;
+    }
+    const userAgent = (request.headers.get('User-Agent') || '').slice(0, 300);
+    await Promise.all(accepted.map(ev => logAnalyticsEvent(env, {
+      event_type: ev.event_type,
+      user_id: userId,
+      user_type: userType || 'anonymous',
+      session_id: body.session_id,
+      page_url: ev.route,
+      user_agent: userAgent,
+      event_data: JSON.stringify(ev.data)
+    })));
+    return jsonResponse({ success: true, accepted: accepted.length, rejected });
+  } catch (error) {
+    return errResponse('Unable to record telemetry', error);
   }
 });
 
@@ -18487,6 +18586,7 @@ async function buildOpsSummary(env, hours = 24) {
                   AND (event_type <> 'registration_client_result' OR json_extract(event_data, '$.success') = 0)`).bind(since).first()
   ]);
   const parse = row => { try { return JSON.parse(row.event_data || '{}'); } catch { return {}; } };
+  const telemetry = await buildTelemetrySummary(db, since);
   return {
     window_hours: hours,
     generated_at: new Date().toISOString(),
@@ -18500,7 +18600,54 @@ async function buildOpsSummary(env, hours = 24) {
     logins: { ...logins, recent: recentLogins.results || [] },
     registrations,
     active_sessions: sessions.results || [],
-    client_errors: clientErrors?.count || 0
+    client_errors: clientErrors?.count || 0,
+    telemetry
+  };
+}
+
+const TELEMETRY_DURATION_BUCKETS = [
+  { label: '<10s', max: 10_000 }, { label: '10-60s', max: 60_000 }, { label: '1-5m', max: 300_000 },
+  { label: '5-30m', max: 1_800_000 }, { label: '30m+', max: Infinity }
+];
+
+// Session telemetry rollups (client: frontend/src/telemetry; ingest: POST /api/analytics/batch).
+// A session's duration and active time are the sums of its page_leave rows.
+async function buildTelemetrySummary(db, since) {
+  const [perSession, byPage, errors, scroll, total] = await Promise.all([
+    db.prepare(`SELECT session_id, SUM(json_extract(event_data, '$.duration_ms')) AS duration_ms, SUM(json_extract(event_data, '$.active_ms')) AS active_ms
+                FROM analytics_events WHERE event_type = 'tel_page_leave' AND timestamp > datetime('now', ?)
+                GROUP BY session_id LIMIT 5000`).bind(since).all(),
+    db.prepare(`SELECT page_url AS page,
+                       SUM(CASE WHEN event_type = 'tel_rage_click' THEN 1 ELSE 0 END) AS rage_clicks,
+                       SUM(CASE WHEN event_type = 'tel_dead_click' THEN 1 ELSE 0 END) AS dead_clicks
+                FROM analytics_events WHERE event_type IN ('tel_rage_click', 'tel_dead_click') AND timestamp > datetime('now', ?)
+                GROUP BY page_url ORDER BY (rage_clicks + dead_clicks) DESC LIMIT 20`).bind(since).all(),
+    db.prepare(`SELECT json_extract(event_data, '$.fingerprint') AS fingerprint, json_extract(event_data, '$.message') AS message,
+                       COUNT(*) AS count, COUNT(DISTINCT session_id) AS sessions, MAX(page_url) AS last_page
+                FROM analytics_events WHERE event_type = 'tel_client_error' AND timestamp > datetime('now', ?)
+                GROUP BY fingerprint, message ORDER BY count DESC LIMIT 10`).bind(since).all(),
+    db.prepare(`SELECT page_url AS page, COUNT(*) AS views, ROUND(AVG(json_extract(event_data, '$.scroll_max_pct'))) AS avg_max_scroll_pct
+                FROM analytics_events WHERE event_type = 'tel_page_leave' AND timestamp > datetime('now', ?)
+                GROUP BY page_url ORDER BY views DESC LIMIT 20`).bind(since).all(),
+    db.prepare(`SELECT COUNT(*) AS events FROM analytics_events WHERE event_type LIKE 'tel\\_%' ESCAPE '\\' AND timestamp > datetime('now', ?)`).bind(since).first()
+  ]);
+  const sessions = perSession.results || [];
+  const buckets = TELEMETRY_DURATION_BUCKETS.map(b => ({ label: b.label, sessions: 0 }));
+  for (const s of sessions) {
+    const idx = TELEMETRY_DURATION_BUCKETS.findIndex(b => (s.duration_ms || 0) < b.max);
+    buckets[idx === -1 ? buckets.length - 1 : idx].sessions++;
+  }
+  const active = sessions.map(s => s.active_ms || 0).sort((a, b) => a - b);
+  const mid = Math.floor(active.length / 2);
+  const medianActive = active.length === 0 ? null : (active.length % 2 ? active[mid] : Math.round((active[mid - 1] + active[mid]) / 2));
+  return {
+    events: total?.events || 0,
+    sessions: sessions.length,
+    sessions_by_duration: buckets,
+    median_active_ms: medianActive,
+    frustration_by_page: byPage.results || [],
+    top_client_errors: errors.results || [],
+    scroll_depth_by_page: scroll.results || []
   };
 }
 
