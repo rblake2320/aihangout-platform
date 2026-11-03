@@ -122,3 +122,14 @@ export `ev_c78b7ace...` for the retained bytes.
 - Not verified: behaviour against production, real traffic volume, or D1 write cost at scale. Each
   batch performs up to 50 single-row inserts; at the per-IP limit of 30 requests/minute that is a
   ceiling of 1,500 rows/minute per IP, which has not been load tested.
+
+## Default: opt-in until consent exists
+
+The client starts only when the frontend build sets `VITE_SESSION_TELEMETRY=true` (and the browser does not
+send Do Not Track). Unset or any other value means it never starts. This replaces the original default-on
+behaviour, which collected before any consent mechanism existed. Checked by building three ways and reading
+the compiled call: flag unset gives `enabled:!1`, `=false` gives `enabled:!1`, `=true` gives `enabled:!0`.
+The proper fix is the consent ledger; this flag is the stopgap until then.
+
+Deploy note: `scripts/deploy-prod.ps1` rebuilds the frontend (`npm run build`), so the flag takes effect there.
+The committed `frontend/dist` was built default-on and is stale until rebuilt; do not ship it directly.
