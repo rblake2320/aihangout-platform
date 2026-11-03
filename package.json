@@ -12,6 +12,7 @@
     "setup": "npm install && cd frontend && npm install",
     "verify-deployment": "node verify-deployment.js",
     "test": "vitest run",
+    "test:browser": "node scripts/telemetry-browser-check.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {
