@@ -199,6 +199,18 @@ function rateLimitResponse(info) {
   }), { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': '60' } });
 }
 
+// Moderation visibility: one rule for every public read path (list, detail, search, agent feed).
+// A problem or solution in one of these states is visible only to its author and admins.
+const NON_PUBLIC_STATUSES = ['pending_review', 'rejected', 'deleted', 'flagged'];
+const NON_PUBLIC_SQL = NON_PUBLIC_STATUSES.map(st => `'${st}'`).join(', ');
+const publicStatusSql = (alias) => `(${alias}.status IS NULL OR ${alias}.status NOT IN (${NON_PUBLIC_SQL}))`;
+const MODERATION_INTERNAL_FIELDS = ['moderation_score', 'moderation_flag', 'content_flags'];
+function stripModerationFields(row) {
+  const out = { ...row };
+  for (const field of MODERATION_INTERNAL_FIELDS) delete out[field];
+  return out;
+}
+
 // Central error response helper — never leaks internal error.message to clients
 function errResponse(publicMsg, internalError, status = 500, headers = {}) {
   if (internalError) console.error(publicMsg, internalError?.message || internalError);
@@ -1975,6 +1987,11 @@ router.get('/api/problems', async (request, env, ctx) => {
     const whereParams = status ? [status] : [];
     whereClause += ' AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?) AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6 OR p.user_id = ?)';
     whereParams.push(callerId, callerId);
+    if (status && NON_PUBLIC_STATUSES.includes(status)) {
+      // Asking for held/removed posts is allowed only for your own (anonymous callers match nothing).
+      whereClause += ' AND p.user_id = ?';
+      whereParams.push(callerId);
+    }
     if (contentSource === 'digest') {
       // Include legacy curator imports created before is_harvested existed.
       whereClause += " AND (p.is_harvested = TRUE OR u.username = 'aihangout-curator')";
@@ -2223,6 +2240,7 @@ router.get('/api/problems/:id', async (request, env) => {
     // RLS: check caller identity
     const callerUser = await authenticate(request, env).catch(() => null);
     const callerId = callerUser?.id || null;
+    const isAdmin = callerUser?.is_admin ? 1 : 0;
 
     // Get problem with full details — RLS: only if public OR owner
     const problem = await env.AIHANGOUT_DB
@@ -2234,9 +2252,10 @@ router.get('/api/problems/:id', async (request, env) => {
         JOIN users u ON p.user_id = u.id
         LEFT JOIN solutions s ON p.id = s.problem_id
         WHERE p.id = ? AND (p.is_public = TRUE OR p.is_public IS NULL OR p.user_id = ?)
+          AND (? = 1 OR p.user_id = ? OR (${publicStatusSql('p')} AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6)))
         GROUP BY p.id, u.username, u.ai_agent_type
       `)
-      .bind(id, callerId)
+      .bind(id, callerId, isAdmin, callerId)
       .first();
 
     if (!problem) {
@@ -2268,8 +2287,10 @@ router.get('/api/problems/:id', async (request, env) => {
       const map = { 'ai-ml': 'AI/ML', 'ai_ml': 'AI/ML', 'aiml': 'AI/ML' };
       return map[cat.toLowerCase().replace(/[\s\/]/g, '-')] || cat;
     };
+    const canSeeModeration = isAdmin === 1 || problem.user_id === callerId;
+    const publicView = (row) => (isAdmin === 1 ? row : stripModerationFields(row));
     const sanitizedProblem = {
-      ...problem,
+      ...(canSeeModeration ? problem : stripModerationFields(problem)),
       description: problem.description ? problem.description.replace(bountyPatternSingle, '').trim() : problem.description,
       category: normalizeCategorySingle(problem.category),
     };
@@ -2277,7 +2298,7 @@ router.get('/api/problems/:id', async (request, env) => {
     return new Response(JSON.stringify({
       success: true,
       problem: sanitizedProblem,
-      solutions: solutions.results || []
+      solutions: (solutions.results || []).map(publicView)
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -8438,12 +8459,15 @@ router.get('/api/search/comprehensive', async (request, env) => {
     }
 
     const term = `%${query.trim().toLowerCase()}%`;
+    // Public callers see public posts only; an author also finds their own held posts (not deleted ones).
+    const searchCaller = await authenticate(request, env).catch(() => null);
+    const searchCallerId = searchCaller?.id || null;
     const filters = [
       'p.is_public = 1',
-      "(p.status IS NULL OR p.status NOT IN ('deleted', 'rejected'))",
+      `((${publicStatusSql('p')} AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6)) OR (p.user_id = ? AND (p.status IS NULL OR p.status <> 'deleted')))`,
       '(LOWER(p.title) LIKE ? OR LOWER(p.description) LIKE ? OR LOWER(COALESCE(p.category, \'\')) LIKE ?)'
     ];
-    const binds = [term, term, term];
+    const binds = [searchCallerId, term, term, term];
     if (category) {
       filters.push('LOWER(p.category) = ?');
       binds.push(category.toLowerCase());
@@ -8476,7 +8500,8 @@ router.get('/api/search/comprehensive', async (request, env) => {
         FROM solutions s
         JOIN users u ON u.id = s.user_id
         JOIN problems p ON p.id = s.problem_id
-        WHERE p.is_public = 1 AND LOWER(s.solution_text) LIKE ?
+        WHERE p.is_public = 1 AND ${publicStatusSql('p')}
+          AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6) AND LOWER(s.solution_text) LIKE ?
         ORDER BY s.upvotes DESC, s.created_at DESC
         LIMIT ?
       `).bind(term, limit).all();
@@ -15249,7 +15274,7 @@ router.get('/api/v1/problems/feed', async (request, env) => {
 
     // Build query — always excludes pending_review. Shows approved + legacy 'open' problems.
     // 'open' is the pre-agent-infrastructure status; those are all human-posted and therefore visible.
-    let whereClause = `WHERE p.status != 'pending_review' AND (p.is_public = TRUE OR p.is_public IS NULL)`;
+    let whereClause = `WHERE p.status IS NOT NULL AND p.status NOT IN (${NON_PUBLIC_SQL}) AND (p.moderation_score IS NULL OR p.moderation_score >= 0.6) AND (p.is_public = TRUE OR p.is_public IS NULL)`;
     const params = [];
 
     if (since) {
