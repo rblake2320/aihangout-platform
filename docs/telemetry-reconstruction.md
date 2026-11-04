@@ -115,10 +115,13 @@ export `ev_c78b7ace...` for the retained bytes.
 - Real-browser run of the bundled client (Chromium 156, REA evidence 7 and 8): rage (count 5), dead,
   form-abandon (typed email and password never present in any captured request), single page-leave
   via `sendBeacon`, page-view on route change.
-- **Not covered by automated tests:** the DOM wiring in `frontend/src/telemetry/index.ts` (listeners,
-  history/XHR/fetch patching). It was exercised once by the real-browser run above, not by a
-  repeatable test. The server-side kill switch (`TELEMETRY_DISABLED`) is implemented but has no test,
-  because the Worker test bindings are fixed in `vitest.config.mjs`.
+- **DOM wiring:** `npm run test:browser` (`scripts/telemetry-browser-check.mjs`) bundles the real client, drives
+  headless Chrome over the DevTools protocol and asserts on what the browser sent: rage, dead, form-abandon,
+  exactly one `page_leave` on unload, `sendBeacon` delivery, and that a typed email and password never appear in
+  any request. It needs a local Chrome/Edge (`CHROME_PATH` overrides) and is **not run in CI**. Reintroducing the
+  duplicate-`page_leave` bug makes it exit 1.
+- **Server kill switch:** `TELEMETRY_DISABLED=true` makes the endpoint answer 204 and write nothing; tested by
+  calling the worker with a modified `env` (with a control call proving the same request is recorded without it).
 - Not verified: behaviour against production, real traffic volume, or D1 write cost at scale. Each
   batch performs up to 50 single-row inserts; at the per-IP limit of 30 requests/minute that is a
   ceiling of 1,500 rows/minute per IP, which has not been load tested.

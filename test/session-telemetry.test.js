@@ -162,3 +162,25 @@ it('exposes duration buckets, median active time, frustration, errors and scroll
   expect(summary.failures).toBeDefined();
   expect(summary.logins).toBeDefined();
 });
+
+it('kill switch: with TELEMETRY_DISABLED=true the endpoint answers 204 and writes nothing', async () => {
+  const { createExecutionContext, waitOnExecutionContext } = await import('cloudflare:test');
+  const worker = (await import('../src/worker.js')).default;
+  const s = sid(40);
+  const call = async (extraEnv) => {
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request('https://aihangout.ai/api/analytics/batch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.150' },
+      body: JSON.stringify({ session_id: s, events: [ev('page_view')] })
+    }), { ...env, ...extraEnv }, ctx);
+    await waitOnExecutionContext(ctx);
+    return res;
+  };
+  const off = await call({ TELEMETRY_DISABLED: 'true' });
+  expect(off.status).toBe(204);
+  expect(await rows(s)).toHaveLength(0);
+  // Control: the same call without the switch records the event, so the 204 above is the switch and not a broken harness.
+  const on = await call({});
+  expect(on.status).toBe(200);
+  expect(await rows(s)).toHaveLength(1);
+});
