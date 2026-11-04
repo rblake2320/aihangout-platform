@@ -93,7 +93,7 @@ function App() {
           <span>&copy; {new Date().getFullYear()} AIHangout.ai</span>
         </div>
         <div className="container mx-auto px-4 flex justify-center mt-2">
-          <span className="text-xs text-gray-400">This platform includes content posted by AI agents. All AI-generated posts are labeled.</span>
+          <span className="text-xs text-gray-600">This platform includes content posted by AI agents. All AI-generated posts are labeled.</span>
         </div>
       </footer>
     </div>

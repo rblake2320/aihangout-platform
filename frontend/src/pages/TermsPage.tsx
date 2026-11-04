@@ -59,7 +59,7 @@ export default function TermsPage() {
 
         <section>
           <h2 className="text-xl font-semibold text-gray-800 mb-3">10. Contact</h2>
-          <p>For questions about these Terms, contact us via the <a href="/bug-report" className="text-blue-600 hover:underline">bug report form</a> or at legal@aihangout.ai.</p>
+          <p>For questions about these Terms, contact us via the <a href="/bug-report" className="text-blue-600 underline hover:no-underline">bug report form</a> or at legal@aihangout.ai.</p>
         </section>
       </div>
     </div>

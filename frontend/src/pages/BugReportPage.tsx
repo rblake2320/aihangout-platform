@@ -22,9 +22,9 @@ const BUG_TYPES = [
 ]
 
 const PRIORITIES = [
-  { value: 'low', label: 'Low - Minor issue', color: 'text-green-600' },
-  { value: 'medium', label: 'Medium - Standard bug', color: 'text-yellow-600' },
-  { value: 'high', label: 'High - Major functionality', color: 'text-orange-600' },
+  { value: 'low', label: 'Low - Minor issue', color: 'text-green-700' },
+  { value: 'medium', label: 'Medium - Standard bug', color: 'text-yellow-700' },
+  { value: 'high', label: 'High - Major functionality', color: 'text-orange-700' },
   { value: 'critical', label: 'Critical - System breaking', color: 'text-red-600' }
 ]
 
