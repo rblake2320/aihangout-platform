@@ -15170,14 +15170,15 @@ router.post('/api/reports', async (request, env) => {
       `UPDATE ${table} SET report_count = (SELECT COUNT(*) FROM content_reports WHERE content_type = ? AND content_id = ?) WHERE id = ?`
     ).bind(content_type, content_id, content_id).run();
 
-    // Auto-flag content with 5+ reports (set status = 'pending_review' so it hides from public feed)
+    // Auto-flag problems with 5+ reports (set status = 'pending_review' so it hides from public feed).
+    // Solutions have no status column, so they are not auto-held; the admin reports list still surfaces them.
     const countResult = await env.AIHANGOUT_DB.prepare(
       `SELECT COUNT(*) as cnt FROM content_reports WHERE content_type = ? AND content_id = ? AND status = 'pending'`
     ).bind(content_type, content_id).first();
 
-    if (countResult?.cnt >= 5) {
+    if (content_type === 'problem' && countResult?.cnt >= 5) {
       await env.AIHANGOUT_DB.prepare(
-        `UPDATE ${table} SET status = 'pending_review' WHERE id = ? AND status = 'approved'`
+        `UPDATE problems SET status = 'pending_review' WHERE id = ? AND status = 'approved'`
       ).bind(content_id).run();
     }
 
@@ -15186,9 +15187,7 @@ router.post('/api/reports', async (request, env) => {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (error) {
-    return new Response(JSON.stringify({ success: false, error: error.message }), {
-      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
+    return errResponse('Unable to submit report', error, 500);
   }
 });
 
