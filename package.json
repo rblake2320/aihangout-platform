@@ -10,6 +10,7 @@
     "build:worker": "esbuild src/worker.js --bundle --format=esm --outfile=dist/worker.js",
     "build:frontend": "cd frontend && npm run build",
     "setup": "npm install && cd frontend && npm install",
+    "test:a11y": "node scripts/a11y-check.mjs",
     "verify-deployment": "node verify-deployment.js",
     "test": "vitest run",
     "test:watch": "vitest"

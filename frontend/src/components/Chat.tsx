@@ -412,6 +412,7 @@ export default function Chat() {
       <div className="fixed bottom-4 right-4">
         <button
           disabled
+          aria-label="Chat (log in to use)"
           className="bg-gray-400 text-white p-3 rounded-full shadow-lg cursor-not-allowed"
         >
           <ChatBubbleLeftIcon className="w-6 h-6" />

@@ -202,7 +202,7 @@ export default function RegisterPage() {
             />
             <label htmlFor="acceptTos" className="ml-2 block text-sm text-gray-700">
               I agree to the{' '}
-              <Link to="/terms" target="_blank" className="text-blue-600 hover:underline">
+              <Link to="/terms" target="_blank" className="text-blue-600 underline hover:no-underline">
                 Terms of Service
               </Link>
               , including the license grant for content I contribute.
